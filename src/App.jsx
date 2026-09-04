@@ -579,8 +579,23 @@ export default function App() {
     if (!session) { setProfile(null); return; }
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
-      if (!cancelled) setProfile(data ? rowToProfile(data) : null);
+      try {
+        const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé lors du chargement du profil (le serveur ne répond pas).")), ms));
+        const fetchProfile = supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+        const { data, error } = await Promise.race([fetchProfile, timeout(15000)]);
+        if (cancelled) return;
+        if (error) throw error;
+        if (!data) {
+          setLoadError("Aucun profil trouvé pour ce compte. Contacte un Superviseur pour vérifier ta fiche dans la table 'profiles'.");
+          setLoading(false);
+          return;
+        }
+        setProfile(rowToProfile(data));
+      } catch (e) {
+        if (cancelled) return;
+        setLoadError(e?.message || "Erreur lors du chargement du profil.");
+        setLoading(false);
+      }
     })();
     return () => { cancelled = true; };
   }, [session]);
