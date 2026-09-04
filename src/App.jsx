@@ -58,6 +58,7 @@ const TYPE_META = {
   reception: { label: "Réception", color: C.success, sign: "+" },
   sortie: { label: "Sortie", color: C.danger, sign: "−" },
   sortie_camion: { label: "Sortie vers camion laitier", color: C.orange, sign: "−" },
+  retour_camion: { label: "Retour camion (cuve)", color: C.success, sign: "+" },
   ajustement: { label: "Ajustement d'inventaire", color: C.blue, sign: "±" },
 };
 
@@ -968,7 +969,7 @@ export default function App() {
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} settings={settings} stockOf={stockOf} />}
-          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} />}
+          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} session={session} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
       </div>
@@ -1244,15 +1245,16 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
   const [form, setForm] = useState({ siteId: sites[0]?.id || "", date: todayStr(), destinataire: "", camion: TRUCKS[0], destination: "", indexAvant: "", indexApres: "", commentaire: "" });
   const [tempC, setTempC] = useState("");
   const [densite, setDensite] = useState("");
+  const isReturn = tab === "retour_camion";
 
-  // La quantité sortie n'est pas saisie : elle est calculée depuis le compteur (Index après − Index avant).
+  // La quantité n'est pas saisie : elle est calculée depuis le compteur (Index après − Index avant).
   const quantity = form.indexAvant !== "" && form.indexApres !== "" ? Number(form.indexApres) - Number(form.indexAvant) : 0;
   const indexValid = form.indexAvant !== "" && form.indexApres !== "" && quantity > 0;
 
-  // Ventes et chargements camions partagent le même compteur sur certains sites (Prehomo, Okouma...) :
-  // on retrouve le dernier index enregistré (tous types de sortie confondus) pour repérer une rupture de séquence.
+  // Ventes, chargements et retours camions partagent le même compteur sur certains sites (Prehomo, Okouma...) :
+  // on retrouve le dernier index enregistré (tous types confondus) pour repérer une rupture de séquence.
   const lastIndexForSite = movements
-    .filter((m) => m.siteId === form.siteId && (m.type === "sortie" || m.type === "sortie_camion") && m.indexApres !== undefined)
+    .filter((m) => m.siteId === form.siteId && (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion") && m.indexApres !== undefined)
     .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
     .slice(-1)[0]?.indexApres;
   const indexMismatch = lastIndexForSite !== undefined && form.indexAvant !== "" && Number(form.indexAvant) !== lastIndexForSite;
@@ -1269,7 +1271,7 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
       ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfResult.densite15, vcf: vcfResult.vcf, volumeCorrige15: vcfResult.volume15 }
       : {};
     const base = {
-      siteId: form.siteId, type: tab, date: form.date, quantity, delta: -quantity, commentaire: form.commentaire,
+      siteId: form.siteId, type: tab, date: form.date, quantity, delta: isReturn ? quantity : -quantity, commentaire: form.commentaire,
       indexAvant: Number(form.indexAvant), indexApres: Number(form.indexApres), ...extra,
     };
     const payload = tab === "sortie" ? { ...base, destinataire: form.destinataire } : { ...base, camion: form.camion, destination: form.destination };
@@ -1278,17 +1280,18 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
     setTempC(""); setDensite("");
   };
 
-  const list = movements.filter((m) => m.type === "sortie" || m.type === "sortie_camion").filter((m) => filterSite === "all" || m.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const list = movements.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").filter((m) => filterSite === "all" || m.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canWrite && (
         <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
             <button className={`somip-tab ${tab === "sortie" ? "active" : ""}`} onClick={() => setTab("sortie")}>Sortie standard</button>
             <button className={`somip-tab ${tab === "sortie_camion" ? "active" : ""}`} onClick={() => setTab("sortie_camion")}>Vers camion laitier</button>
+            <button className={`somip-tab ${tab === "retour_camion" ? "active" : ""}`} onClick={() => setTab("retour_camion")}>Retour camion (cuve)</button>
           </div>
-          <Field label="Site source">
+          <Field label="Site">
             <select className="somip-select" value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
               {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
@@ -1305,8 +1308,8 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
             </p>
           )}
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Quantité sortie (calculée)</span>
-            <span className="somip-mono" style={{ fontWeight: 700, color: form.indexAvant !== "" && form.indexApres !== "" && quantity <= 0 ? C.danger : C.orange }}>{fmt(quantity)} L</span>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>{isReturn ? "Quantité retournée (calculée)" : "Quantité sortie (calculée)"}</span>
+            <span className="somip-mono" style={{ fontWeight: 700, color: form.indexAvant !== "" && form.indexApres !== "" && quantity <= 0 ? C.danger : (isReturn ? C.success : C.orange) }}>{fmt(quantity)} L</span>
           </div>
           {form.indexAvant !== "" && form.indexApres !== "" && quantity <= 0 && (
             <p style={{ margin: "-8px 0 12px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>
@@ -1320,20 +1323,22 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
                   {TRUCKS.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </Field>
-              <Field label="Destination (carrière / engin)"><input className="somip-input" value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder="Ex : Carrière Nord" /></Field>
+              <Field label={isReturn ? "Provenance / motif du retour" : "Destination (carrière / engin)"}>
+                <input className="somip-input" value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder={isReturn ? "Ex : Reliquat Carrière Nord" : "Ex : Carrière Nord"} />
+              </Field>
             </>
           )}
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
           <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
-          <button className="somip-btn somip-btn-secondary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!indexValid}>
-            <Plus size={15} /> Enregistrer la sortie
+          <button className={`somip-btn ${isReturn ? "somip-btn-primary" : "somip-btn-secondary"}`} style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!indexValid}>
+            <Plus size={15} /> {isReturn ? "Enregistrer le retour" : "Enregistrer la sortie"}
           </button>
         </div>
       )}
 
       <div className="somip-panel" style={{ flex: "2 1 480px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Historique des sorties</h3>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Historique des sorties &amp; retours</h3>
           <select className="somip-select" style={{ width: 200 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
             <option value="all">Tous les sites</option>
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -1347,15 +1352,16 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
               {list.map((m) => {
                 const site = sites.find((s) => s.id === m.siteId);
                 const meta = TYPE_META[m.type];
-                const detail = m.type === "sortie" ? (m.destinataire || "—") : `${m.camion} → ${m.destination || "—"}`;
+                const typeLabel = m.type === "sortie" ? "Standard" : m.type === "sortie_camion" ? "Camion" : "Retour";
+                const detail = m.type === "sortie" ? (m.destinataire || "—") : `${m.camion} ${m.type === "retour_camion" ? "←" : "→"} ${m.destination || "—"}`;
                 return (
                   <tr key={m.id}>
                     <td className="somip-mono">{m.date}</td>
                     <td>{site?.name}{m.isDemo && <DemoBadge />}</td>
-                    <td><Badge color={meta.color}>{m.type === "sortie" ? "Standard" : "Camion"}</Badge></td>
+                    <td><Badge color={meta.color}>{typeLabel}</Badge></td>
                     <td style={{ color: C.sub }}>{detail}</td>
                     <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.indexAvant !== undefined && m.indexApres !== undefined ? `${fmt(m.indexAvant)} → ${fmt(m.indexApres)}` : "—"}</td>
-                    <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>− {fmt(m.quantity)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>{meta.sign} {fmt(m.quantity)} L</td>
                     <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
                     {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>}
                   </tr>
@@ -1664,18 +1670,19 @@ function DailyReport({ sites, movements, inventaires }) {
     const stockDebut = stockBeforeDate(s, movements, date);
     const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
     const receptions = sumQty(dayMovs, ["reception"]);
+    const retours = sumQty(dayMovs, ["retour_camion"]);
     const sorties = sumQty(dayMovs, ["sortie", "sortie_camion"]);
     const ajustement = dayMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
-    const stockFin = stockDebut + receptions - sorties + ajustement;
+    const stockFin = stockDebut + receptions + retours - sorties + ajustement;
     const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
-    return { site: s, stockDebut, receptions, sorties, ajustement, stockFin, inv };
+    return { site: s, stockDebut, receptions, retours, sorties, ajustement, stockFin, inv };
   });
-  const totals = rows.reduce((a, r) => ({ stockDebut: a.stockDebut + r.stockDebut, receptions: a.receptions + r.receptions, sorties: a.sorties + r.sorties, stockFin: a.stockFin + r.stockFin }), { stockDebut: 0, receptions: 0, sorties: 0, stockFin: 0 });
+  const totals = rows.reduce((a, r) => ({ stockDebut: a.stockDebut + r.stockDebut, receptions: a.receptions + r.receptions, retours: a.retours + r.retours, sorties: a.sorties + r.sorties, stockFin: a.stockFin + r.stockFin }), { stockDebut: 0, receptions: 0, retours: 0, sorties: 0, stockFin: 0 });
 
   const doExcel = () => exportToExcel(`SOMIP_Rapport_Journalier_${date}.xlsx`, [{
     name: "Journalier", rows: rows.map((r) => ({
       Site: r.site.name, "Stock début (L)": Math.round(r.stockDebut), "Réceptions (L)": Math.round(r.receptions),
-      "Sorties (L)": Math.round(r.sorties), "Ajustement inventaire (L)": Math.round(r.ajustement), "Stock fin (L)": Math.round(r.stockFin),
+      "Retours camions (L)": Math.round(r.retours), "Sorties (L)": Math.round(r.sorties), "Ajustement inventaire (L)": Math.round(r.ajustement), "Stock fin (L)": Math.round(r.stockFin),
       "Inventaire du jour": r.inv ? `${NATURE_META[r.inv.nature].label} ${r.inv.ecart >= 0 ? "+" : ""}${Math.round(r.inv.ecart)} L` : "",
     })),
   }]);
@@ -1690,13 +1697,14 @@ function DailyReport({ sites, movements, inventaires }) {
         <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réceptions</th><th style={{ textAlign: "right" }}>Sorties</th><th style={{ textAlign: "right" }}>Stock fin</th><th>Inventaire du jour</th></tr></thead>
+            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réceptions</th><th style={{ textAlign: "right" }}>Retours camions</th><th style={{ textAlign: "right" }}>Sorties</th><th style={{ textAlign: "right" }}>Stock fin</th><th>Inventaire du jour</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{r.receptions ? `+${fmt(r.receptions)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{r.retours ? `+${fmt(r.retours)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>{r.sorties ? `−${fmt(r.sorties)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockFin)} L</td>
                   <td>{r.inv ? <Badge color={NATURE_META[r.inv.nature].color}>{NATURE_META[r.inv.nature].label} {r.inv.ecart >= 0 ? "+" : ""}{fmt(r.inv.ecart)} L</Badge> : <span style={{ color: C.sub }}>—</span>}</td>
@@ -1706,6 +1714,7 @@ function DailyReport({ sites, movements, inventaires }) {
                 <td style={{ fontWeight: 700 }}>Total réseau</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totals.stockDebut)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(totals.receptions)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(totals.retours)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.danger }}>−{fmt(totals.sorties)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totals.stockFin)} L</td>
                 <td></td>
@@ -1715,13 +1724,14 @@ function DailyReport({ sites, movements, inventaires }) {
         </div>
         <div style={{ marginTop: 20, height: 240 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={rows.map((r) => ({ code: r.site.code, Réceptions: r.receptions, Sorties: r.sorties }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+            <BarChart data={rows.map((r) => ({ code: r.site.code, Réceptions: r.receptions, "Retours": r.retours, Sorties: r.sorties }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
               <XAxis dataKey="code" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
               <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="Réceptions" fill={C.success} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Retours" fill={C.blue} radius={[4, 4, 0, 0]} />
               <Bar dataKey="Sorties" fill={C.danger} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -1739,17 +1749,18 @@ function DecadeReport({ sites, movements, inventaires }) {
     const stockDebut = stockBeforeDate(s, movements, bounds.start);
     const rangeMovs = movementsInRange(movements, s.id, bounds.start, bounds.end);
     const receptions = sumQty(rangeMovs, ["reception"]);
+    const retours = sumQty(rangeMovs, ["retour_camion"]);
     const sorties = sumQty(rangeMovs, ["sortie", "sortie_camion"]);
     const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
-    const stockFin = stockDebut + receptions - sorties + ajustement;
+    const stockFin = stockDebut + receptions + retours - sorties + ajustement;
     const invCount = inventaires.filter((i) => i.siteId === s.id && i.date >= bounds.start && i.date <= bounds.end).length;
-    return { site: s, stockDebut, receptions, sorties, stockFin, invCount };
+    return { site: s, stockDebut, receptions, retours, sorties, stockFin, invCount };
   });
 
   const doExcel = () => exportToExcel(`SOMIP_Rapport_Decadaire_${bounds.start}_${bounds.end}.xlsx`, [{
     name: "Décadaire", rows: rows.map((r) => ({
       Site: r.site.name, "Stock début (L)": Math.round(r.stockDebut), "Réceptions (L)": Math.round(r.receptions),
-      "Sorties (L)": Math.round(r.sorties), "Stock fin (L)": Math.round(r.stockFin), "Inventaires réalisés": r.invCount,
+      "Retours camions (L)": Math.round(r.retours), "Sorties (L)": Math.round(r.sorties), "Stock fin (L)": Math.round(r.stockFin), "Inventaires réalisés": r.invCount,
     })),
   }]);
 
@@ -1763,13 +1774,14 @@ function DecadeReport({ sites, movements, inventaires }) {
         <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début décade</th><th style={{ textAlign: "right" }}>Réceptions</th><th style={{ textAlign: "right" }}>Sorties</th><th style={{ textAlign: "right" }}>Stock fin décade</th><th style={{ textAlign: "right" }}>Inventaires</th></tr></thead>
+            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début décade</th><th style={{ textAlign: "right" }}>Réceptions</th><th style={{ textAlign: "right" }}>Retours camions</th><th style={{ textAlign: "right" }}>Sorties</th><th style={{ textAlign: "right" }}>Stock fin décade</th><th style={{ textAlign: "right" }}>Inventaires</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.receptions)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.retours)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>−{fmt(r.sorties)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockFin)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{r.invCount}</td>
@@ -1780,13 +1792,14 @@ function DecadeReport({ sites, movements, inventaires }) {
         </div>
         <div style={{ marginTop: 20, height: 240 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={rows.map((r) => ({ code: r.site.code, Réceptions: r.receptions, Sorties: r.sorties }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+            <BarChart data={rows.map((r) => ({ code: r.site.code, Réceptions: r.receptions, Retours: r.retours, Sorties: r.sorties }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
               <XAxis dataKey="code" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
               <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
               <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="Réceptions" fill={C.success} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Retours" fill={C.blue} radius={[4, 4, 0, 0]} />
               <Bar dataKey="Sorties" fill={C.danger} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
@@ -1804,19 +1817,20 @@ function MonthlyReport({ sites, movements, inventaires, settings }) {
     const stockDebut = stockBeforeDate(s, movements, bounds.start);
     const rangeMovs = movementsInRange(movements, s.id, bounds.start, bounds.end);
     const receptions = sumQty(rangeMovs, ["reception"]);
+    const retours = sumQty(rangeMovs, ["retour_camion"]);
     const sorties = sumQty(rangeMovs, ["sortie", "sortie_camion"]);
     const stockFin = stockThroughDate(s, movements, bounds.end);
     const monthInv = inventaires.filter((i) => i.siteId === s.id && i.date >= bounds.start && i.date <= bounds.end);
     const ecartCumule = monthInv.reduce((a, i) => a + i.ecart, 0);
     const pertes = monthInv.filter((i) => i.nature === "perte");
     const tauxMoyen = pertes.length ? pertes.reduce((a, i) => a + i.tauxFreinte, 0) / pertes.length : null;
-    return { site: s, stockDebut, receptions, sorties, stockFin, nbInv: monthInv.length, ecartCumule, tauxMoyen };
+    return { site: s, stockDebut, receptions, retours, sorties, stockFin, nbInv: monthInv.length, ecartCumule, tauxMoyen };
   });
 
   const doExcel = () => exportToExcel(`SOMIP_Rapport_Mensuel_${month}.xlsx`, [{
     name: "Mensuel", rows: rows.map((r) => ({
       Site: r.site.name, "Stock début mois (L)": Math.round(r.stockDebut), "Réceptions (L)": Math.round(r.receptions),
-      "Sorties (L)": Math.round(r.sorties), "Stock fin mois (L)": Math.round(r.stockFin), "Nb inventaires": r.nbInv,
+      "Retours camions (L)": Math.round(r.retours), "Sorties (L)": Math.round(r.sorties), "Stock fin mois (L)": Math.round(r.stockFin), "Nb inventaires": r.nbInv,
       "Écart cumulé (L)": Math.round(r.ecartCumule), "Taux de freinte moyen (‰)": r.tauxMoyen !== null ? r.tauxMoyen.toFixed(2) : "",
     })),
   }]);
@@ -1831,13 +1845,14 @@ function MonthlyReport({ sites, movements, inventaires, settings }) {
         <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réceptions</th><th style={{ textAlign: "right" }}>Sorties</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Nb inv.</th><th style={{ textAlign: "right" }}>Écart cumulé</th><th style={{ textAlign: "right" }}>Freinte moy.</th></tr></thead>
+            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réceptions</th><th style={{ textAlign: "right" }}>Retours camions</th><th style={{ textAlign: "right" }}>Sorties</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Nb inv.</th><th style={{ textAlign: "right" }}>Écart cumulé</th><th style={{ textAlign: "right" }}>Freinte moy.</th></tr></thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.receptions)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.retours)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>−{fmt(r.sorties)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockFin)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{r.nbInv}</td>
@@ -1874,22 +1889,23 @@ function StockStatementReport({ sites, movements, inventaires }) {
   const rows = sites.map((s) => {
     const stockDebut = stockBeforeDate(s, movements, date);
     const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
-    // Ventes et chargements camions partagent le même compteur physique : la séquence
-    // d'index (avant de la 1ère opération -> après la dernière) est calculée sur les DEUX
+    // Ventes, chargements et retours camions partagent le même compteur physique : la séquence
+    // d'index (avant de la 1ère opération -> après la dernière) est calculée sur les TROIS
     // types combinés, mais les volumes sont distingués dans les totaux.
-    const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+    const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
     const reception = sumQty(dayMovs, ["reception"]);
     const ventes = sumQty(dayMovs, ["sortie"]);
     const chargementsCamions = sumQty(dayMovs, ["sortie_camion"]);
+    const retourCamions = sumQty(dayMovs, ["retour_camion"]);
     const sorties = ventes + chargementsCamions;
     const ajustement = dayMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
-    const stockTheorique = stockDebut + reception - sorties + ajustement;
+    const stockTheorique = stockDebut + reception + retourCamions - sorties + ajustement;
     const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
     const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
     const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
     const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
     return {
-      site: s, stockDebut, reception, ventes, chargementsCamions, sortIndexAvant, sortIndexApres, stockTheorique,
+      site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique,
       stockPhysique: inv ? inv.stockPhysique : null, nature: inv ? inv.nature : null, ecart: inv ? inv.ecart : null,
     };
   });
@@ -1897,7 +1913,7 @@ function StockStatementReport({ sites, movements, inventaires }) {
   const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_${date}.xlsx`, [{
     name: "Etat journalier", rows: rows.map((r) => ({
       Site: r.site.name, "Stock début (L)": Math.round(r.stockDebut), "Réception (L)": Math.round(r.reception),
-      "Ventes (L)": Math.round(r.ventes), "Chargement camions (L)": Math.round(r.chargementsCamions),
+      "Ventes (L)": Math.round(r.ventes), "Chargement camions (L)": Math.round(r.chargementsCamions), "Retour camions (L)": Math.round(r.retourCamions),
       "Index avant": r.sortIndexAvant ?? "", "Index après": r.sortIndexApres ?? "",
       "Stock théorique (L)": Math.round(r.stockTheorique),
       "Stock physique (L)": r.stockPhysique !== null ? Math.round(r.stockPhysique) : "",
@@ -1920,6 +1936,7 @@ function StockStatementReport({ sites, movements, inventaires }) {
                 <th>Site</th><th style={{ textAlign: "right" }}>Stock début</th>
                 <th style={{ textAlign: "right" }}>Réception</th>
                 <th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Chargement camions</th>
+                <th style={{ textAlign: "right" }}>Retour camions</th>
                 <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock physique</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
@@ -1933,6 +1950,7 @@ function StockStatementReport({ sites, movements, inventaires }) {
                   <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.danger : C.sub }}>{r.ventes ? `−${fmt(r.ventes)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexApres !== null ? fmt(r.sortIndexApres) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
@@ -1947,7 +1965,7 @@ function StockStatementReport({ sites, movements, inventaires }) {
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Stock physique et Gain/Perte ne s'affichent que pour les sites ayant un inventaire enregistré à cette date. Ventes et chargements camions utilisant souvent le même compteur (ex. Prehomo, Okouma), l'Index avant/après reflète la séquence complète des deux types d'opérations ce jour-là (index avant de la 1ère opération, index après de la dernière), tandis que les volumes sont distingués colonne par colonne.
+          Stock physique et Gain/Perte ne s'affichent que pour les sites ayant un inventaire enregistré à cette date. Ventes, chargements et retours camions utilisant souvent le même compteur (ex. Prehomo, Okouma), l'Index avant/après reflète la séquence complète des trois types d'opérations ce jour-là (index avant de la 1ère opération, index après de la dernière), tandis que les volumes sont distingués colonne par colonne.
         </p>
       </div>
     </div>
@@ -2086,20 +2104,45 @@ function LossGainReport({ sites, inventaires }) {
 /* ------------------------------------------------------------------ */
 /* Utilisateurs                                                          */
 /* ------------------------------------------------------------------ */
-function UsersView({ profiles, updateUserRole }) {
+function UsersView({ profiles, updateUserRole, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
+  const [form, setForm] = useState({ fullName: "", email: "", password: "", role: "lecture" });
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState(null);
+  const [createMsg, setCreateMsg] = useState(null);
 
   const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); };
   const saveEdit = () => { updateUserRole(editingId, roleDraft); setEditingId(null); };
+
+  const createAccount = async () => {
+    setCreateErr(null); setCreateMsg(null);
+    if (!form.fullName.trim() || !form.email.trim() || !form.password) { setCreateErr("Tous les champs sont requis."); return; }
+    if (form.password.length < 6) { setCreateErr("Le mot de passe doit contenir au moins 6 caractères."); return; }
+    setCreating(true);
+    try {
+      const res = await fetch("/api/create-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
+        body: JSON.stringify({ email: form.email.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erreur lors de la création du compte.");
+      setCreateMsg(`Compte créé pour ${form.fullName.trim()} (${ROLE_LABELS[form.role]}). Communique-lui l'e-mail et le mot de passe.`);
+      setForm({ fullName: "", email: "", password: "", role: "lecture" });
+    } catch (e) {
+      setCreateErr(e.message || "Erreur lors de la création du compte.");
+    } finally {
+      setCreating(false);
+    }
+  };
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div className="somip-panel" style={{ flex: "1 1 520px", padding: 18 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Comptes ({profiles.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>
-          Les comptes sont créés par chacun via l'écran "Créer un compte". Un nouveau compte n'a que des droits de consultation
-          par défaut — attribue-lui un rôle ici pour lui donner accès à la saisie ou à la gestion complète.
+          Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle ici à tout moment.
         </p>
         <table className="somip-table">
           <thead><tr><th>Nom</th><th>Rôle</th><th></th></tr></thead>
@@ -2138,11 +2181,23 @@ function UsersView({ profiles, updateUserRole }) {
         </table>
       </div>
 
-      <div className="somip-panel" style={{ flex: "1 1 260px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Ajouter une personne</h3>
-        <p style={{ margin: 0, fontSize: 12.5, color: C.sub }}>
-          Il n'y a pas de création de compte depuis cette page : demande à la personne concernée d'ouvrir l'application et de
-          cliquer sur "Créer un compte" avec son propre e-mail. Son nom apparaîtra ensuite ici pour que tu lui attribues un rôle.
+      <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Créer un compte</h3>
+        <Field label="Nom complet"><input className="somip-input" value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} placeholder="Ex : Jean Mabiala" /></Field>
+        <Field label="E-mail"><input type="email" className="somip-input" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="prenom.nom@somip-sarl.ga" /></Field>
+        <Field label="Mot de passe provisoire"><input type="text" className="somip-input" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Au moins 6 caractères" /></Field>
+        <Field label="Rôle">
+          <select className="somip-select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+            {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+          </select>
+        </Field>
+        {createErr && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 10px" }}>{createErr}</p>}
+        {createMsg && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 10px" }}>{createMsg}</p>}
+        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={createAccount} disabled={creating}>
+          <Plus size={15} /> {creating ? "Création..." : "Créer le compte"}
+        </button>
+        <p style={{ marginTop: 10, fontSize: 11, color: C.sub }}>
+          La personne peut se connecter immédiatement avec cet e-mail et ce mot de passe. Communique-les-lui directement.
         </p>
       </div>
     </div>
