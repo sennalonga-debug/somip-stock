@@ -3,12 +3,13 @@ import {
   LayoutDashboard, Factory, ArrowDownCircle, ArrowUpCircle, ClipboardList,
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
-  FileBarChart, Download, Printer, TrendingDown, TrendingUp,
+  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine, Legend,
 } from "recharts";
+import { supabase, SUPABASE_CONFIGURED } from "./supabaseClient.js";
 
 /* ------------------------------------------------------------------ */
 /* Design tokens                                                       */
@@ -49,12 +50,6 @@ const MOVEMENTS_SEED = [
   { id: "m3", siteId: "prehomo", type: "sortie", date: "2026-09-01", quantity: 2600, delta: -2600, destinataire: "Atelier mécanique", commentaire: "", isDemo: true },
   { id: "m4", siteId: "lipaka", type: "reception", date: "2026-09-02", quantity: 8000, delta: 8000, ref: "BL-2903", commentaire: "", isDemo: true },
   { id: "m5", siteId: "traction", type: "sortie", date: "2026-09-02", quantity: 1800, delta: -1800, destinataire: "Locomotive 12", commentaire: "", isDemo: true },
-];
-
-const ROLES = ["Superviseur", "Opérateur", "Chauffeur", "Lecture"];
-const USERS_SEED = [
-  { id: "u_albain", name: "Albain Longa", role: "Superviseur" },
-  { id: "u_demo", name: "Utilisateur Démo", role: "Lecture" },
 ];
 
 const SETTINGS_SEED = { objectifFreinte: 3 };
@@ -221,51 +216,77 @@ function ReportToolbar({ onExcel, onPrint }) {
 
 
 /* ------------------------------------------------------------------ */
-/* Persistent storage layer                                             */
-/* Two modes:                                                           */
-/*  - "claude"     : window.storage (shared key-value store, only       */
-/*                    available when this component runs inside a       */
-/*                    Claude.ai artifact).                              */
-/*  - "local"      : browser localStorage (used automatically once      */
-/*                    this app is hosted on its own — e.g. Vercel/      */
-/*                    Netlify/VPS). Persistence is then per-browser,    */
-/*                    NOT shared between different users/devices,       */
-/*                    since there is no backend server here. Wiring a   */
-/*                    real shared database (e.g. via a small API) is    */
-/*                    the natural next step for true multi-device       */
-/*                    multi-user persistence in production.             */
+/* Rôles & permissions                                                  */
 /* ------------------------------------------------------------------ */
-const STORAGE_MODE = typeof window !== "undefined" && window.storage ? "claude" : "local";
-const STORAGE_AVAILABLE = typeof window !== "undefined" && (!!window.storage || !!window.localStorage);
-const KEY = (name) => `somip_${name}`;
-
-async function loadRaw(name) {
-  if (!STORAGE_AVAILABLE) return null;
-  try {
-    if (STORAGE_MODE === "claude") {
-      const res = await window.storage.get(KEY(name), true);
-      return res && res.value ? JSON.parse(res.value) : null;
-    }
-    const raw = window.localStorage.getItem(KEY(name));
-    return raw ? JSON.parse(raw) : null;
-  } catch (e) {
-    return null; // key not found yet, or transient error — caller decides the default
-  }
+const ROLE_VALUES = ["superviseur", "operateur", "chauffeur", "lecture"];
+const ROLE_LABELS = { superviseur: "Superviseur", operateur: "Opérateur", chauffeur: "Chauffeur", lecture: "Lecture" };
+// canManage : sites, utilisateurs, réglages, modification/suppression, historique.
+// canWrite  : peut ajouter des réceptions/sorties/inventaires (saisie).
+function permsFor(role) {
+  return {
+    canManage: role === "superviseur",
+    canWrite: role === "superviseur" || role === "operateur" || role === "chauffeur",
+  };
 }
 
-async function saveRaw(name, value) {
-  if (!STORAGE_AVAILABLE) return false;
-  try {
-    if (STORAGE_MODE === "claude") {
-      const res = await window.storage.set(KEY(name), JSON.stringify(value), true);
-      return !!res;
-    }
-    window.localStorage.setItem(KEY(name), JSON.stringify(value));
-    return true;
-  } catch (e) {
-    return false;
-  }
+/* ------------------------------------------------------------------ */
+/* Base de données partagée (Supabase) — conversion lignes <-> objets  */
+/* ------------------------------------------------------------------ */
+const numOrUndef = (v) => (v === null || v === undefined ? undefined : Number(v));
+
+const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial) });
+const siteToRow = (s) => ({ id: s.id, code: s.code, name: s.name, capacity: s.capacity, stock_initial: s.stockInitial });
+
+const rowToMovement = (r) => ({
+  id: r.id, siteId: r.site_id, type: r.type, date: r.date, quantity: Number(r.quantity), delta: Number(r.delta),
+  ref: r.ref || undefined, commentaire: r.commentaire || "", destinataire: r.destinataire || undefined,
+  camion: r.camion || undefined, destination: r.destination || undefined, isDemo: !!r.is_demo,
+  temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee),
+  densite15: numOrUndef(r.densite15), vcf: numOrUndef(r.vcf), volumeCorrige15: numOrUndef(r.volume_corrige15),
+  indexAvant: numOrUndef(r.index_avant), indexApres: numOrUndef(r.index_apres),
+  createdBy: r.created_by, createdAt: r.created_at,
+});
+const movementToRow = (m) => ({
+  site_id: m.siteId, type: m.type, date: m.date, quantity: m.quantity, delta: m.delta,
+  ref: m.ref ?? null, commentaire: m.commentaire ?? null, destinataire: m.destinataire ?? null,
+  camion: m.camion ?? null, destination: m.destination ?? null, is_demo: !!m.isDemo,
+  temperature_c: m.temperatureC ?? null, densite_observee: m.densiteObservee ?? null,
+  densite15: m.densite15 ?? null, vcf: m.vcf ?? null, volume_corrige15: m.volumeCorrige15 ?? null,
+  index_avant: m.indexAvant ?? null, index_apres: m.indexApres ?? null,
+  created_by: m.createdBy ?? null,
+});
+
+const rowToInventaire = (r) => ({
+  id: r.id, siteId: r.site_id, date: r.date, stockPhysique: Number(r.stock_physique), commentaire: r.commentaire || "",
+  basisEcart: r.basis_ecart, stockTheoriqueAmbiant: numOrUndef(r.stock_theorique_ambiant), stockTheorique15: numOrUndef(r.stock_theorique15),
+  stockTheorique: numOrUndef(r.stock_theorique), stockPhysiqueUsed: numOrUndef(r.stock_physique_used),
+  ecart: Number(r.ecart), ecartPermille: Number(r.ecart_permille), nature: r.nature, tauxFreinte: Number(r.taux_freinte),
+  objectifUtilise: numOrUndef(r.objectif_utilise), conformite: r.conformite, adjustmentId: r.adjustment_id,
+  temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee), densite15: numOrUndef(r.densite15),
+  vcf: numOrUndef(r.vcf), stockPhysique15: numOrUndef(r.stock_physique15), createdBy: r.created_by, createdAt: r.created_at,
+});
+const inventaireToRow = (i) => ({
+  site_id: i.siteId, date: i.date, stock_physique: i.stockPhysique, commentaire: i.commentaire ?? null,
+  basis_ecart: i.basisEcart, stock_theorique_ambiant: i.stockTheoriqueAmbiant ?? null, stock_theorique15: i.stockTheorique15 ?? null,
+  stock_theorique: i.stockTheorique ?? null, stock_physique_used: i.stockPhysiqueUsed ?? null, ecart: i.ecart, ecart_permille: i.ecartPermille,
+  nature: i.nature, taux_freinte: i.tauxFreinte, objectif_utilise: i.objectifUtilise ?? null, conformite: i.conformite,
+  adjustment_id: i.adjustmentId ?? null, temperature_c: i.temperatureC ?? null, densite_observee: i.densiteObservee ?? null,
+  densite15: i.densite15 ?? null, vcf: i.vcf ?? null, stock_physique15: i.stockPhysique15 ?? null, created_by: i.createdBy ?? null,
+});
+
+const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
+const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role });
+
+async function fetchTable(table, mapper, orderCol, ascending) {
+  if (!SUPABASE_CONFIGURED) return [];
+  let q = supabase.from(table).select("*");
+  if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
+  const { data, error } = await q;
+  if (error) return [];
+  return (data || []).map(mapper);
 }
+
+
 
 /* ------------------------------------------------------------------ */
 /* Small reusable UI                                                    */
@@ -438,20 +459,100 @@ function SyncIndicator({ status, lastSync }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Écran de connexion / inscription                                     */
+/* ------------------------------------------------------------------ */
+function AuthScreen() {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setError(""); setInfo("");
+    if (!email || !password) { setError("Adresse e-mail et mot de passe requis."); return; }
+    setBusy(true);
+    if (mode === "login") {
+      const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+      if (err) setError("Connexion impossible : " + err.message);
+    } else {
+      const { error: err } = await supabase.auth.signUp({
+        email, password, options: { data: { full_name: fullName || email } },
+      });
+      if (err) setError("Inscription impossible : " + err.message);
+      else setInfo("Compte créé. Un Superviseur doit maintenant t'attribuer un rôle depuis la page Utilisateurs avant que tu puisses saisir des données. Connecte-toi dès que c'est fait.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div style={{ minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: C.bg, padding: 24, fontFamily: "'Inter', -apple-system, sans-serif" }}>
+      <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: 30, width: "100%", maxWidth: 380 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 22 }}>
+          <div style={{ width: 34, height: 34, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Fuel size={18} color="#fff" />
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>SOMIP</div>
+            <div style={{ color: C.sub, fontSize: 11 }}>Stock Gasoil</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+          <button className={`somip-tab ${mode === "login" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("login"); setError(""); setInfo(""); }}>Connexion</button>
+          <button className={`somip-tab ${mode === "signup" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("signup"); setError(""); setInfo(""); }}>Créer un compte</button>
+        </div>
+
+        {mode === "signup" && (
+          <Field label="Nom complet">
+            <input className="somip-input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Ex : Jean Mabiala" />
+          </Field>
+        )}
+        <Field label="E-mail">
+          <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="prenom.nom@somip-sarl.ga" />
+        </Field>
+        <Field label="Mot de passe">
+          <input type="password" className="somip-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+        </Field>
+
+        {error && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 12px" }}>{error}</p>}
+        {info && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 12px" }}>{info}</p>}
+
+        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={busy}>
+          {mode === "login" ? <Lock size={15} /> : <Mail size={15} />}
+          {mode === "login" ? "Se connecter" : "Créer mon compte"}
+        </button>
+
+        {mode === "signup" && (
+          <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+            Par défaut, un nouveau compte n'a que des droits de consultation. Un Superviseur doit t'accorder le droit de saisie depuis la page Utilisateurs.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* App                                                                   */
 /* ------------------------------------------------------------------ */
 export default function App() {
+  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+
   const [loading, setLoading] = useState(true);
   const [sites, setSites] = useState([]);
   const [movements, setMovements] = useState([]);
   const [inventaires, setInventaires] = useState([]);
-  const [users, setUsers] = useState([]);
+  const [profiles, setProfiles] = useState([]);
   const [audit, setAudit] = useState([]);
   const [settings, setSettings] = useState(SETTINGS_SEED);
-  const [currentUserId, setCurrentUserId] = useState(null);
   const [view, setView] = useState("dashboard");
   const [notice, setNotice] = useState(null);
-  const [syncStatus, setSyncStatus] = useState(STORAGE_AVAILABLE ? "ok" : "unavailable");
+  const [syncStatus, setSyncStatus] = useState(SUPABASE_CONFIGURED ? "ok" : "unavailable");
   const [lastSync, setLastSync] = useState(null);
   const noticeTimer = useRef(null);
 
@@ -461,146 +562,163 @@ export default function App() {
     noticeTimer.current = setTimeout(() => setNotice(null), 3000);
   };
 
-  const currentUserName = users.find((u) => u.id === currentUserId)?.name || "Utilisateur inconnu";
-
-  /* ---- initial load ---- */
+  /* ---- authentification ---- */
   useEffect(() => {
+    if (!SUPABASE_CONFIGURED) { setAuthLoading(false); return; }
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) { setProfile(null); return; }
     let cancelled = false;
     (async () => {
-      const [sitesData, movementsData, inventairesData, usersData, auditData, settingsData] = await Promise.all([
-        loadRaw("sites"), loadRaw("movements"), loadRaw("inventaires"), loadRaw("users"), loadRaw("audit"), loadRaw("settings"),
+      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      if (!cancelled) setProfile(data ? rowToProfile(data) : null);
+    })();
+    return () => { cancelled = true; };
+  }, [session]);
+
+  const currentUserName = profile?.name || session?.user?.email || "Utilisateur";
+  const currentRole = profile?.role || "lecture";
+  const perms = permsFor(currentRole);
+  const signOut = () => supabase.auth.signOut();
+
+  /* ---- chargement initial des données (une fois connecté) ---- */
+  useEffect(() => {
+    if (!session || !profile) return;
+    let cancelled = false;
+    (async () => {
+      const [sitesData, movementsData, inventairesData, profilesData, auditData] = await Promise.all([
+        fetchTable("sites", rowToSite),
+        fetchTable("movements", rowToMovement, "date"),
+        fetchTable("inventaires", rowToInventaire, "date"),
+        fetchTable("profiles", rowToProfile),
+        fetchTable("audit", rowToAudit, "ts", false),
       ]);
+      const { data: settingsRow } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
       if (cancelled) return;
-      const finalSites = sitesData ?? SITES_SEED;
-      const finalMovements = movementsData ?? MOVEMENTS_SEED;
-      const finalInventaires = inventairesData ?? [];
-      const finalUsers = usersData ?? USERS_SEED;
-      const finalAudit = auditData ?? [];
-      const finalSettings = settingsData ?? SETTINGS_SEED;
-      setSites(finalSites);
-      setMovements(finalMovements);
-      setInventaires(finalInventaires);
-      setUsers(finalUsers);
-      setAudit(finalAudit);
-      setSettings(finalSettings);
-      setCurrentUserId(finalUsers[0]?.id || null);
-      if (STORAGE_AVAILABLE) {
-        if (sitesData === null) saveRaw("sites", finalSites);
-        if (movementsData === null) saveRaw("movements", finalMovements);
-        if (inventairesData === null) saveRaw("inventaires", finalInventaires);
-        if (usersData === null) saveRaw("users", finalUsers);
-        if (auditData === null) saveRaw("audit", finalAudit);
-        if (settingsData === null) saveRaw("settings", finalSettings);
-        setLastSync(new Date());
-      }
+      setSites(sitesData);
+      setMovements(movementsData);
+      setInventaires(inventairesData);
+      setProfiles(profilesData);
+      setAudit(auditData);
+      setSettings(settingsRow ? { objectifFreinte: Number(settingsRow.objectif_freinte) } : SETTINGS_SEED);
+      setLastSync(new Date());
       setLoading(false);
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [session, profile]);
 
-  /* ---- background sync: pick up changes made by other users ---- */
+  /* ---- synchronisation périodique : voir les changements des autres utilisateurs ---- */
   useEffect(() => {
-    if (loading || !STORAGE_AVAILABLE) return;
+    if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
-      const [s, m, i, u, a, se] = await Promise.all([
-        loadRaw("sites"), loadRaw("movements"), loadRaw("inventaires"), loadRaw("users"), loadRaw("audit"), loadRaw("settings"),
+      const [s, m, i, p, a] = await Promise.all([
+        fetchTable("sites", rowToSite),
+        fetchTable("movements", rowToMovement, "date"),
+        fetchTable("inventaires", rowToInventaire, "date"),
+        fetchTable("profiles", rowToProfile),
+        fetchTable("audit", rowToAudit, "ts", false),
       ]);
-      if (s !== null) setSites(s);
-      if (m !== null) setMovements(m);
-      if (i !== null) setInventaires(i);
-      if (u !== null) setUsers(u);
-      if (a !== null) setAudit(a);
-      if (se !== null) setSettings(se);
+      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a);
+      const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
+      if (se) setSettings({ objectifFreinte: Number(se.objectif_freinte) });
       setLastSync(new Date());
     }, 7000);
     return () => clearInterval(interval);
-  }, [loading]);
+  }, [loading, session, profile]);
 
-  /* ---- persistence helper ---- */
-  const persist = async (name, value) => {
-    if (!STORAGE_AVAILABLE) { setSyncStatus("unavailable"); return; }
+  const appendAudit = async (action, detail) => {
+    const { data } = await supabase.from("audit").insert({ user_name: currentUserName, action, detail }).select().maybeSingle();
+    if (data) setAudit((prev) => [rowToAudit(data), ...prev].slice(0, 300));
+  };
+
+  const withSync = async (fn) => {
     setSyncStatus("saving");
-    const ok = await saveRaw(name, value);
-    setSyncStatus(ok ? "ok" : "error");
-    if (ok) setLastSync(new Date());
+    try {
+      await fn();
+      setSyncStatus("ok");
+      setLastSync(new Date());
+    } catch (e) {
+      setSyncStatus("error");
+      flash("Action refusée ou erreur de sauvegarde.");
+    }
   };
 
-  const appendAudit = (action, detail) => {
-    const entry = { id: uid(), ts: new Date().toISOString(), user: currentUserName, action, detail };
-    const next = [entry, ...audit].slice(0, 300);
-    setAudit(next);
-    persist("audit", next);
-  };
-
-  /* ---- derived ---- */
-  // Stock "ambiant" (jauge physique) — sert au tableau de bord, à la capacité des cuves.
+  /* ---- dérivés ---- */
   const stockOf = (siteId) => {
     const site = sites.find((s) => s.id === siteId);
     if (!site) return 0;
     return movements.filter((m) => m.siteId === siteId).reduce((acc, m) => acc + m.delta, site.stockInitial);
   };
-  // Stock théorique "à 15°C" — utilise le volume corrigé de chaque mouvement quand il est
-  // disponible (température + densité renseignées), sinon retombe sur le volume ambiant de
-  // ce mouvement. C'est cette valeur qui sert de référence pour l'écart d'inventaire dès
-  // qu'une mesure de température/densité est fournie.
   const stockOf15 = (siteId) => {
     const site = sites.find((s) => s.id === siteId);
     if (!site) return 0;
     return movements.filter((m) => m.siteId === siteId).reduce((acc, m) => acc + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
   };
 
-  /* ---- mutations: sites ---- */
-  const addSite = (form) => {
+  /* ---- mutations : sites (Superviseur uniquement) ---- */
+  const addSite = (form) => withSync(async () => {
     const site = { id: uid(), name: form.name.trim(), code: form.code.trim().toUpperCase(), capacity: Number(form.capacity), stockInitial: Number(form.stockInitial) || 0 };
-    const next = [...sites, site];
-    setSites(next); persist("sites", next);
+    const { error } = await supabase.from("sites").insert(siteToRow(site));
+    if (error) throw error;
+    setSites((prev) => [...prev, site]);
     appendAudit("Ajout site", `${site.name} (${site.code})`);
     flash("Site ajouté.");
-  };
-  const editSite = (id, patch) => {
-    const next = sites.map((s) => (s.id === id ? { ...s, ...patch, capacity: Number(patch.capacity), stockInitial: Number(patch.stockInitial) } : s));
-    setSites(next); persist("sites", next);
+  });
+  const editSite = (id, patch) => withSync(async () => {
+    const updated = { ...patch, capacity: Number(patch.capacity), stockInitial: Number(patch.stockInitial) };
+    const { error } = await supabase.from("sites").update(siteToRow({ id, ...updated })).eq("id", id);
+    if (error) throw error;
+    setSites((prev) => prev.map((s) => (s.id === id ? { ...s, ...updated } : s)));
     appendAudit("Modification site", `${patch.name} (${patch.code})`);
     flash("Site mis à jour.");
-  };
-  const removeSite = (site) => {
+  });
+  const removeSite = (site) => withSync(async () => {
     if (movements.some((m) => m.siteId === site.id)) { flash(`Impossible : "${site.name}" a des mouvements enregistrés.`); return; }
-    const next = sites.filter((s) => s.id !== site.id);
-    setSites(next); persist("sites", next);
+    const { error } = await supabase.from("sites").delete().eq("id", site.id);
+    if (error) throw error;
+    setSites((prev) => prev.filter((s) => s.id !== site.id));
     appendAudit("Suppression site", site.name);
     flash("Site supprimé.");
-  };
+  });
 
-  /* ---- mutations: movements ---- */
-  const addMovement = (payload) => {
+  /* ---- mutations : mouvements ---- */
+  const addMovement = (payload) => withSync(async () => {
     const record = { id: uid(), createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false, ...payload };
-    const next = [...movements, record];
-    setMovements(next); persist("movements", next);
+    const { data, error } = await supabase.from("movements").insert(movementToRow(record)).select().maybeSingle();
+    if (error) throw error;
+    const saved = data ? rowToMovement(data) : record;
+    setMovements((prev) => [...prev, saved]);
     appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
-    return record;
-  };
-  const deleteMovement = (id) => {
+  });
+  const deleteMovement = (id) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
-    const next = movements.filter((mm) => mm.id !== id);
-    setMovements(next); persist("movements", next);
+    const { error } = await supabase.from("movements").delete().eq("id", id);
+    if (error) throw error;
+    setMovements((prev) => prev.filter((mm) => mm.id !== id));
     if (m) appendAudit("Suppression mouvement", `${TYPE_META[m.type]?.label || m.type} — ${fmt(m.quantity)} L`);
-  };
-  const purgeDemoMovements = () => {
-    const count = movements.filter((m) => m.isDemo).length;
-    const next = movements.filter((m) => !m.isDemo);
-    setMovements(next); persist("movements", next);
-    appendAudit("Purge données démo", `${count} écriture(s) d'exemple supprimée(s)`);
+  });
+  const purgeDemoMovements = () => withSync(async () => {
+    const demoIds = movements.filter((m) => m.isDemo).map((m) => m.id);
+    if (demoIds.length === 0) return;
+    const { error } = await supabase.from("movements").delete().in("id", demoIds);
+    if (error) throw error;
+    setMovements((prev) => prev.filter((m) => !m.isDemo));
+    appendAudit("Purge données démo", `${demoIds.length} écriture(s) d'exemple supprimée(s)`);
     flash("Écritures de démonstration supprimées.");
-  };
+  });
 
-  /* ---- mutations: inventaires ---- */
-  const addInventaire = ({ siteId, date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => {
+  /* ---- mutations : inventaires ---- */
+  const addInventaire = ({ siteId, date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => withSync(async () => {
     const theoriqueAmbiant = stockOf(siteId);
     const theorique15 = stockOf15(siteId);
     const has15 = stockPhysique15 !== undefined;
-    // Dès que la température et la densité sont renseignées, l'écart officiel (perte/gain,
-    // taux de freinte, conformité) est calculé sur la base du volume corrigé à 15°C.
-    // Sans mesure de température/densité, on retombe sur le volume ambiant (comportement V1/V2).
     const basisEcart = has15 ? "15c" : "ambiant";
     const theoriqueUsed = has15 ? theorique15 : theoriqueAmbiant;
     const physiqueUsed = has15 ? stockPhysique15 : stockPhysique;
@@ -608,87 +726,94 @@ export default function App() {
     const cls = classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
     const adjId = uid();
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
-    const nextMovements = [...movements, {
+    const adjMovement = {
       id: adjId, siteId, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
       commentaire: `Ajustement suite à l'inventaire du ${date} (base ${has15 ? "15°C" : "ambiante"})`,
       createdBy: currentUserName, createdAt: new Date().toISOString(),
-    }];
-    const nextInventaires = [...inventaires, {
+    };
+    const invRecord = {
       id: uid(), siteId, date, stockPhysique, commentaire, basisEcart,
       stockTheoriqueAmbiant: theoriqueAmbiant, stockTheorique15: theorique15,
       stockTheorique: theoriqueUsed, stockPhysiqueUsed: physiqueUsed,
       ecart: cls.ecartL, ecartPermille: cls.ecartPermille, nature: cls.nature,
       tauxFreinte: cls.tauxFreinte, objectifUtilise: cls.objectif, conformite: cls.conformite,
       adjustmentId: adjId, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
-    }];
-    setMovements(nextMovements); persist("movements", nextMovements);
-    setInventaires(nextInventaires); persist("inventaires", nextInventaires);
+    };
+    const { error: e1 } = await supabase.from("movements").insert(movementToRow(adjMovement));
+    if (e1) throw e1;
+    const { error: e2 } = await supabase.from("inventaires").insert(inventaireToRow(invRecord));
+    if (e2) throw e2;
+    setMovements((prev) => [...prev, adjMovement]);
+    setInventaires((prev) => [...prev, invRecord]);
     appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
     flash("Inventaire enregistré et stock ajusté.");
-  };
-
-  const updateSettings = (patch) => {
+  });
+  const deleteInventaire = (inv) => withSync(async () => {
+    const { error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id);
+    if (e1) throw e1;
+    if (inv.adjustmentId) await supabase.from("movements").delete().eq("id", inv.adjustmentId);
+    setInventaires((prev) => prev.filter((i) => i.id !== inv.id));
+    setMovements((prev) => prev.filter((m) => m.id !== inv.adjustmentId));
+    appendAudit("Suppression inventaire", `${sites.find((s) => s.id === inv.siteId)?.name || ""} — ${inv.date}`);
+  });
+  const updateSettings = (patch) => withSync(async () => {
     const next = { ...settings, ...patch };
-    setSettings(next); persist("settings", next);
+    const { error } = await supabase.from("settings").update({ objectif_freinte: next.objectifFreinte }).eq("id", 1);
+    if (error) throw error;
+    setSettings(next);
     appendAudit("Modification objectif de freinte", `Nouvel objectif : ${next.objectifFreinte} ‰`);
     flash("Objectif mis à jour.");
-  };
-  const deleteInventaire = (inv) => {
-    const nextInv = inventaires.filter((i) => i.id !== inv.id);
-    const nextMov = movements.filter((m) => m.id !== inv.adjustmentId);
-    setInventaires(nextInv); persist("inventaires", nextInv);
-    setMovements(nextMov); persist("movements", nextMov);
-    appendAudit("Suppression inventaire", `${sites.find((s) => s.id === inv.siteId)?.name || ""} — ${inv.date}`);
-  };
+  });
 
-  /* ---- mutations: users ---- */
-  const addUser = (name, role) => {
-    const u = { id: uid(), name: name.trim(), role };
-    const next = [...users, u];
-    setUsers(next); persist("users", next);
-    appendAudit("Ajout utilisateur", `${u.name} (${u.role})`);
-    flash("Utilisateur ajouté.");
-  };
-  const editUser = (id, patch) => {
-    const next = users.map((u) => (u.id === id ? { ...u, ...patch } : u));
-    setUsers(next); persist("users", next);
-    appendAudit("Modification utilisateur", `${patch.name} (${patch.role})`);
-    flash("Utilisateur mis à jour.");
-  };
-  const removeUser = (u) => {
-    if (users.length <= 1) { flash("Impossible : au moins un utilisateur doit rester."); return; }
-    const next = users.filter((x) => x.id !== u.id);
-    setUsers(next); persist("users", next);
-    if (currentUserId === u.id) setCurrentUserId(next[0]?.id || null);
-    appendAudit("Suppression utilisateur", u.name);
-    flash("Utilisateur supprimé.");
-  };
-
-  /* ---- dangerous: full factory reset (kept for testing, double-armed) ---- */
-  const factoryReset = () => {
-    setSites(SITES_SEED); persist("sites", SITES_SEED);
-    setMovements(MOVEMENTS_SEED); persist("movements", MOVEMENTS_SEED);
-    setInventaires([]); persist("inventaires", []);
-    setUsers(USERS_SEED); persist("users", USERS_SEED);
-    setCurrentUserId(USERS_SEED[0].id);
-    appendAudit("Réinitialisation complète", "Toutes les données remplacées par le jeu de démonstration");
-    flash("Toutes les données ont été réinitialisées.");
-  };
+  /* ---- mutations : rôle d'un utilisateur (Superviseur uniquement) ---- */
+  const updateUserRole = (userId, role) => withSync(async () => {
+    const { error } = await supabase.from("profiles").update({ role }).eq("id", userId);
+    if (error) throw error;
+    const target = profiles.find((u) => u.id === userId);
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, role } : u)));
+    appendAudit("Modification rôle utilisateur", `${target?.name || ""} → ${ROLE_LABELS[role]}`);
+    flash("Rôle mis à jour.");
+  });
 
   const NAV = [
-    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard },
-    { id: "sites", label: "Sites", icon: Factory },
-    { id: "receptions", label: "Réceptions", icon: ArrowDownCircle },
-    { id: "sorties", label: "Sorties", icon: ArrowUpCircle },
-    { id: "inventaires", label: "Inventaires", icon: ClipboardList },
-    { id: "vcf", label: "Correction 15°C", icon: Thermometer },
-    { id: "rapports", label: "Rapports", icon: FileBarChart },
-    { id: "utilisateurs", label: "Utilisateurs", icon: Users },
-    { id: "historique", label: "Historique", icon: History },
-  ];
+    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: true },
+    { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
+    { id: "receptions", label: "Réceptions", icon: ArrowDownCircle, show: true },
+    { id: "sorties", label: "Sorties", icon: ArrowUpCircle, show: true },
+    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: true },
+    { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: true },
+    { id: "rapports", label: "Rapports", icon: FileBarChart, show: true },
+    { id: "utilisateurs", label: "Utilisateurs", icon: Users, show: perms.canManage },
+    { id: "historique", label: "Historique", icon: History, show: perms.canManage },
+  ].filter((n) => n.show);
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
 
-  if (loading) {
+  if (!SUPABASE_CONFIGURED) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 480, background: C.bg, fontFamily: "Inter, sans-serif", padding: 24, textAlign: "center" }}>
+        <div>
+          <CloudOff size={28} color={C.warning} />
+          <h2 style={{ margin: "12px 0 6px" }}>Configuration manquante</h2>
+          <p style={{ color: C.sub, maxWidth: 420 }}>
+            Les clés Supabase (VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY) ne sont pas définies. Ajoute-les dans les variables d'environnement du projet puis redéploie.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (authLoading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 480, background: C.bg }}>
+        <Loader2 size={22} style={{ animation: "somipSpin .8s linear infinite" }} color={C.sub} />
+        <style>{`@keyframes somipSpin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
+
+  if (!session) return <AuthScreen />;
+
+  if (!profile || loading) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 480, background: C.bg, fontFamily: "Inter, sans-serif" }}>
         <div style={{ textAlign: "center", color: C.sub }}>
@@ -762,12 +887,9 @@ export default function App() {
           ))}
         </nav>
         <div style={{ flex: 1 }} />
-        <ConfirmTextButton
-          onConfirm={factoryReset}
-          label="Réinitialiser (usine)"
-          confirmLabel="Effacer & recharger la démo ?"
-          className="somip-nav-item"
-        />
+        <button className="somip-nav-item" onClick={signOut}>
+          <LogOut size={16} /> Se déconnecter
+        </button>
         <div style={{ color: "#5C7288", fontSize: 10.5, padding: "10px 6px 0" }}>Zone Sud-Est · Gabon</div>
       </aside>
 
@@ -779,11 +901,9 @@ export default function App() {
             <SyncIndicator status={syncStatus} lastSync={lastSync} />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{ fontSize: 12, color: C.sub }}>
-              <div style={{ fontWeight: 600, color: C.sub, marginBottom: 2 }}>Connecté en tant que</div>
-              <select className="somip-select" style={{ padding: "6px 9px", fontSize: 12.5, minWidth: 170 }} value={currentUserId || ""} onChange={(e) => setCurrentUserId(e.target.value)}>
-                {users.map((u) => <option key={u.id} value={u.id}>{u.name} — {u.role}</option>)}
-              </select>
+            <div style={{ fontSize: 12, color: C.sub, textAlign: "right" }}>
+              <div style={{ fontWeight: 700, color: C.ink }}>{currentUserName}</div>
+              <Badge color={C.blue}>{ROLE_LABELS[currentRole]}</Badge>
             </div>
             <div style={{ fontSize: 12.5, color: C.sub, textAlign: "right" }}>
               {new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
@@ -793,15 +913,15 @@ export default function App() {
         </header>
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
-          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} />}
-          {view === "sites" && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} />}
-          {view === "receptions" && <ReceptionsView sites={sites} movements={movements} addMovement={addMovement} deleteMovement={deleteMovement} />}
-          {view === "sorties" && <SortiesView sites={sites} movements={movements} addMovement={addMovement} deleteMovement={deleteMovement} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} />}
+          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} />}
+          {view === "receptions" && <ReceptionsView sites={sites} movements={movements} addMovement={addMovement} deleteMovement={deleteMovement} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "sorties" && <SortiesView sites={sites} movements={movements} addMovement={addMovement} deleteMovement={deleteMovement} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} settings={settings} stockOf={stockOf} />}
-          {view === "utilisateurs" && <UsersView users={users} addUser={addUser} editUser={editUser} removeUser={removeUser} />}
-          {view === "historique" && <HistoryView audit={audit} />}
+          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} />}
+          {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
       </div>
     </div>
@@ -811,7 +931,7 @@ export default function App() {
 /* ------------------------------------------------------------------ */
 /* Dashboard                                                            */
 /* ------------------------------------------------------------------ */
-function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements }) {
+function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage }) {
   const month = currentMonth();
   const rows = sites.map((s) => {
     const stock = stockOf(s.id);
@@ -839,7 +959,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements 
         Les capacités et stocks initiaux des sites restent des valeurs à vérifier/ajuster depuis la page Sites.
       </p>
 
-      {demoCount > 0 && (
+      {demoCount > 0 && canManage && (
         <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between", borderLeft: `3px solid ${C.warning}`, flexWrap: "wrap", gap: 10 }}>
           <span style={{ fontSize: 12.5, color: C.sub }}>
             <strong style={{ color: C.ink }}>{demoCount} écriture(s)</strong> marquée(s) <DemoBadge /> sont encore présentes (jeu d'exemple de la V1).
@@ -990,7 +1110,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite })
 /* ------------------------------------------------------------------ */
 /* Réceptions                                                            */
 /* ------------------------------------------------------------------ */
-function ReceptionsView({ sites, movements, addMovement, deleteMovement }) {
+function ReceptionsView({ sites, movements, addMovement, deleteMovement, canWrite, canManage }) {
   const [form, setForm] = useState({ siteId: sites[0]?.id || "", date: todayStr(), quantity: "", ref: "", commentaire: "" });
   const [filterSite, setFilterSite] = useState("all");
   const [tempC, setTempC] = useState("");
@@ -1016,22 +1136,24 @@ function ReceptionsView({ sites, movements, addMovement, deleteMovement }) {
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-      <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvelle réception</h3>
-        <Field label="Site">
-          <select className="somip-select" value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Date"><input type="date" className="somip-input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-        <Field label="Quantité reçue (L, ambiant)"><input type="number" className="somip-input" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="10000" /></Field>
-        <Field label="Référence bon de livraison"><input className="somip-input" value={form.ref} onChange={(e) => setForm({ ...form, ref: e.target.value })} placeholder="BL-XXXX" /></Field>
-        <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
-        <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
-        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!form.quantity || Number(form.quantity) <= 0}>
-          <Plus size={15} /> Enregistrer la réception
-        </button>
-      </div>
+      {canWrite && (
+        <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvelle réception</h3>
+          <Field label="Site">
+            <select className="somip-select" value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Date"><input type="date" className="somip-input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="Quantité reçue (L, ambiant)"><input type="number" className="somip-input" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="10000" /></Field>
+          <Field label="Référence bon de livraison"><input className="somip-input" value={form.ref} onChange={(e) => setForm({ ...form, ref: e.target.value })} placeholder="BL-XXXX" /></Field>
+          <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
+          <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!form.quantity || Number(form.quantity) <= 0}>
+            <Plus size={15} /> Enregistrer la réception
+          </button>
+        </div>
+      )}
 
       <div className="somip-panel" style={{ flex: "2 1 480px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -1042,9 +1164,9 @@ function ReceptionsView({ sites, movements, addMovement, deleteMovement }) {
           </select>
         </div>
         <table className="somip-table">
-          <thead><tr><th>Date</th><th>Site</th><th>Référence</th><th style={{ textAlign: "right" }}>Quantité (ambiant)</th><th style={{ textAlign: "right" }}>Volume 15°C</th><th></th></tr></thead>
+          <thead><tr><th>Date</th><th>Site</th><th>Référence</th><th style={{ textAlign: "right" }}>Quantité (ambiant)</th><th style={{ textAlign: "right" }}>Volume 15°C</th>{canManage && <th></th>}</tr></thead>
           <tbody>
-            {list.length === 0 && <EmptyRow colSpan={6} text="Aucune réception enregistrée." />}
+            {list.length === 0 && <EmptyRow colSpan={canManage ? 6 : 5} text="Aucune réception enregistrée." />}
             {list.map((m) => {
               const site = sites.find((s) => s.id === m.siteId);
               return (
@@ -1054,7 +1176,7 @@ function ReceptionsView({ sites, movements, addMovement, deleteMovement }) {
                   <td style={{ color: C.sub }}>{m.ref || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+ {fmt(m.quantity)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
-                  <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>
+                  {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>}
                 </tr>
               );
             })}
@@ -1068,28 +1190,43 @@ function ReceptionsView({ sites, movements, addMovement, deleteMovement }) {
 /* ------------------------------------------------------------------ */
 /* Sorties                                                               */
 /* ------------------------------------------------------------------ */
-function SortiesView({ sites, movements, addMovement, deleteMovement }) {
+function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, canManage }) {
   const [tab, setTab] = useState("sortie");
   const [filterSite, setFilterSite] = useState("all");
-  const [form, setForm] = useState({ siteId: sites[0]?.id || "", date: todayStr(), quantity: "", destinataire: "", camion: TRUCKS[0], destination: "", commentaire: "" });
+  const [form, setForm] = useState({ siteId: sites[0]?.id || "", date: todayStr(), destinataire: "", camion: TRUCKS[0], destination: "", indexAvant: "", indexApres: "", commentaire: "" });
   const [tempC, setTempC] = useState("");
   const [densite, setDensite] = useState("");
 
+  // La quantité sortie n'est pas saisie : elle est calculée depuis le compteur (Index après − Index avant).
+  const quantity = form.indexAvant !== "" && form.indexApres !== "" ? Number(form.indexApres) - Number(form.indexAvant) : 0;
+  const indexValid = form.indexAvant !== "" && form.indexApres !== "" && quantity > 0;
+
+  // Ventes et chargements camions partagent le même compteur sur certains sites (Prehomo, Okouma...) :
+  // on retrouve le dernier index enregistré (tous types de sortie confondus) pour repérer une rupture de séquence.
+  const lastIndexForSite = movements
+    .filter((m) => m.siteId === form.siteId && (m.type === "sortie" || m.type === "sortie_camion") && m.indexApres !== undefined)
+    .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
+    .slice(-1)[0]?.indexApres;
+  const indexMismatch = lastIndexForSite !== undefined && form.indexAvant !== "" && Number(form.indexAvant) !== lastIndexForSite;
+
   const vcfResult = correctVolumeTo15({
-    volumeAmbiant: Number(form.quantity) || 0,
+    volumeAmbiant: quantity,
     tempC: tempC === "" ? NaN : Number(tempC),
     densiteObservee: Number(densite) || 0,
   });
 
   const submit = () => {
-    if (!form.siteId || !form.date || !form.quantity || Number(form.quantity) <= 0) return;
+    if (!form.siteId || !form.date || !indexValid) return;
     const extra = vcfResult
       ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfResult.densite15, vcf: vcfResult.vcf, volumeCorrige15: vcfResult.volume15 }
       : {};
-    const base = { siteId: form.siteId, type: tab, date: form.date, quantity: Number(form.quantity), delta: -Number(form.quantity), commentaire: form.commentaire, ...extra };
+    const base = {
+      siteId: form.siteId, type: tab, date: form.date, quantity, delta: -quantity, commentaire: form.commentaire,
+      indexAvant: Number(form.indexAvant), indexApres: Number(form.indexApres), ...extra,
+    };
     const payload = tab === "sortie" ? { ...base, destinataire: form.destinataire } : { ...base, camion: form.camion, destination: form.destination };
     addMovement(payload);
-    setForm({ ...form, quantity: "", destinataire: "", destination: "", commentaire: "" });
+    setForm({ ...form, destinataire: "", destination: "", indexAvant: "", indexApres: "", commentaire: "" });
     setTempC(""); setDensite("");
   };
 
@@ -1097,36 +1234,54 @@ function SortiesView({ sites, movements, addMovement, deleteMovement }) {
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-      <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-          <button className={`somip-tab ${tab === "sortie" ? "active" : ""}`} onClick={() => setTab("sortie")}>Sortie standard</button>
-          <button className={`somip-tab ${tab === "sortie_camion" ? "active" : ""}`} onClick={() => setTab("sortie_camion")}>Vers camion laitier</button>
+      {canWrite && (
+        <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <button className={`somip-tab ${tab === "sortie" ? "active" : ""}`} onClick={() => setTab("sortie")}>Sortie standard</button>
+            <button className={`somip-tab ${tab === "sortie_camion" ? "active" : ""}`} onClick={() => setTab("sortie_camion")}>Vers camion laitier</button>
+          </div>
+          <Field label="Site source">
+            <select className="somip-select" value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
+              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Date"><input type="date" className="somip-input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Field label="Index avant (compteur)"><input type="number" className="somip-input" value={form.indexAvant} onChange={(e) => setForm({ ...form, indexAvant: e.target.value })} placeholder="Ex : 45210" /></Field></div>
+            <div style={{ flex: 1 }}><Field label="Index après (compteur)"><input type="number" className="somip-input" value={form.indexApres} onChange={(e) => setForm({ ...form, indexApres: e.target.value })} placeholder="Ex : 47210" /></Field></div>
+          </div>
+          {lastIndexForSite !== undefined && (
+            <p style={{ margin: "-8px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
+              Dernier index enregistré sur ce site (ventes + camions) : {fmt(lastIndexForSite)}
+              {indexMismatch && " — vérifie ton index avant, il ne correspond pas."}
+            </p>
+          )}
+          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Quantité sortie (calculée)</span>
+            <span className="somip-mono" style={{ fontWeight: 700, color: form.indexAvant !== "" && form.indexApres !== "" && quantity <= 0 ? C.danger : C.orange }}>{fmt(quantity)} L</span>
+          </div>
+          {form.indexAvant !== "" && form.indexApres !== "" && quantity <= 0 && (
+            <p style={{ margin: "-8px 0 12px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>
+          )}
+          {tab === "sortie" ? (
+            <Field label="Destinataire / motif"><input className="somip-input" value={form.destinataire} onChange={(e) => setForm({ ...form, destinataire: e.target.value })} placeholder="Ex : Atelier, Engin X..." /></Field>
+          ) : (
+            <>
+              <Field label="Camion laitier">
+                <select className="somip-select" value={form.camion} onChange={(e) => setForm({ ...form, camion: e.target.value })}>
+                  {TRUCKS.map((t) => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </Field>
+              <Field label="Destination (carrière / engin)"><input className="somip-input" value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder="Ex : Carrière Nord" /></Field>
+            </>
+          )}
+          <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
+          <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
+          <button className="somip-btn somip-btn-secondary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!indexValid}>
+            <Plus size={15} /> Enregistrer la sortie
+          </button>
         </div>
-        <Field label="Site source">
-          <select className="somip-select" value={form.siteId} onChange={(e) => setForm({ ...form, siteId: e.target.value })}>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Date"><input type="date" className="somip-input" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-        <Field label="Quantité (L)"><input type="number" className="somip-input" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="2000" /></Field>
-        {tab === "sortie" ? (
-          <Field label="Destinataire / motif"><input className="somip-input" value={form.destinataire} onChange={(e) => setForm({ ...form, destinataire: e.target.value })} placeholder="Ex : Atelier, Engin X..." /></Field>
-        ) : (
-          <>
-            <Field label="Camion laitier">
-              <select className="somip-select" value={form.camion} onChange={(e) => setForm({ ...form, camion: e.target.value })}>
-                {TRUCKS.map((t) => <option key={t} value={t}>{t}</option>)}
-              </select>
-            </Field>
-            <Field label="Destination (carrière / engin)"><input className="somip-input" value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder="Ex : Carrière Nord" /></Field>
-          </>
-        )}
-        <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
-        <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
-        <button className="somip-btn somip-btn-secondary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!form.quantity || Number(form.quantity) <= 0}>
-          <Plus size={15} /> Enregistrer la sortie
-        </button>
-      </div>
+      )}
 
       <div className="somip-panel" style={{ flex: "2 1 480px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -1136,28 +1291,31 @@ function SortiesView({ sites, movements, addMovement, deleteMovement }) {
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </div>
-        <table className="somip-table">
-          <thead><tr><th>Date</th><th>Site</th><th>Type</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité (ambiant)</th><th style={{ textAlign: "right" }}>Volume 15°C</th><th></th></tr></thead>
-          <tbody>
-            {list.length === 0 && <EmptyRow colSpan={7} text="Aucune sortie enregistrée." />}
-            {list.map((m) => {
-              const site = sites.find((s) => s.id === m.siteId);
-              const meta = TYPE_META[m.type];
-              const detail = m.type === "sortie" ? (m.destinataire || "—") : `${m.camion} → ${m.destination || "—"}`;
-              return (
-                <tr key={m.id}>
-                  <td className="somip-mono">{m.date}</td>
-                  <td>{site?.name}{m.isDemo && <DemoBadge />}</td>
-                  <td><Badge color={meta.color}>{m.type === "sortie" ? "Standard" : "Camion"}</Badge></td>
-                  <td style={{ color: C.sub }}>{detail}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>− {fmt(m.quantity)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
-                  <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead><tr><th>Date</th><th>Site</th><th>Type</th><th>Détail</th><th style={{ textAlign: "right" }}>Index avant→après</th><th style={{ textAlign: "right" }}>Quantité (ambiant)</th><th style={{ textAlign: "right" }}>Volume 15°C</th>{canManage && <th></th>}</tr></thead>
+            <tbody>
+              {list.length === 0 && <EmptyRow colSpan={canManage ? 8 : 7} text="Aucune sortie enregistrée." />}
+              {list.map((m) => {
+                const site = sites.find((s) => s.id === m.siteId);
+                const meta = TYPE_META[m.type];
+                const detail = m.type === "sortie" ? (m.destinataire || "—") : `${m.camion} → ${m.destination || "—"}`;
+                return (
+                  <tr key={m.id}>
+                    <td className="somip-mono">{m.date}</td>
+                    <td>{site?.name}{m.isDemo && <DemoBadge />}</td>
+                    <td><Badge color={meta.color}>{m.type === "sortie" ? "Standard" : "Camion"}</Badge></td>
+                    <td style={{ color: C.sub }}>{detail}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.indexAvant !== undefined && m.indexApres !== undefined ? `${fmt(m.indexAvant)} → ${fmt(m.indexApres)}` : "—"}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>− {fmt(m.quantity)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
+                    {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -1166,7 +1324,7 @@ function SortiesView({ sites, movements, addMovement, deleteMovement }) {
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings }) {
+function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [stockPhysique, setStockPhysique] = useState("");
@@ -1206,6 +1364,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18, flex: "1 1 300px" }}>
+        {canWrite && (
         <div className="somip-panel" style={{ padding: 18 }}>
           <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvel inventaire</h3>
           <Field label="Site">
@@ -1275,7 +1434,9 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
             <Plus size={15} /> Valider l'inventaire
           </button>
         </div>
+        )}
 
+        {canManage && (
         <div className="somip-panel" style={{ padding: 18 }}>
           <h3 style={{ margin: "0 0 6px", fontSize: 14 }}>Objectif de freinte</h3>
           <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>
@@ -1288,6 +1449,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
             </button>
           </div>
         </div>
+        )}
       </div>
 
       <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
@@ -1305,11 +1467,11 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
                 <th>Date</th><th>Site</th><th>Base</th><th>Nature</th>
                 <th style={{ textAlign: "right" }}>Théorique</th><th style={{ textAlign: "right" }}>Physique</th>
                 <th style={{ textAlign: "right" }}>Écart (L)</th><th style={{ textAlign: "right" }}>Écart (‰)</th>
-                <th style={{ textAlign: "right" }}>Taux de freinte</th><th>Statut (objectif)</th><th></th>
+                <th style={{ textAlign: "right" }}>Taux de freinte</th><th>Statut (objectif)</th>{canManage && <th></th>}
               </tr>
             </thead>
             <tbody>
-              {list.length === 0 && <EmptyRow colSpan={11} text="Aucun inventaire enregistré." />}
+              {list.length === 0 && <EmptyRow colSpan={canManage ? 11 : 10} text="Aucun inventaire enregistré." />}
               {list.map((i) => {
                 const site = sites.find((s) => s.id === i.siteId);
                 const nature = i.nature || (i.ecart === 0 ? "neutre" : i.ecart < 0 ? "perte" : "gain");
@@ -1329,7 +1491,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
                     <td className="somip-mono" style={{ textAlign: "right" }}>{i.ecartPermille >= 0 ? "+" : ""}{i.ecartPermille.toFixed(2)} ‰</td>
                     <td className="somip-mono" style={{ textAlign: "right" }}>{nature === "perte" ? `${i.tauxFreinte.toFixed(2)} ‰` : "—"}</td>
                     <td><Badge color={CONFORMITE_META[conformite].color}>{CONFORMITE_META[conformite].label}</Badge></td>
-                    <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaire(i)} /></td>
+                    {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaire(i)} /></td>}
                   </tr>
                 );
               })}
@@ -1440,7 +1602,7 @@ function ReportsView({ sites, movements, inventaires, settings, stockOf }) {
       {tab === "journalier" && <DailyReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "decadaire" && <DecadeReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "mensuel" && <MonthlyReport sites={sites} movements={movements} inventaires={inventaires} settings={settings} />}
-      {tab === "etat" && <StockStatementReport sites={sites} movements={movements} />}
+      {tab === "etat" && <StockStatementReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "exposition" && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} />}
       {tab === "pertesgains" && <LossGainReport sites={sites} inventaires={inventaires} />}
     </div>
@@ -1658,70 +1820,87 @@ function MonthlyReport({ sites, movements, inventaires, settings }) {
 }
 
 /* ---- État journalier des stocks (photographie à une date) ---- */
-function StockStatementReport({ sites, movements }) {
+function StockStatementReport({ sites, movements, inventaires }) {
   const [date, setDate] = useState(todayStr());
-  const rows = sites.map((s) => {
-    const stock = stockThroughDate(s, movements, date);
-    const pct = s.capacity ? (stock / s.capacity) * 100 : 0;
-    const status = pct < 20 ? "danger" : pct < 35 ? "warning" : "ok";
-    return { site: s, stock, pct, status };
-  });
-  const statusColor = { ok: C.blue, warning: C.warning, danger: C.danger };
-  const statusLabel = { ok: "Normal", warning: "Vigilance", danger: "Critique" };
-  const total = rows.reduce((a, r) => a + r.stock, 0);
-  const totalCap = rows.reduce((a, r) => a + r.site.capacity, 0);
 
-  const doExcel = () => exportToExcel(`SOMIP_Etat_Stocks_${date}.xlsx`, [{
-    name: "Etat des stocks", rows: rows.map((r) => ({
-      Site: r.site.name, "Stock (L)": Math.round(r.stock), "Capacité (L)": r.site.capacity,
-      "Taux de remplissage (%)": r.pct.toFixed(1), Statut: statusLabel[r.status],
+  const rows = sites.map((s) => {
+    const stockDebut = stockBeforeDate(s, movements, date);
+    const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
+    // Ventes et chargements camions partagent le même compteur physique : la séquence
+    // d'index (avant de la 1ère opération -> après la dernière) est calculée sur les DEUX
+    // types combinés, mais les volumes sont distingués dans les totaux.
+    const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+    const reception = sumQty(dayMovs, ["reception"]);
+    const ventes = sumQty(dayMovs, ["sortie"]);
+    const chargementsCamions = sumQty(dayMovs, ["sortie_camion"]);
+    const sorties = ventes + chargementsCamions;
+    const ajustement = dayMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
+    const stockTheorique = stockDebut + reception - sorties + ajustement;
+    const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
+    const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
+    const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+    const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
+    return {
+      site: s, stockDebut, reception, ventes, chargementsCamions, sortIndexAvant, sortIndexApres, stockTheorique,
+      stockPhysique: inv ? inv.stockPhysique : null, nature: inv ? inv.nature : null, ecart: inv ? inv.ecart : null,
+    };
+  });
+
+  const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_${date}.xlsx`, [{
+    name: "Etat journalier", rows: rows.map((r) => ({
+      Site: r.site.name, "Stock début (L)": Math.round(r.stockDebut), "Réception (L)": Math.round(r.reception),
+      "Ventes (L)": Math.round(r.ventes), "Chargement camions (L)": Math.round(r.chargementsCamions),
+      "Index avant": r.sortIndexAvant ?? "", "Index après": r.sortIndexApres ?? "",
+      "Stock théorique (L)": Math.round(r.stockTheorique),
+      "Stock physique (L)": r.stockPhysique !== null ? Math.round(r.stockPhysique) : "",
+      "Gain/Perte (L)": r.ecart !== null ? Math.round(r.ecart) : "",
     })),
   }]);
 
   return (
     <div>
       <div className="somip-no-print" style={{ marginBottom: 14 }}>
-        <Field label="Date de l'état des stocks"><input type="date" className="somip-input" style={{ maxWidth: 220 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Date de l'état journalier"><input type="date" className="somip-input" style={{ maxWidth: 220 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="État journalier des stocks" period={`Situation au ${date}`} />
+        <ReportHeader title="État journalier des stocks" period={`Journée du ${date}`} />
         <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock (L)</th><th style={{ textAlign: "right" }}>Capacité (L)</th><th style={{ textAlign: "right" }}>Remplissage</th><th>Statut</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Site</th><th style={{ textAlign: "right" }}>Stock début</th>
+                <th style={{ textAlign: "right" }}>Réception</th>
+                <th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Chargement camions</th>
+                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock physique</th>
+                <th style={{ textAlign: "right" }}>Gain/Perte</th>
+              </tr>
+            </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stock)}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{fmt(r.site.capacity)}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{r.pct.toFixed(1)} %</td>
-                  <td><Badge color={statusColor[r.status]}>{statusLabel[r.status]}</Badge></td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.danger : C.sub }}>{r.ventes ? `−${fmt(r.ventes)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexApres !== null ? fmt(r.sortIndexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{r.stockPhysique !== null ? `${fmt(r.stockPhysique)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.nature === "perte" ? C.danger : r.nature === "gain" ? C.success : C.sub }}>
+                    {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
+                  </td>
                 </tr>
               ))}
-              <tr>
-                <td style={{ fontWeight: 700 }}>Total réseau</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(total)}</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.sub }}>{fmt(totalCap)}</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{totalCap ? ((total / totalCap) * 100).toFixed(1) : 0} %</td>
-                <td></td>
-              </tr>
             </tbody>
+
           </table>
         </div>
-        <div style={{ marginTop: 20, height: 240 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={rows.map((r) => ({ code: r.site.code, Stock: r.stock, Capacité: r.site.capacity }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
-              <XAxis dataKey="code" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
-              <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-              <Bar dataKey="Capacité" fill="#DCE3E9" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Stock" fill={C.blue} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Stock physique et Gain/Perte ne s'affichent que pour les sites ayant un inventaire enregistré à cette date. Ventes et chargements camions utilisant souvent le même compteur (ex. Prehomo, Okouma), l'Index avant/après reflète la séquence complète des deux types d'opérations ce jour-là (index avant de la 1ère opération, index après de la dernière), tandis que les volumes sont distingués colonne par colonne.
+        </p>
       </div>
     </div>
   );
@@ -1859,36 +2038,35 @@ function LossGainReport({ sites, inventaires }) {
 /* ------------------------------------------------------------------ */
 /* Utilisateurs                                                          */
 /* ------------------------------------------------------------------ */
-function UsersView({ users, addUser, editUser, removeUser }) {
-  const [name, setName] = useState("");
-  const [role, setRole] = useState(ROLES[0]);
+function UsersView({ profiles, updateUserRole }) {
   const [editingId, setEditingId] = useState(null);
-  const [editForm, setEditForm] = useState({});
+  const [roleDraft, setRoleDraft] = useState("");
 
-  const submit = () => { if (!name.trim()) return; addUser(name, role); setName(""); setRole(ROLES[0]); };
-  const startEdit = (u) => { setEditingId(u.id); setEditForm({ ...u }); };
-  const saveEdit = () => { editUser(editingId, editForm); setEditingId(null); };
+  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); };
+  const saveEdit = () => { updateUserRole(editingId, roleDraft); setEditingId(null); };
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-      <div className="somip-panel" style={{ flex: "2 1 480px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Utilisateurs ({users.length})</h3>
+      <div className="somip-panel" style={{ flex: "1 1 520px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Comptes ({profiles.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>
-          Identification simple pour attribuer les actions dans l'historique — ce n'est pas encore une authentification sécurisée (pas de mot de passe).
+          Les comptes sont créés par chacun via l'écran "Créer un compte". Un nouveau compte n'a que des droits de consultation
+          par défaut — attribue-lui un rôle ici pour lui donner accès à la saisie ou à la gestion complète.
         </p>
         <table className="somip-table">
           <thead><tr><th>Nom</th><th>Rôle</th><th></th></tr></thead>
           <tbody>
-            {users.map((u) => {
+            {profiles.length === 0 && <EmptyRow colSpan={3} text="Aucun compte pour le moment." />}
+            {profiles.map((u) => {
               const isEditing = editingId === u.id;
               return (
                 <tr key={u.id}>
                   {isEditing ? (
                     <>
-                      <td><input className="somip-input" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} /></td>
+                      <td style={{ fontWeight: 600 }}>{u.name}</td>
                       <td>
-                        <select className="somip-select" value={editForm.role} onChange={(e) => setEditForm({ ...editForm, role: e.target.value })}>
-                          {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                        <select className="somip-select" value={roleDraft} onChange={(e) => setRoleDraft(e.target.value)}>
+                          {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
                         </select>
                       </td>
                       <td style={{ whiteSpace: "nowrap" }}>
@@ -1899,10 +2077,9 @@ function UsersView({ users, addUser, editUser, removeUser }) {
                   ) : (
                     <>
                       <td style={{ fontWeight: 600 }}>{u.name}</td>
-                      <td><Badge color={C.blue}>{u.role}</Badge></td>
+                      <td><Badge color={C.blue}>{ROLE_LABELS[u.role] || u.role}</Badge></td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
                         <button onClick={() => startEdit(u)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
-                        <ConfirmIconButton onConfirm={() => removeUser(u)} title="Supprimer l'utilisateur" />
                       </td>
                     </>
                   )}
@@ -1914,16 +2091,11 @@ function UsersView({ users, addUser, editUser, removeUser }) {
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 260px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Ajouter un utilisateur</h3>
-        <Field label="Nom complet"><input className="somip-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex : Jean Mabiala" /></Field>
-        <Field label="Rôle">
-          <select className="somip-select" value={role} onChange={(e) => setRole(e.target.value)}>
-            {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-          </select>
-        </Field>
-        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!name.trim()}>
-          <Plus size={15} /> Ajouter
-        </button>
+        <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Ajouter une personne</h3>
+        <p style={{ margin: 0, fontSize: 12.5, color: C.sub }}>
+          Il n'y a pas de création de compte depuis cette page : demande à la personne concernée d'ouvrir l'application et de
+          cliquer sur "Créer un compte" avec son propre e-mail. Son nom apparaîtra ensuite ici pour que tu lui attribues un rôle.
+        </p>
       </div>
     </div>
   );
