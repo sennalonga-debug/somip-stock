@@ -544,6 +544,8 @@ export default function App() {
   const [profile, setProfile] = useState(null);
 
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [retryKey, setRetryKey] = useState(0);
   const [sites, setSites] = useState([]);
   const [movements, setMovements] = useState([]);
   const [inventaires, setInventaires] = useState([]);
@@ -593,26 +595,42 @@ export default function App() {
     if (!session || !profile) return;
     let cancelled = false;
     (async () => {
-      const [sitesData, movementsData, inventairesData, profilesData, auditData] = await Promise.all([
-        fetchTable("sites", rowToSite),
-        fetchTable("movements", rowToMovement, "date"),
-        fetchTable("inventaires", rowToInventaire, "date"),
-        fetchTable("profiles", rowToProfile),
-        fetchTable("audit", rowToAudit, "ts", false),
-      ]);
-      const { data: settingsRow } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
-      if (cancelled) return;
-      setSites(sitesData);
-      setMovements(movementsData);
-      setInventaires(inventairesData);
-      setProfiles(profilesData);
-      setAudit(auditData);
-      setSettings(settingsRow ? { objectifFreinte: Number(settingsRow.objectif_freinte) } : SETTINGS_SEED);
-      setLastSync(new Date());
-      setLoading(false);
+      try {
+        const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
+        const load = (async () => {
+          const [sitesData, movementsData, inventairesData, profilesData, auditData] = await Promise.all([
+            fetchTable("sites", rowToSite),
+            fetchTable("movements", rowToMovement, "date"),
+            fetchTable("inventaires", rowToInventaire, "date"),
+            fetchTable("profiles", rowToProfile),
+            fetchTable("audit", rowToAudit, "ts", false),
+          ]);
+          let settingsRow = null;
+          try {
+            const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
+            settingsRow = res.data;
+          } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, settingsRow };
+        })();
+        const result = await Promise.race([load, timeout(15000)]);
+        if (cancelled) return;
+        setSites(result.sitesData);
+        setMovements(result.movementsData);
+        setInventaires(result.inventairesData);
+        setProfiles(result.profilesData);
+        setAudit(result.auditData);
+        setSettings(result.settingsRow ? { objectifFreinte: Number(result.settingsRow.objectif_freinte) } : SETTINGS_SEED);
+        setLastSync(new Date());
+        setLoadError(null);
+        setLoading(false);
+      } catch (e) {
+        if (cancelled) return;
+        setLoadError(e?.message || "Erreur de chargement inconnue.");
+        setLoading(false);
+      }
     })();
     return () => { cancelled = true; };
-  }, [session, profile]);
+  }, [session, profile, retryKey]);
 
   /* ---- synchronisation périodique : voir les changements des autres utilisateurs ---- */
   useEffect(() => {
@@ -812,6 +830,21 @@ export default function App() {
   }
 
   if (!session) return <AuthScreen />;
+
+  if (loadError) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", minHeight: 480, background: C.bg, fontFamily: "Inter, sans-serif", padding: 24 }}>
+        <div style={{ textAlign: "center", maxWidth: 420 }}>
+          <AlertCircle size={26} color={C.danger} />
+          <h2 style={{ margin: "12px 0 6px", fontSize: 16 }}>Impossible de charger les données</h2>
+          <p style={{ color: C.sub, fontSize: 13, marginBottom: 16 }}>{loadError}</p>
+          <button className="somip-btn somip-btn-primary" onClick={() => { setLoading(true); setLoadError(null); setRetryKey((k) => k + 1); }}>
+            <RotateCcw size={15} /> Réessayer
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!profile || loading) {
     return (
