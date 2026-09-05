@@ -34,8 +34,13 @@ export default async function handler(req, res) {
   }
   const { data: requesterProfile, error: profErr } = await admin
     .from("profiles").select("role").eq("id", userData.user.id).maybeSingle();
-  if (profErr || !requesterProfile || requesterProfile.role !== "superviseur") {
-    res.status(403).json({ error: "Seul un Superviseur peut créer un compte." });
+  const detectedRole = requesterProfile?.role ? String(requesterProfile.role).trim().toLowerCase() : null;
+  if (profErr) {
+    res.status(500).json({ error: `Erreur de lecture du profil : ${profErr.message}` });
+    return;
+  }
+  if (detectedRole !== "superviseur") {
+    res.status(403).json({ error: `Seul un Superviseur peut créer un compte (rôle détecté pour ton compte : ${detectedRole ? `"${detectedRole}"` : "aucun profil trouvé pour cet identifiant"}).` });
     return;
   }
 
