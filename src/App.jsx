@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Factory, ArrowDownCircle, ArrowUpCircle, ClipboardList,
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
-  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail,
+  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import {
@@ -156,6 +156,12 @@ function stockBeforeDate(site, movements, dateExclusive) {
 }
 function stockThroughDate(site, movements, dateInclusive) {
   return movements.filter((m) => m.siteId === site.id && m.date <= dateInclusive).reduce((a, m) => a + m.delta, site.stockInitial);
+}
+function stockBeforeDate15(site, movements, dateExclusive) {
+  return movements.filter((m) => m.siteId === site.id && m.date < dateExclusive).reduce((a, m) => a + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
+}
+function sumQty15(list, types) {
+  return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + movementQty15(m), 0);
 }
 function movementsInRange(movements, siteId, startInclusive, endInclusive) {
   return movements.filter((m) => m.siteId === siteId && m.date >= startInclusive && m.date <= endInclusive);
@@ -554,6 +560,7 @@ export default function App() {
   const [audit, setAudit] = useState([]);
   const [settings, setSettings] = useState(SETTINGS_SEED);
   const [view, setView] = useState("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notice, setNotice] = useState(null);
   const [syncStatus, setSyncStatus] = useState(SUPABASE_CONFIGURED ? "ok" : "unavailable");
   const [lastSync, setLastSync] = useState(null);
@@ -680,7 +687,8 @@ export default function App() {
       setLastSync(new Date());
     } catch (e) {
       setSyncStatus("error");
-      flash("Action refusée ou erreur de sauvegarde.");
+      console.error(e);
+      flash(e?.message ? `Erreur : ${e.message}` : "Action refusée ou erreur de sauvegarde.");
     }
   };
 
@@ -812,8 +820,7 @@ export default function App() {
   const NAV = [
     { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: true },
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
-    { id: "receptions", label: "Réceptions", icon: ArrowDownCircle, show: true },
-    { id: "sorties", label: "Sorties", icon: ArrowUpCircle, show: true },
+    { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: true },
     { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: true },
     { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: true },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: true },
@@ -908,6 +915,15 @@ export default function App() {
         @keyframes somipFade { from { opacity:0; transform:translateY(3px);} to {opacity:1; transform:none;} }
         @keyframes somipSpin { to { transform: rotate(360deg); } }
         .somip-print-only { display: none; }
+        .somip-mobile-toggle { display: none; }
+        .somip-mobile-backdrop { position: fixed; inset: 0; background: rgba(10,20,30,0.5); z-index: 35; }
+        @media (max-width: 860px) {
+          .somip-mobile-toggle { display: inline-flex !important; }
+          .somip-sidebar { position: fixed !important; top: 0; left: 0; bottom: 0; z-index: 40; transform: translateX(-105%); transition: transform .22s ease; box-shadow: 6px 0 28px rgba(0,0,0,0.28); }
+          .somip-sidebar.open { transform: translateX(0); }
+          .somip-header { padding: 12px 14px !important; }
+          .somip-scroll { padding: 14px !important; }
+        }
         @media print {
           .somip-no-print, .somip-sidebar, .somip-header { display: none !important; }
           .somip-print-only { display: block !important; }
@@ -917,8 +933,10 @@ export default function App() {
         }
       `}</style>
 
+      {mobileNavOpen && <div className="somip-mobile-backdrop" onClick={() => setMobileNavOpen(false)} />}
+
       {/* Sidebar */}
-      <aside className="somip-sidebar" style={{ width: 226, background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0 }}>
+      <aside className={`somip-sidebar ${mobileNavOpen ? "open" : ""}`} style={{ width: 226, background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 6px 22px" }}>
           <div style={{ width: 32, height: 32, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <Fuel size={17} color="#fff" />
@@ -927,10 +945,13 @@ export default function App() {
             <div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5, letterSpacing: 0.2 }}>SOMIP</div>
             <div style={{ color: "#8CA0B4", fontSize: 10.5, fontWeight: 500 }}>Stock Gasoil</div>
           </div>
+          <button className="somip-mobile-toggle" onClick={() => setMobileNavOpen(false)} style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "#fff" }}>
+            <X size={20} />
+          </button>
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 3 }}>
           {NAV.map((n) => (
-            <button key={n.id} className={`somip-nav-item ${view === n.id ? "active" : ""}`} onClick={() => setView(n.id)}>
+            <button key={n.id} className={`somip-nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }}>
               <n.icon size={16} />{n.label}
             </button>
           ))}
@@ -945,9 +966,14 @@ export default function App() {
       {/* Main */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
         <header className="somip-header" style={{ padding: "16px 28px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fff", gap: 16, flexWrap: "wrap" }}>
-          <div>
-            <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{viewTitle}</h1>
-            <SyncIndicator status={syncStatus} lastSync={lastSync} />
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button className="somip-mobile-toggle" onClick={() => setMobileNavOpen(true)} style={{ border: "none", background: "none", cursor: "pointer", padding: 4, color: C.ink }}>
+              <Menu size={22} />
+            </button>
+            <div>
+              <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{viewTitle}</h1>
+              <SyncIndicator status={syncStatus} lastSync={lastSync} />
+            </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <div style={{ fontSize: 12, color: C.sub, textAlign: "right" }}>
@@ -964,8 +990,7 @@ export default function App() {
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} />}
-          {view === "receptions" && <ReceptionsView sites={sites} movements={movements} addMovement={addMovement} deleteMovement={deleteMovement} canWrite={perms.canWrite} canManage={perms.canManage} />}
-          {view === "sorties" && <SortiesView sites={sites} movements={movements} addMovement={addMovement} deleteMovement={deleteMovement} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} settings={settings} stockOf={stockOf} />}
@@ -1159,6 +1184,231 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite })
 /* ------------------------------------------------------------------ */
 /* Réceptions                                                            */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Saisie journalière (écran unique : réception, sortie/camion, retour) */
+/* ------------------------------------------------------------------ */
+function DailyEntryView({ sites, movements, inventaires, addMovement, addInventaire, deleteMovement, settings, canWrite, canManage }) {
+  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+  const [date, setDate] = useState(todayStr());
+  const [receptionQty, setReceptionQty] = useState("");
+  const [receptionRef, setReceptionRef] = useState("");
+  const [indexAvant, setIndexAvant] = useState("");
+  const [indexApres, setIndexApres] = useState("");
+  const [sortieMode, setSortieMode] = useState("vente"); // "vente" | "camion"
+  const [destinataire, setDestinataire] = useState("");
+  const [camion, setCamion] = useState(TRUCKS[0]);
+  const [destination, setDestination] = useState("");
+  const [retourQty, setRetourQty] = useState("");
+  const [retourNote, setRetourNote] = useState("");
+  const [tempC, setTempC] = useState("");
+  const [densite, setDensite] = useState("");
+  const [stockFinMesure, setStockFinMesure] = useState("");
+  const [commentaireInv, setCommentaireInv] = useState("");
+
+  const site = sites.find((s) => s.id === siteId);
+  const stockDebut = site ? stockBeforeDate(site, movements, date) : 0;
+  const receptionN = Number(receptionQty) || 0;
+  const retourN = Number(retourQty) || 0;
+  const sortieQty = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
+  const sortieValid = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQty > 0);
+  const stockTheoriqueAmbiant = stockDebut + receptionN + retourN - sortieQty;
+  const stockTheorique15 = site ? stockBeforeDate15(site, movements, date) : 0;
+
+  // Ventes, chargements et retours camions partagent souvent le même compteur (Prehomo, Okouma...).
+  const lastIndexForSite = movements
+    .filter((m) => m.siteId === siteId && (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion") && m.indexApres !== undefined)
+    .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
+    .slice(-1)[0]?.indexApres;
+  const indexMismatch = lastIndexForSite !== undefined && indexAvant !== "" && Number(indexAvant) !== lastIndexForSite;
+
+  const vcfFor = (qty) => correctVolumeTo15({ volumeAmbiant: qty, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
+  const vcfExtra = (qty) => {
+    const r = vcfFor(qty);
+    return r ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: r.densite15, vcf: r.vcf, volumeCorrige15: r.volume15 } : {};
+  };
+  const vcfPreview = vcfFor(receptionN || sortieQty || retourN || 1);
+
+  const stockFinN = Number(stockFinMesure) || 0;
+  const vcfFin = correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
+  const has15 = !!vcfFin;
+  const theoriqueUsed = has15 ? stockTheorique15 : stockTheoriqueAmbiant;
+  const physiqueUsed = has15 ? vcfFin.volume15 : stockFinN;
+  const ecart = stockFinMesure === "" ? null : physiqueUsed - theoriqueUsed;
+  const preview = ecart === null ? null : classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
+
+  const canSubmit = sortieValid && stockFinMesure !== "";
+
+  const resetDayFields = () => {
+    setReceptionQty(""); setReceptionRef("");
+    setIndexAvant(""); setIndexApres(""); setDestinataire(""); setDestination("");
+    setRetourQty(""); setRetourNote(""); setTempC(""); setDensite("");
+    setStockFinMesure(""); setCommentaireInv("");
+  };
+
+  const submit = () => {
+    if (!siteId || !date || !canSubmit) return;
+    if (receptionN > 0) {
+      addMovement({ siteId, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
+    }
+    if (sortieQty > 0) {
+      const base = { siteId, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), ...vcfExtra(sortieQty) };
+      addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
+    }
+    if (retourN > 0) {
+      addMovement({ siteId, type: "retour_camion", date, quantity: retourN, delta: retourN, camion, destination: retourNote, ...vcfExtra(retourN) });
+    }
+    const invExtra = vcfFin
+      ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
+      : {};
+    addInventaire({ siteId, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
+    resetDayFields();
+  };
+
+  const dayMovs = movements.filter((m) => m.siteId === siteId && m.date === date).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+  const existingInv = inventaires.find((i) => i.siteId === siteId && i.date === date);
+
+  return (
+    <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+      {canWrite && (
+        <div className="somip-panel" style={{ flex: "1 1 340px", padding: 18 }}>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du jour</h3>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Site">
+                <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+                  {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div style={{ flex: 1 }}>
+              <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+            </div>
+          </div>
+
+          {existingInv && (
+            <p style={{ margin: "-6px 0 12px", fontSize: 11.5, color: C.warning }}>
+              Un Stock fin a déjà été enregistré pour ce site à cette date ({fmt(existingInv.stockPhysique)} L). Enregistrer à nouveau ajoutera un second inventaire.
+            </p>
+          )}
+
+          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (calculé)</span>
+            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
+          </div>
+
+          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Réception</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
+            <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>
+          </div>
+
+          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button className={`somip-tab ${sortieMode === "vente" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("vente")}>Vente</button>
+            <button className={`somip-tab ${sortieMode === "camion" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("camion")}>Vers camion</button>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
+            <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
+          </div>
+          {lastIndexForSite !== undefined && (
+            <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
+              Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+            </p>
+          )}
+          {sortieMode === "vente" ? (
+            <Field label="Destinataire / motif (optionnel)"><input className="somip-input" value={destinataire} onChange={(e) => setDestinataire(e.target.value)} placeholder="Ex : Atelier, Engin X..." /></Field>
+          ) : (
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}>
+                <Field label="Camion">
+                  <select className="somip-select" value={camion} onChange={(e) => setCamion(e.target.value)}>
+                    {TRUCKS.map((t) => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <div style={{ flex: 1 }}><Field label="Destination"><input className="somip-input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Ex : Carrière Nord" /></Field></div>
+            </div>
+          )}
+          {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
+
+          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Retour cuve (camion)</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Field label="Quantité retournée (L)"><input type="number" className="somip-input" value={retourQty} onChange={(e) => setRetourQty(e.target.value)} placeholder="0" /></Field></div>
+            <div style={{ flex: 1 }}><Field label="Provenance / motif (optionnel)"><input className="somip-input" value={retourNote} onChange={(e) => setRetourNote(e.target.value)} placeholder="Ex : Reliquat Carrière Nord" /></Field></div>
+          </div>
+
+          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Température &amp; densité (du jour)</p>
+          <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfPreview} compact />
+
+          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "12px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
+            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheoriqueAmbiant)} L</span>
+          </div>
+
+          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Stock fin — jauge mesurée <span style={{ color: C.danger, fontWeight: 700 }}>*</span></p>
+          <Field label="Stock fin mesuré (L, obligatoire)"><input type="number" className="somip-input" value={stockFinMesure} onChange={(e) => setStockFinMesure(e.target.value)} placeholder="Lecture directe de la jauge" /></Field>
+          <Field label="Commentaire inventaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaireInv} onChange={(e) => setCommentaireInv(e.target.value)} /></Field>
+
+          {preview && (
+            <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ color: C.sub }}>Base retenue</span>
+                <Badge color={has15 ? C.blue : C.sub}>{has15 ? "15°C" : "Ambiant"}</Badge>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ color: C.sub }}>Écart</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: NATURE_META[preview.nature].color }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: C.sub }}>Nature</span>
+                <Badge color={NATURE_META[preview.nature].color}>{NATURE_META[preview.nature].label}</Badge>
+              </div>
+            </div>
+          )}
+
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!canSubmit}>
+            <Plus size={15} /> Enregistrer la journée
+          </button>
+          {!canSubmit && stockFinMesure === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock fin (jauge) est obligatoire pour enregistrer.</p>}
+        </div>
+      )}
+
+      <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Mouvements du {date} — {site?.name}</h3>
+        <table className="somip-table">
+          <thead><tr><th>Type</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th>{canManage && <th></th>}</tr></thead>
+          <tbody>
+            {dayMovs.length === 0 && <EmptyRow colSpan={canManage ? 4 : 3} text="Aucune écriture pour ce jour." />}
+            {dayMovs.map((m) => {
+              const meta = TYPE_META[m.type];
+              const label = m.type === "reception" ? "Réception" : m.type === "sortie" ? "Vente" : m.type === "sortie_camion" ? "Camion" : m.type === "retour_camion" ? "Retour" : "Ajustement";
+              const detail = m.type === "reception" ? (m.ref || "—") : m.type === "sortie" ? (m.destinataire || "—") : m.camion ? `${m.camion} ${m.type === "retour_camion" ? "←" : "→"} ${m.destination || "—"}` : "—";
+              return (
+                <tr key={m.id}>
+                  <td><Badge color={meta.color}>{label}</Badge></td>
+                  <td style={{ color: C.sub }}>{detail}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>{meta.sign} {fmt(m.quantity)} L</td>
+                  {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>}
+                </tr>
+              );
+            })}
+            {existingInv && (
+              <tr>
+                <td><Badge color={C.blue}>Stock fin</Badge></td>
+                <td style={{ color: C.sub }}>Jauge mesurée{existingInv.commentaire ? ` — ${existingInv.commentaire}` : ""}</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(existingInv.stockPhysique)} L</td>
+                {canManage && <td></td>}
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
 function ReceptionsView({ sites, movements, addMovement, deleteMovement, canWrite, canManage }) {
   const [form, setForm] = useState({ siteId: sites[0]?.id || "", date: todayStr(), quantity: "", ref: "", commentaire: "" });
   const [filterSite, setFilterSite] = useState("all");
@@ -1642,7 +1892,8 @@ function ReportsView({ sites, movements, inventaires, settings, stockOf }) {
     { id: "journalier", label: "Journalier" },
     { id: "decadaire", label: "Décadaire" },
     { id: "mensuel", label: "Mensuel" },
-    { id: "etat", label: "État des stocks" },
+    { id: "etat_ambiant", label: "État des stocks — Ambiant" },
+    { id: "etat_15", label: "État des stocks — 15°C" },
     { id: "exposition", label: "Exposition" },
     { id: "pertesgains", label: "Pertes/Gains par site" },
   ];
@@ -1656,7 +1907,8 @@ function ReportsView({ sites, movements, inventaires, settings, stockOf }) {
       {tab === "journalier" && <DailyReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "decadaire" && <DecadeReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "mensuel" && <MonthlyReport sites={sites} movements={movements} inventaires={inventaires} settings={settings} />}
-      {tab === "etat" && <StockStatementReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "etat_ambiant" && <StockStatementAmbiant sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "etat_15" && <StockStatement15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "exposition" && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} />}
       {tab === "pertesgains" && <LossGainReport sites={sites} inventaires={inventaires} />}
     </div>
@@ -1883,40 +2135,35 @@ function MonthlyReport({ sites, movements, inventaires, settings }) {
 }
 
 /* ---- État journalier des stocks (photographie à une date) ---- */
-function StockStatementReport({ sites, movements, inventaires }) {
+function StockStatementAmbiant({ sites, movements, inventaires }) {
   const [date, setDate] = useState(todayStr());
 
   const rows = sites.map((s) => {
     const stockDebut = stockBeforeDate(s, movements, date);
     const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
-    // Ventes, chargements et retours camions partagent le même compteur physique : la séquence
-    // d'index (avant de la 1ère opération -> après la dernière) est calculée sur les TROIS
-    // types combinés, mais les volumes sont distingués dans les totaux.
     const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
     const reception = sumQty(dayMovs, ["reception"]);
     const ventes = sumQty(dayMovs, ["sortie"]);
     const chargementsCamions = sumQty(dayMovs, ["sortie_camion"]);
     const retourCamions = sumQty(dayMovs, ["retour_camion"]);
     const sorties = ventes + chargementsCamions;
-    const ajustement = dayMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
-    const stockTheorique = stockDebut + reception + retourCamions - sorties + ajustement;
+    const stockTheorique = stockDebut + reception + retourCamions - sorties;
     const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
     const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
     const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
     const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
-    return {
-      site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique,
-      stockPhysique: inv ? inv.stockPhysique : null, nature: inv ? inv.nature : null, ecart: inv ? inv.ecart : null,
-    };
+    const stockFin = inv ? inv.stockPhysique : null;
+    const ecart = stockFin !== null ? stockFin - stockTheorique : null;
+    return { site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique, stockFin, ecart };
   });
 
-  const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_${date}.xlsx`, [{
-    name: "Etat journalier", rows: rows.map((r) => ({
+  const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_Ambiant_${date}.xlsx`, [{
+    name: "Etat ambiant", rows: rows.map((r) => ({
       Site: r.site.name, "Stock début (L)": Math.round(r.stockDebut), "Réception (L)": Math.round(r.reception),
       "Ventes (L)": Math.round(r.ventes), "Chargement camions (L)": Math.round(r.chargementsCamions), "Retour camions (L)": Math.round(r.retourCamions),
       "Index avant": r.sortIndexAvant ?? "", "Index après": r.sortIndexApres ?? "",
       "Stock théorique (L)": Math.round(r.stockTheorique),
-      "Stock physique (L)": r.stockPhysique !== null ? Math.round(r.stockPhysique) : "",
+      "Stock fin mesuré - jauge (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
       "Gain/Perte (L)": r.ecart !== null ? Math.round(r.ecart) : "",
     })),
   }]);
@@ -1927,7 +2174,7 @@ function StockStatementReport({ sites, movements, inventaires }) {
         <Field label="Date de l'état journalier"><input type="date" className="somip-input" style={{ maxWidth: 220 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="État journalier des stocks" period={`Journée du ${date}`} />
+        <ReportHeader title="État journalier des stocks — Base ambiante" period={`Journée du ${date}`} />
         <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
@@ -1938,7 +2185,7 @@ function StockStatementReport({ sites, movements, inventaires }) {
                 <th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Chargement camions</th>
                 <th style={{ textAlign: "right" }}>Retour camions</th>
                 <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
-                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock physique</th>
+                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin (jauge)</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
             </thead>
@@ -1954,18 +2201,100 @@ function StockStatementReport({ sites, movements, inventaires }) {
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexApres !== null ? fmt(r.sortIndexApres) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{r.stockPhysique !== null ? `${fmt(r.stockPhysique)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.nature === "perte" ? C.danger : r.nature === "gain" ? C.success : C.sub }}>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
                     {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
                   </td>
                 </tr>
               ))}
             </tbody>
-
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Stock physique et Gain/Perte ne s'affichent que pour les sites ayant un inventaire enregistré à cette date. Ventes, chargements et retours camions utilisant souvent le même compteur (ex. Prehomo, Okouma), l'Index avant/après reflète la séquence complète des trois types d'opérations ce jour-là (index avant de la 1ère opération, index après de la dernière), tandis que les volumes sont distingués colonne par colonne.
+          Base entièrement en volumes ambiants (aucune correction de température). Stock fin = valeur mesurée à la jauge, saisie lors de la Saisie journalière. Gain/Perte = Stock fin − Stock théorique. N'apparaît que pour les sites où un Stock fin a été saisi ce jour-là.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function StockStatement15({ sites, movements, inventaires }) {
+  const [date, setDate] = useState(todayStr());
+
+  const rows = sites.map((s) => {
+    const stockDebut = stockBeforeDate15(s, movements, date);
+    const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
+    const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+    const reception = sumQty15(dayMovs, ["reception"]);
+    const ventes = sumQty15(dayMovs, ["sortie"]);
+    const chargementsCamions = sumQty15(dayMovs, ["sortie_camion"]);
+    const retourCamions = sumQty15(dayMovs, ["retour_camion"]);
+    const sorties = ventes + chargementsCamions;
+    const stockTheorique = stockDebut + reception + retourCamions - sorties;
+    const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
+    const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
+    const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+    const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
+    const stockFin = inv && inv.stockPhysique15 !== undefined ? inv.stockPhysique15 : null;
+    const ecart = stockFin !== null ? stockFin - stockTheorique : null;
+    return { site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique, stockFin, ecart, hasTemp: inv ? inv.stockPhysique15 !== undefined : false };
+  });
+
+  const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_15C_${date}.xlsx`, [{
+    name: "Etat 15C", rows: rows.map((r) => ({
+      Site: r.site.name, "Stock début 15°C (L)": Math.round(r.stockDebut), "Réception 15°C (L)": Math.round(r.reception),
+      "Ventes 15°C (L)": Math.round(r.ventes), "Chargement camions 15°C (L)": Math.round(r.chargementsCamions), "Retour camions 15°C (L)": Math.round(r.retourCamions),
+      "Index avant": r.sortIndexAvant ?? "", "Index après": r.sortIndexApres ?? "",
+      "Stock théorique 15°C (L)": Math.round(r.stockTheorique),
+      "Stock fin 15°C - jauge (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
+      "Gain/Perte 15°C (L)": r.ecart !== null ? Math.round(r.ecart) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14 }}>
+        <Field label="Date de l'état journalier"><input type="date" className="somip-input" style={{ maxWidth: 220 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="État journalier des stocks — Base à 15°C" period={`Journée du ${date}`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Site</th><th style={{ textAlign: "right" }}>Stock début</th>
+                <th style={{ textAlign: "right" }}>Réception</th>
+                <th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Chargement camions</th>
+                <th style={{ textAlign: "right" }}>Retour camions</th>
+                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin (jauge)</th>
+                <th style={{ textAlign: "right" }}>Gain/Perte</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.danger : C.sub }}>{r.ventes ? `−${fmt(r.ventes)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexApres !== null ? fmt(r.sortIndexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
+                    {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Toutes les valeurs sont corrigées à 15°C (ASTM D1250 / API MPMS 11.1). Stock fin = valeur mesurée à la jauge, corrigée avec la température/densité saisies au moment de la mesure. N'apparaît que pour les sites où une température et une densité ont été renseignées avec le Stock fin ce jour-là.
         </p>
       </div>
     </div>
