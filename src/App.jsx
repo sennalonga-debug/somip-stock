@@ -1204,14 +1204,23 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
   const [densite, setDensite] = useState("");
   const [stockFinMesure, setStockFinMesure] = useState("");
   const [commentaireInv, setCommentaireInv] = useState("");
+  const [stockDebutConfirm, setStockDebutConfirm] = useState("");
 
   const site = sites.find((s) => s.id === siteId);
   const stockDebut = site ? stockBeforeDate(site, movements, date) : 0;
+  const isFirstOfMonth = date.slice(-2) === "01";
+
+  useEffect(() => {
+    if (isFirstOfMonth) setStockDebutConfirm(String(Math.round(stockDebut)));
+    else setStockDebutConfirm("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteId, date]);
+  const stockDebutEffective = isFirstOfMonth && stockDebutConfirm !== "" ? Number(stockDebutConfirm) : stockDebut;
   const receptionN = Number(receptionQty) || 0;
   const retourN = Number(retourQty) || 0;
   const sortieQty = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
   const sortieValid = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQty > 0);
-  const stockTheoriqueAmbiant = stockDebut + receptionN + retourN - sortieQty;
+  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty;
   const stockTheorique15 = site ? stockBeforeDate15(site, movements, date) : 0;
 
   // Ventes, chargements et retours camions partagent souvent le même compteur (Prehomo, Okouma...).
@@ -1236,7 +1245,7 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
   const ecart = stockFinMesure === "" ? null : physiqueUsed - theoriqueUsed;
   const preview = ecart === null ? null : classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
 
-  const canSubmit = sortieValid && stockFinMesure !== "";
+  const canSubmit = sortieValid && stockFinMesure !== "" && (!isFirstOfMonth || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
@@ -1247,6 +1256,12 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
 
   const submit = () => {
     if (!siteId || !date || !canSubmit) return;
+    if (isFirstOfMonth) {
+      const diff = Number(stockDebutConfirm) - stockDebut;
+      if (diff !== 0) {
+        addMovement({ siteId, type: "ajustement", date, quantity: Math.abs(diff), delta: diff, commentaire: "Confirmation du stock début de mois" });
+      }
+    }
     if (receptionN > 0) {
       addMovement({ siteId, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
     }
@@ -1295,6 +1310,18 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
             <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (calculé)</span>
             <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
           </div>
+
+          {isFirstOfMonth && (
+            <>
+              <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.warning }}>1er du mois — Stock début du mois <span style={{ color: C.danger }}>*</span></p>
+              <Field label="Confirme ou corrige le stock début du mois (L, obligatoire)">
+                <input type="number" className="somip-input" value={stockDebutConfirm} onChange={(e) => setStockDebutConfirm(e.target.value)} placeholder="Ex : 20000" />
+              </Field>
+              <p style={{ margin: "-6px 0 12px", fontSize: 11, color: C.sub }}>
+                Pré-rempli avec le stock calculé automatiquement ({fmt(stockDebut)} L). Corrige cette valeur si le relevé physique de début de mois est différent — l'écart sera enregistré comme un ajustement.
+              </p>
+            </>
+          )}
 
           <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Réception</p>
           <div style={{ display: "flex", gap: 8 }}>
@@ -1371,6 +1398,7 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
             <Plus size={15} /> Enregistrer la journée
           </button>
           {!canSubmit && stockFinMesure === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock fin (jauge) est obligatoire pour enregistrer.</p>}
+          {!canSubmit && stockFinMesure !== "" && isFirstOfMonth && stockDebutConfirm === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock début du mois est obligatoire pour enregistrer.</p>}
         </div>
       )}
 
