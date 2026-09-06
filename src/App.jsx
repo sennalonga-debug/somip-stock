@@ -874,19 +874,23 @@ export default function App() {
 
   /* ---- mutations : inventaires ---- */
   const addInventaire = ({ siteId, product = "gasoil", date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => withSync(async () => {
+    // Le Gain/Perte "officiel" est toujours le résultat de l'équation de stock en base ambiante
+    // (Stock physique mesuré − Stock théorique). La base 15°C est fournie à titre indicatif
+    // (page "État des stocks — 15°C"), mais ne doit jamais se substituer à ce résultat, pour
+    // éviter de confondre un écart réel avec un simple effet de conversion ambiant/15°C.
     const theoriqueAmbiant = stockOf(siteId, product);
     const theorique15 = stockOf15(siteId, product);
-    const has15 = stockPhysique15 !== undefined;
-    const basisEcart = has15 ? "15c" : "ambiant";
-    const theoriqueUsed = has15 ? theorique15 : theoriqueAmbiant;
-    const physiqueUsed = has15 ? stockPhysique15 : stockPhysique;
+    const basisEcart = "ambiant";
+    const theoriqueUsed = theoriqueAmbiant;
+    const physiqueUsed = stockPhysique;
     const ecart = physiqueUsed - theoriqueUsed;
     const cls = classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
     const adjId = uid();
+    const has15 = stockPhysique15 !== undefined;
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
     const adjMovement = {
       id: adjId, siteId, product, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
-      commentaire: `Ajustement suite à l'inventaire du ${date} (base ${has15 ? "15°C" : "ambiante"})`,
+      commentaire: `Ajustement suite à l'inventaire du ${date} (base ambiante)`,
       createdBy: currentUserName, createdAt: new Date().toISOString(),
     };
     const invRecord = {
@@ -1482,9 +1486,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
 
   const stockFinN = Number(stockFinMesure) || 0;
   const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempCFin === "" ? NaN : Number(tempCFin), densiteObservee: Number(densiteFin) || 0 });
+  // Le Gain/Perte "officiel" est toujours en base ambiante (voir addInventaire) : le 15°C est
+  // indicatif (page dédiée), il ne doit jamais se mélanger au résultat de l'équation de stock.
   const has15 = !!vcfFin;
-  const theoriqueUsed = has15 ? stockTheorique15 : stockTheoriqueAmbiant;
-  const physiqueUsed = has15 ? vcfFin.volume15 : stockFinN;
+  const theoriqueUsed = stockTheoriqueAmbiant;
+  const physiqueUsed = stockFinN;
   const ecart = stockFinMesure === "" ? null : physiqueUsed - theoriqueUsed;
   const preview = ecart === null ? null : classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
 
@@ -1732,16 +1738,17 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
             <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                 <span style={{ color: C.sub }}>Base retenue</span>
-                <Badge color={has15 ? C.blue : C.sub}>{has15 ? "15°C" : "Ambiant"}</Badge>
+                <Badge color={C.sub}>Ambiant</Badge>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-                <span style={{ color: C.sub }}>Écart</span>
+                <span style={{ color: C.sub }}>Écart (Gain/Perte)</span>
                 <span className="somip-mono" style={{ fontWeight: 700, color: NATURE_META[preview.nature].color }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L{isLub && ` (${ecart >= 0 ? "+" : ""}${fmt(ecart * lubDensite)} kg)`}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ color: C.sub }}>Nature</span>
                 <Badge color={NATURE_META[preview.nature].color}>{NATURE_META[preview.nature].label}</Badge>
               </div>
+              {has15 && <p style={{ margin: "8px 0 0", fontSize: 11, color: C.sub }}>Le Gain/Perte officiel reste toujours en base ambiante. La version corrigée à 15°C est disponible séparément dans Rapports → État des stocks — 15°C.</p>}
             </div>
           )}
 
