@@ -51,6 +51,22 @@ const LUBRICANTS = [
   { id: "rubia_tir7400", label: "Rubia Tir7400", densite: 0.883 },
 ];
 const LUBRICANT_SITE_IDS = ["prehomo", "okouma"];
+// Certains sites ont plusieurs compteurs physiques distincts pour les sorties, identifiés
+// par le code du site (plus fiable que l'id interne). Par défaut : un seul compteur.
+const SITE_METERS_BY_CODE = {
+  PRH: ["Compteur 1", "Compteur 2"],
+  OKM: ["Compteur 1", "Compteur 2"],
+  LPK: ["Compteur 1", "Compteur 2"],
+  CMM: ["Compteur 1", "Compteur 2"],
+  GTR: ["Compteur 1", "Compteur 2"],
+  FCV: ["Compteur"],
+  GSB: ["Compteur"],
+  CIM: ["Compteur 1", "Compteur 2", "Compteur Agglo"],
+};
+function metersForSite(site) {
+  if (!site) return ["Compteur"];
+  return SITE_METERS_BY_CODE[site.code] || ["Compteur"];
+}
 const PRODUCTS = [{ id: "gasoil", label: "Gasoil" }, ...LUBRICANTS];
 
 const MOVEMENTS_SEED = [
@@ -285,7 +301,7 @@ const rowToMovement = (r) => ({
   id: r.id, siteId: r.site_id, type: r.type, date: r.date, quantity: Number(r.quantity), delta: Number(r.delta),
   product: r.product || "gasoil",
   ref: r.ref || undefined, commentaire: r.commentaire || "", destinataire: r.destinataire || undefined,
-  camion: r.camion || undefined, destination: r.destination || undefined, isDemo: !!r.is_demo,
+  camion: r.camion || undefined, destination: r.destination || undefined, compteur: r.compteur || undefined, isDemo: !!r.is_demo,
   temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee),
   densite15: numOrUndef(r.densite15), vcf: numOrUndef(r.vcf), volumeCorrige15: numOrUndef(r.volume_corrige15),
   indexAvant: numOrUndef(r.index_avant), indexApres: numOrUndef(r.index_apres),
@@ -295,7 +311,7 @@ const movementToRow = (m) => ({
   site_id: m.siteId, type: m.type, date: m.date, quantity: m.quantity, delta: m.delta,
   product: m.product || "gasoil",
   ref: m.ref ?? null, commentaire: m.commentaire ?? null, destinataire: m.destinataire ?? null,
-  camion: m.camion ?? null, destination: m.destination ?? null, is_demo: !!m.isDemo,
+  camion: m.camion ?? null, destination: m.destination ?? null, compteur: m.compteur ?? null, is_demo: !!m.isDemo,
   temperature_c: m.temperatureC ?? null, densite_observee: m.densiteObservee ?? null,
   densite15: m.densite15 ?? null, vcf: m.vcf ?? null, volume_corrige15: m.volumeCorrige15 ?? null,
   index_avant: m.indexAvant ?? null, index_apres: m.indexApres ?? null,
@@ -1442,6 +1458,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const [receptionRef, setReceptionRef] = useState("");
   const [indexAvant, setIndexAvant] = useState("");
   const [indexApres, setIndexApres] = useState("");
+  const [compteur, setCompteur] = useState("");
   const [sortieMode, setSortieMode] = useState("vente"); // "vente" | "camion"
   const [destinataire, setDestinataire] = useState("");
   const [camion, setCamion] = useState("");
@@ -1471,6 +1488,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   useEffect(() => { if (truckSites[0] && !camion) setCamion(truckSites[0].id); }, [truckSites, camion]);
 
   const site = sites.find((s) => s.id === siteId);
+  const meters = metersForSite(site);
+  useEffect(() => { setCompteur(meters[0] || "Compteur"); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
   const productStockEntry = productStocks.find((p) => p.siteId === siteId && p.product === product);
   const stockDebut = isLub
     ? stockBeforeDateProduct(productStockEntry?.stockInitial || 0, movements, siteId, product, date, inventaires)
@@ -1493,7 +1512,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
 
   // Chaque produit (gasoil, chaque lubrifiant) et chaque camion a son propre compteur de sortie.
   const lastIndexForSite = movements
-    .filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && ((isLub || isMobileSite) ? m.type === "sortie" : (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion")) && m.indexApres !== undefined)
+    .filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && (meters.length > 1 ? (m.compteur || meters[0]) === compteur : true) && ((isLub || isMobileSite) ? m.type === "sortie" : (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion")) && m.indexApres !== undefined)
     .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
     .slice(-1)[0]?.indexApres;
   const indexMismatch = lastIndexForSite !== undefined && indexAvant !== "" && Number(indexAvant) !== lastIndexForSite;
@@ -1515,7 +1534,9 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const ecart = stockFinMesure === "" ? null : physiqueUsed - theoriqueUsed;
   const preview = ecart === null ? null : classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
 
-  const canSubmit = sortieValid && stockFinMesure !== "" && (!isFirstOfMonth || stockDebutConfirm !== "") && !existingInv;
+  const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
+  const stockFinConflict = stockFinMesure !== "" && !!existingInv;
+  const canSubmit = sortieValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
@@ -1546,10 +1567,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
       }
       if (sortieQty > 0) {
         let ok;
+        const compteurField = meters.length > 1 ? compteur : undefined;
         if (isLub || isMobileSite) {
-          ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire });
+          ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
         } else {
-          const base = { siteId, product, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), ...vcfExtra(sortieQty) };
+          const base = { siteId, product, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), compteur: compteurField, ...vcfExtra(sortieQty) };
           ok = await addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
         }
         if (!ok) return;
@@ -1562,11 +1584,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
         const ok = await addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: -retourCuveTruckN, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
         if (!ok) return;
       }
-      const invExtra = vcfFin
-        ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
-        : {};
-      const okInv = await addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
-      if (!okInv) return;
+      if (stockFinMesure !== "") {
+        const invExtra = vcfFin
+          ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
+          : {};
+        const okInv = await addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
+        if (!okInv) return;
+      }
       resetDayFields();
     } finally {
       setSubmitting(false);
@@ -1664,13 +1688,20 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
                 <button className={`somip-tab ${sortieMode === "vente" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("vente")}>Vente</button>
                 <button className={`somip-tab ${sortieMode === "camion" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("camion")}>Vers camion</button>
               </div>
+              {meters.length > 1 && (
+                <Field label="Compteur">
+                  <select className="somip-select" value={compteur} onChange={(e) => setCompteur(e.target.value)}>
+                    {meters.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </Field>
+              )}
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
                 <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
               </div>
               {lastIndexForSite !== undefined && (
                 <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
-                  Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+                  Dernier index enregistré sur ce site{meters.length > 1 ? ` (${compteur})` : ""} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
                 </p>
               )}
               {sortieMode === "camion" && (
@@ -1689,13 +1720,20 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
           ) : (
             <>
               <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
+              {meters.length > 1 && (
+                <Field label="Compteur">
+                  <select className="somip-select" value={compteur} onChange={(e) => setCompteur(e.target.value)}>
+                    {meters.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </Field>
+              )}
               <div style={{ display: "flex", gap: 8 }}>
                 <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
                 <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
               </div>
               {lastIndexForSite !== undefined && (
                 <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
-                  Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+                  Dernier index enregistré sur ce site{meters.length > 1 ? ` (${compteur})` : ""} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
                 </p>
               )}
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
@@ -1782,10 +1820,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
           )}
 
           <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!canSubmit || submitting}>
-            {submitting ? <Loader2 size={15} style={{ animation: "somipSpin .8s linear infinite" }} /> : <Plus size={15} />} {submitting ? "Enregistrement..." : "Enregistrer la journée"}
+            {submitting ? <Loader2 size={15} style={{ animation: "somipSpin .8s linear infinite" }} /> : <Plus size={15} />} {submitting ? "Enregistrement..." : "Enregistrer"}
           </button>
-          {!canSubmit && stockFinMesure === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock fin (jauge) est obligatoire pour enregistrer.</p>}
-          {!canSubmit && stockFinMesure !== "" && isFirstOfMonth && stockDebutConfirm === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock début du mois est obligatoire pour enregistrer.</p>}
+          <p style={{ margin: "8px 0 0", fontSize: 11, color: C.sub }}>
+            Tu peux enregistrer un compteur à la fois (reviens plus tard pour les autres) — seul le Stock fin est à saisir une seule fois, en fin de journée.
+          </p>
+          {!canSubmit && !hasSomethingToSave && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Remplis au moins un champ (Réception, Sortie, Retour ou Stock fin) pour enregistrer.</p>}
+          {!canSubmit && stockFinConflict && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.danger }}>Un Stock fin existe déjà pour ce jour — supprime-le d'abord si tu veux le corriger.</p>}
+          {!canSubmit && hasSomethingToSave && !stockFinConflict && isFirstOfMonth && stockDebutConfirm === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock début du mois est obligatoire pour enregistrer.</p>}
         </div>
       )}
 
