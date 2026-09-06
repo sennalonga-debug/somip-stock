@@ -198,8 +198,19 @@ function stockBeforeDate(site, movements, dateExclusive, inventaires) {
 function stockThroughDate(site, movements, dateInclusive, inventaires) {
   return anchoredStock(site.id, site.stockInitial, movements, inventaires || [], "gasoil", dateInclusive, true);
 }
-function stockBeforeDate15(site, movements, dateExclusive) {
-  return movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date < dateExclusive).reduce((a, m) => a + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
+function anchoredStock15(siteId, stockInitialFallback, movements, inventaires, product, cutoffDate, inclusive) {
+  const priorInv = pickLatestInv(
+    inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === product && i.stockPhysique15 !== undefined && (inclusive ? i.date <= cutoffDate : i.date < cutoffDate))
+  );
+  if (priorInv) {
+    const afterMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date > priorInv.date && (inclusive ? m.date <= cutoffDate : m.date < cutoffDate));
+    return afterMovs.reduce((a, m) => a + Math.sign(m.delta) * movementQty15(m), priorInv.stockPhysique15);
+  }
+  const movs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && (inclusive ? m.date <= cutoffDate : m.date < cutoffDate));
+  return movs.reduce((a, m) => a + Math.sign(m.delta) * movementQty15(m), stockInitialFallback);
+}
+function stockBeforeDate15(site, movements, dateExclusive, inventaires) {
+  return anchoredStock15(site.id, site.stockInitial, movements, inventaires || [], "gasoil", dateExclusive, false);
 }
 function stockBeforeDateProduct(stockInitial, movements, siteId, product, dateExclusive, inventaires) {
   return anchoredStock(siteId, stockInitial, movements, inventaires || [], product, dateExclusive, false);
@@ -1508,7 +1519,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const sortieQty = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
   const sortieValid = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQty > 0);
   const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty - retourCuveTruckN;
-  const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date) : 0;
+  const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date, inventaires) : 0;
 
   // Chaque produit (gasoil, chaque lubrifiant) et chaque camion a son propre compteur de sortie.
   const lastIndexForSite = movements
@@ -2537,7 +2548,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
     const end = new Date(bounds.end);
     while (cur <= end) {
       const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate15(site, movements, d);
+      const stockDebut = stockBeforeDate15(site, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty15(dayMovs, ["reception"]);
       const ventes = isTruck ? sumQty15(dayMovs, ["sortie"]) : sumQty15(dayMovs, ["sortie", "sortie_camion"]);
@@ -2953,7 +2964,7 @@ function StockStatement15({ sites, movements, inventaires }) {
   const [date, setDate] = useState(todayStr());
 
   const rows = sites.map((s) => {
-    const stockDebut = stockBeforeDate15(s, movements, date);
+    const stockDebut = stockBeforeDate15(s, movements, date, inventaires);
     const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === date);
     const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
     const reception = sumQty15(dayMovs, ["reception"]);
