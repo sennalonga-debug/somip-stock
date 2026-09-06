@@ -2386,7 +2386,7 @@ function DailyReport({ sites, movements, inventaires }) {
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{r.receptions ? `+${fmt(r.receptions)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{r.retours ? `+${fmt(r.retours)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>{r.sorties ? `−${fmt(r.sorties)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.ink : C.sub, fontWeight: r.sorties ? 600 : 400 }}>{r.sorties ? `${fmt(r.sorties)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockFin)} L</td>
                   <td>{r.inv ? <Badge color={NATURE_META[r.inv.nature].color}>{NATURE_META[r.inv.nature].label} {r.inv.ecart >= 0 ? "+" : ""}{fmt(r.inv.ecart)} L</Badge> : <span style={{ color: C.sub }}>—</span>}</td>
                 </tr>
@@ -2396,7 +2396,7 @@ function DailyReport({ sites, movements, inventaires }) {
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totals.stockDebut)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(totals.receptions)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(totals.retours)} L</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.danger }}>−{fmt(totals.sorties)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totals.sorties)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totals.stockFin)} L</td>
                 <td></td>
               </tr>
@@ -2849,7 +2849,7 @@ function GasoilSynthesisReport({ sites, movements, inventaires }) {
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.danger : C.sub }}>{r.sorties ? `−${fmt(r.sorties)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.ink : C.sub, fontWeight: r.sorties ? 600 : 400 }}>{r.sorties ? `${fmt(r.sorties)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheoriqueFin)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
@@ -3210,7 +3210,7 @@ function LubricantSynthesisReport({ sites, movements, inventaires, productStocks
                     {r.hasConfig ? <>{fmt(r.stockDebut)} L<div style={{ color: C.sub, fontSize: 10.5 }}>{fmt(r.stockDebut * r.lub.densite)} kg</div></> : <span style={{ color: C.warning, fontSize: 11 }}>non configuré</span>}
                   </td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.danger : C.sub }}>{r.sorties ? `−${fmt(r.sorties)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.ink : C.sub, fontWeight: r.sorties ? 600 : 400 }}>{r.sorties ? `${fmt(r.sorties)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>
                     {fmt(r.stockTheoriqueFin)} L<div style={{ color: C.sub, fontSize: 10.5, fontWeight: 500 }}>{fmt(r.stockTheoriqueFin * r.lub.densite)} kg</div>
                   </td>
