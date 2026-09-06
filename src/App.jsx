@@ -1433,8 +1433,6 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const [tempC, setTempC] = useState("");
   const [densite, setDensite] = useState("");
   const [stockFinMesure, setStockFinMesure] = useState("");
-  const [tempCFin, setTempCFin] = useState("");
-  const [densiteFin, setDensiteFin] = useState("");
   const [commentaireInv, setCommentaireInv] = useState("");
   const [stockDebutConfirm, setStockDebutConfirm] = useState("");
 
@@ -1444,9 +1442,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const isLub = product !== "gasoil";
   const lubDensite = LUBRICANTS.find((l) => l.id === product)?.densite || 0;
   const isMobileSite = sites.find((s) => s.id === siteId)?.isMobile || false;
+  const existingInv = inventaires.find((i) => i.siteId === siteId && (i.product || "gasoil") === product && i.date === date);
   const skipVcf = isLub;
 
   useEffect(() => { if (!isLubSite) setProduct("gasoil"); }, [siteId, isLubSite]);
+  useEffect(() => { if (!isLubSite) setSortieMode("vente"); }, [siteId, isLubSite]);
   useEffect(() => { if (truckSites[0] && !camion) setCamion(truckSites[0].id); }, [truckSites, camion]);
 
   const site = sites.find((s) => s.id === siteId);
@@ -1485,7 +1485,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const vcfPreview = skipVcf ? null : vcfFor(receptionN || sortieQty || retourN || retourCuveTruckN || 1);
 
   const stockFinN = Number(stockFinMesure) || 0;
-  const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempCFin === "" ? NaN : Number(tempCFin), densiteObservee: Number(densiteFin) || 0 });
+  const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
   // Le Gain/Perte "officiel" est toujours en base ambiante (voir addInventaire) : le 15°C est
   // indicatif (page dédiée), il ne doit jamais se mélanger au résultat de l'équation de stock.
   const has15 = !!vcfFin;
@@ -1494,13 +1494,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const ecart = stockFinMesure === "" ? null : physiqueUsed - theoriqueUsed;
   const preview = ecart === null ? null : classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
 
-  const canSubmit = sortieValid && stockFinMesure !== "" && (!isFirstOfMonth || stockDebutConfirm !== "");
+  const canSubmit = sortieValid && stockFinMesure !== "" && (!isFirstOfMonth || stockDebutConfirm !== "") && !existingInv;
 
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setDestination("");
     setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
-    setStockFinMesure(""); setTempCFin(""); setDensiteFin(""); setCommentaireInv("");
+    setStockFinMesure(""); setCommentaireInv("");
   };
 
   const [submitting, setSubmitting] = useState(false);
@@ -1542,7 +1542,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
         if (!ok) return;
       }
       const invExtra = vcfFin
-        ? { temperatureC: Number(tempCFin), densiteObservee: Number(densiteFin), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
+        ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
         : {};
       const okInv = await addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
       if (!okInv) return;
@@ -1553,7 +1553,6 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   };
 
   const dayMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date === date).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-  const existingInv = inventaires.find((i) => i.siteId === siteId && (i.product || "gasoil") === product && i.date === date);
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1587,10 +1586,15 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
             </p>
           )}
 
-          {existingInv && (
-            <p style={{ margin: "-6px 0 12px", fontSize: 11.5, color: C.warning }}>
-              Un Stock fin a déjà été enregistré pour ce site/produit à cette date ({fmt(existingInv.stockPhysique)} L). Enregistrer à nouveau ajoutera un second inventaire.
-            </p>
+          {existingInv && canManage && (
+            <div style={{ margin: "-6px 0 12px", padding: "9px 12px", background: "#FCEAEA", borderRadius: 8, fontSize: 11.5, color: C.danger }}>
+              Cette journée est déjà enregistrée pour ce site/produit (Stock fin : {fmt(existingInv.stockPhysique)} L). Pour éviter un doublon, l'enregistrement est bloqué. Si tu dois corriger cette journée, supprime d'abord la ligne "Stock fin" dans le tableau à droite, puis ressaisis.
+            </div>
+          )}
+          {existingInv && !canManage && (
+            <div style={{ margin: "-6px 0 12px", padding: "9px 12px", background: "#FCEAEA", borderRadius: 8, fontSize: 11.5, color: C.danger }}>
+              Cette journée est déjà enregistrée pour ce site/produit (Stock fin : {fmt(existingInv.stockPhysique)} L). Pour éviter un doublon, l'enregistrement est bloqué — demande au Superviseur de corriger si besoin.
+            </div>
           )}
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1629,11 +1633,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
                   Dernier index enregistré pour {isMobileSite ? "ce camion" : "ce produit"} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
                 </p>
               )}
-              <Field label="Destinataire / motif (optionnel)"><input className="somip-input" value={destinataire} onChange={(e) => setDestinataire(e.target.value)} placeholder={isMobileSite ? "Ex : Carrière Nord" : "Ex : Engin X"} /></Field>
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
               {isLub && sortieQty > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(sortieQty * lubDensite)} kg</p>}
             </>
-          ) : (
+          ) : isLubSite ? (
             <>
               <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
               <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -1649,9 +1652,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
                   Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
                 </p>
               )}
-              {sortieMode === "vente" ? (
-                <Field label="Destinataire / motif (optionnel)"><input className="somip-input" value={destinataire} onChange={(e) => setDestinataire(e.target.value)} placeholder="Ex : Atelier, Engin X..." /></Field>
-              ) : (
+              {sortieMode === "camion" && (
                 <div style={{ display: "flex", gap: 8 }}>
                   <div style={{ flex: 1 }}>
                     <Field label="Camion">
@@ -1660,14 +1661,27 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
                       </select>
                     </Field>
                   </div>
-                  <div style={{ flex: 1 }}><Field label="Destination"><input className="somip-input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Ex : Carrière Nord" /></Field></div>
                 </div>
+              )}
+              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
+            </>
+          ) : (
+            <>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
+                <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
+              </div>
+              {lastIndexForSite !== undefined && (
+                <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
+                  Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+                </p>
               )}
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
             </>
           )}
 
-          {!isLub && !isMobileSite && (
+          {isLubSite && !isLub && !isMobileSite && (
             <>
               <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Retour cuve (camion)</p>
               <div style={{ display: "flex", gap: 8 }}>
@@ -1726,12 +1740,6 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
           <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Stock fin — jauge mesurée <span style={{ color: C.danger, fontWeight: 700 }}>*</span></p>
           <Field label={`Stock fin mesuré (L, obligatoire)`}><input type="number" className="somip-input" value={stockFinMesure} onChange={(e) => setStockFinMesure(e.target.value)} placeholder="Lecture directe de la jauge" /></Field>
           {isLub && stockFinMesure !== "" && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(stockFinN * lubDensite)} kg</p>}
-          {!skipVcf && (
-            <>
-              <p style={{ margin: "6px 0 6px", fontSize: 11.5, fontWeight: 600, color: C.sub }}>Température &amp; densité au moment de la jauge (Stock fin)</p>
-              <VcfMiniPanel tempC={tempCFin} densite={densiteFin} onTempC={setTempCFin} onDensite={setDensiteFin} result={stockFinN ? vcfFin : null} compact />
-            </>
-          )}
           <Field label="Commentaire inventaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaireInv} onChange={(e) => setCommentaireInv(e.target.value)} /></Field>
 
           {preview && (
