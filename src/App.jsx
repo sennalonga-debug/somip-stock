@@ -1130,7 +1130,7 @@ export default function App() {
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} />}
@@ -1419,7 +1419,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, addMovement, addInventaire, deleteMovement, settings, canWrite, canManage }) {
+function DailyEntryView({ sites, movements, inventaires, productStocks, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
@@ -1799,7 +1799,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
                 <td><Badge color={C.blue}>Stock fin</Badge></td>
                 <td style={{ color: C.sub }}>Jauge mesurée{existingInv.commentaire ? ` — ${existingInv.commentaire}` : ""}</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(existingInv.stockPhysique)} L</td>
-                {canManage && <td></td>}
+                {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaire(existingInv)} /></td>}
               </tr>
             )}
           </tbody>
@@ -2359,7 +2359,8 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
-      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge: inv ? inv.stockPhysique : null, ecart: inv ? inv.ecart : null });
+      const stockJauge = inv ? inv.stockPhysique : null;
+      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
