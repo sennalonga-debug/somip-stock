@@ -2288,8 +2288,9 @@ function VcfView() {
 /* Rapports                                                              */
 /* ------------------------------------------------------------------ */
 function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf }) {
-  const [tab, setTab] = useState("journalier");
-  const TABS = [
+  const [tab, setTab] = useState("synthese_mensuelle_site");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const ADVANCED_TABS = [
     { id: "journalier", label: "Journalier" },
     { id: "decadaire", label: "Décadaire" },
     { id: "mensuel", label: "Mensuel" },
@@ -2305,11 +2306,20 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
   ];
   return (
     <div className="somip-fade">
-      <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        {TABS.map((t) => (
-          <button key={t.id} className={`somip-tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
-        ))}
+      <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <button className={`somip-tab ${tab === "synthese_mensuelle_site" ? "active" : ""}`} onClick={() => setTab("synthese_mensuelle_site")}>Synthèse journalière du mois</button>
+        <button className="somip-btn somip-btn-secondary" style={{ marginLeft: "auto", fontSize: 12, padding: "6px 12px" }} onClick={() => setShowAdvanced((v) => !v)}>
+          {showAdvanced ? "Masquer les rapports avancés" : "Voir plus de rapports (avancés)"}
+        </button>
       </div>
+      {showAdvanced && (
+        <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+          {ADVANCED_TABS.map((t) => (
+            <button key={t.id} className={`somip-tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
+          ))}
+        </div>
+      )}
+      {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "journalier" && <DailyReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "decadaire" && <DecadeReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "mensuel" && <MonthlyReport sites={sites} movements={movements} inventaires={inventaires} settings={settings} />}
@@ -2320,9 +2330,97 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "etat_15" && <StockStatement15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "exposition" && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} />}
       {tab === "pertesgains" && <LossGainReport sites={sites} inventaires={inventaires} />}
-      {tab === "synthese_gasoil" && <GasoilSynthesisReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "lubrifiants" && <LubricantSynthesisReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
       {tab === "bons" && <DeliveryNotesReport sites={sites} movements={movements} />}
+    </div>
+  );
+}
+
+/* ---- Synthèse journalière du mois, par site (esprit Excel : une ligne par jour) ---- */
+function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
+  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+  const [month, setMonth] = useState(currentMonth());
+  const site = sites.find((s) => s.id === siteId);
+  const bounds = monthBounds(month);
+
+  const days = [];
+  if (site) {
+    let cur = new Date(bounds.start);
+    const end = new Date(bounds.end);
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const stockDebut = stockBeforeDate(site, movements, d);
+      const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty(dayMovs, ["reception"]);
+      const retourCamions = sumQty(dayMovs, ["retour_camion"]);
+      const ventes = sumQty(dayMovs, ["sortie", "sortie_camion"]);
+      const stockTheorique = stockDebut + reception + retourCamions - ventes;
+      const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
+      const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge: inv ? inv.stockPhysique : null, ecart: inv ? inv.ecart : null });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_${site?.code || ""}_${month}.xlsx`, [{
+    name: "Synthèse", rows: days.map((d) => ({
+      Date: d.date, "Stock début (L)": Math.round(d.stockDebut), "Réception (L)": Math.round(d.reception), "Ventes (L)": Math.round(d.ventes),
+      "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
+      "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
+      "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Site">
+          <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+            {sites.filter((s) => !s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title={`Synthèse journalière — ${site?.name || ""}`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
+                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th>
+                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
+                <th style={{ textAlign: "right" }}>Gain/Perte</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne un site." />}
+              {days.map((d) => (
+                <tr key={d.date}>
+                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
+                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique.
+        </p>
+      </div>
     </div>
   );
 }
