@@ -588,14 +588,18 @@ export default function App() {
   const [view, setView] = useState("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [notice, setNotice] = useState(null);
+  const [noticeType, setNoticeType] = useState("success");
   const [syncStatus, setSyncStatus] = useState(SUPABASE_CONFIGURED ? "ok" : "unavailable");
   const [lastSync, setLastSync] = useState(null);
   const noticeTimer = useRef(null);
 
-  const flash = (msg) => {
+  const flash = (msg, type = "success") => {
     clearTimeout(noticeTimer.current);
     setNotice(msg);
-    noticeTimer.current = setTimeout(() => setNotice(null), 3000);
+    setNoticeType(type);
+    if (type !== "error") {
+      noticeTimer.current = setTimeout(() => setNotice(null), 3000);
+    }
   };
 
   /* ---- authentification ---- */
@@ -720,7 +724,7 @@ export default function App() {
     } catch (e) {
       setSyncStatus("error");
       console.error(e);
-      flash(e?.message ? `Erreur : ${e.message}` : "Action refusée ou erreur de sauvegarde.");
+      flash(e?.message ? `Erreur : ${e.message}` : "Action refusée ou erreur de sauvegarde.", "error");
     }
   };
 
@@ -1092,10 +1096,24 @@ export default function App() {
             </div>
             <div style={{ fontSize: 12.5, color: C.sub, textAlign: "right" }}>
               {new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
-              {notice && <div className="somip-fade" style={{ marginTop: 4, color: C.success, fontWeight: 600 }}>{notice}</div>}
             </div>
           </div>
         </header>
+
+        {notice && (
+          <div className="somip-no-print" style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+            padding: "10px 20px", fontSize: 13, fontWeight: 600,
+            background: noticeType === "error" ? "#FCEAEA" : "#E9F7EF",
+            color: noticeType === "error" ? C.danger : C.success,
+            borderBottom: `1px solid ${noticeType === "error" ? "#F3C6C6" : "#C9EBD7"}`,
+          }}>
+            <span>{notice}</span>
+            <button onClick={() => setNotice(null)} style={{ border: "none", background: "none", cursor: "pointer", color: "inherit", flexShrink: 0 }}>
+              <X size={16} />
+            </button>
+          </div>
+        )}
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
@@ -1409,6 +1427,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const [tempC, setTempC] = useState("");
   const [densite, setDensite] = useState("");
   const [stockFinMesure, setStockFinMesure] = useState("");
+  const [tempCFin, setTempCFin] = useState("");
+  const [densiteFin, setDensiteFin] = useState("");
   const [commentaireInv, setCommentaireInv] = useState("");
   const [stockDebutConfirm, setStockDebutConfirm] = useState("");
 
@@ -1459,7 +1479,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const vcfPreview = skipVcf ? null : vcfFor(receptionN || sortieQty || retourN || retourCuveTruckN || 1);
 
   const stockFinN = Number(stockFinMesure) || 0;
-  const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
+  const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempCFin === "" ? NaN : Number(tempCFin), densiteObservee: Number(densiteFin) || 0 });
   const has15 = !!vcfFin;
   const theoriqueUsed = has15 ? stockTheorique15 : stockTheoriqueAmbiant;
   const physiqueUsed = has15 ? vcfFin.volume15 : stockFinN;
@@ -1472,7 +1492,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
     setReceptionQty(""); setReceptionRef("");
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setDestination("");
     setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
-    setStockFinMesure(""); setCommentaireInv("");
+    setStockFinMesure(""); setTempCFin(""); setDensiteFin(""); setCommentaireInv("");
   };
 
   const submit = () => {
@@ -1681,6 +1701,12 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
           <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Stock fin — jauge mesurée <span style={{ color: C.danger, fontWeight: 700 }}>*</span></p>
           <Field label={`Stock fin mesuré (L, obligatoire)`}><input type="number" className="somip-input" value={stockFinMesure} onChange={(e) => setStockFinMesure(e.target.value)} placeholder="Lecture directe de la jauge" /></Field>
           {isLub && stockFinMesure !== "" && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(stockFinN * lubDensite)} kg</p>}
+          {!skipVcf && (
+            <>
+              <p style={{ margin: "6px 0 6px", fontSize: 11.5, fontWeight: 600, color: C.sub }}>Température &amp; densité au moment de la jauge (Stock fin)</p>
+              <VcfMiniPanel tempC={tempCFin} densite={densiteFin} onTempC={setTempCFin} onDensite={setDensiteFin} result={stockFinN ? vcfFin : null} compact />
+            </>
+          )}
           <Field label="Commentaire inventaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaireInv} onChange={(e) => setCommentaireInv(e.target.value)} /></Field>
 
           {preview && (
