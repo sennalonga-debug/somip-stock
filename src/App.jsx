@@ -2400,6 +2400,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
+  const isTruck = !!site?.isMobile;
   const bounds = monthBounds(month);
 
   const days = [];
@@ -2411,21 +2412,23 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
       const stockDebut = stockBeforeDate(site, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty(dayMovs, ["reception"]);
-      const retourCamions = sumQty(dayMovs, ["retour_camion"]);
-      const ventes = sumQty(dayMovs, ["sortie", "sortie_camion"]);
-      const stockTheorique = stockDebut + reception + retourCamions - ventes;
+      const ventes = isTruck ? sumQty(dayMovs, ["sortie"]) : sumQty(dayMovs, ["sortie", "sortie_camion"]);
+      const retourCamions = isTruck ? 0 : sumQty(dayMovs, ["retour_camion"]);
+      const retourCuve = isTruck ? sumQty(dayMovs, ["retour_cuve_camion"]) : 0;
+      const stockTheorique = stockDebut + reception + retourCamions - ventes - retourCuve;
       const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       const stockJauge = inv ? inv.stockPhysique : null;
-      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
 
   const totalReception = days.reduce((a, d) => a + d.reception, 0);
   const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
+  const totalRetourCuve = days.reduce((a, d) => a + d.retourCuve, 0);
   const daysWithJauge = days.filter((d) => d.stockJauge !== null);
   const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
   const firstDay = days[0] || null;
@@ -2434,9 +2437,13 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
   const joursEnPerte = days.filter((d) => d.ecart !== null && d.ecart < 0).length;
   const joursEnGain = days.filter((d) => d.ecart !== null && d.ecart > 0).length;
 
+  const receptionLabel = isTruck ? "Chargement" : "Réception";
+  const ventesLabel = isTruck ? "Sortie Fiche Terrain" : "Ventes";
+
   const doExcel = () => exportToExcel(`SOMIP_Synthese_${site?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse", rows: days.map((d) => ({
-      Date: d.date, "Stock début (L)": Math.round(d.stockDebut), "Réception (L)": Math.round(d.reception), "Ventes (L)": Math.round(d.ventes),
+      Date: d.date, "Stock début (L)": Math.round(d.stockDebut), [`${receptionLabel} (L)`]: Math.round(d.reception), [`${ventesLabel} (L)`]: Math.round(d.ventes),
+      ...(isTruck ? { "Retour Cuve (L)": Math.round(d.retourCuve) } : {}),
       "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
       "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
@@ -2448,7 +2455,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
         <Field label="Site">
           <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {sites.filter((s) => !s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
           </select>
         </Field>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
@@ -2459,8 +2466,9 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
           <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name}</h4>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
-            <MiniStat label="Total Réceptions" value={`+${fmt(totalReception)} L`} color={C.success} />
-            <MiniStat label="Total Ventes" value={`${fmt(totalVentes)} L`} />
+            <MiniStat label={`Total ${receptionLabel}`} value={`+${fmt(totalReception)} L`} color={C.success} />
+            <MiniStat label={`Total ${ventesLabel}`} value={`${fmt(totalVentes)} L`} />
+            {isTruck && <MiniStat label="Total Retour Cuve" value={`${fmt(totalRetourCuve)} L`} />}
             <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
             <MiniStat label="Stock jauge (dernière mesure)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
             <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
@@ -2477,20 +2485,22 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
             <thead>
               <tr>
                 <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
-                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th>
+                <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
+                {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
                 <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isTruck ? 10 : 9} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
+                  {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
@@ -2504,7 +2514,9 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique.
+          {isTruck
+            ? "Stock théorique = Stock début + Chargement − Sortie Fiche Terrain − Retour Cuve (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
+            : "Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."}
         </p>
       </div>
     </div>
@@ -2516,6 +2528,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
+  const isTruck = !!site?.isMobile;
   const bounds = monthBounds(month);
 
   const days = [];
@@ -2527,30 +2540,36 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
       const stockDebut = stockBeforeDate15(site, movements, d);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty15(dayMovs, ["reception"]);
-      const retourCamions = sumQty15(dayMovs, ["retour_camion"]);
-      const ventes = sumQty15(dayMovs, ["sortie", "sortie_camion"]);
-      const stockTheorique = stockDebut + reception + retourCamions - ventes;
+      const ventes = isTruck ? sumQty15(dayMovs, ["sortie"]) : sumQty15(dayMovs, ["sortie", "sortie_camion"]);
+      const retourCamions = isTruck ? 0 : sumQty15(dayMovs, ["retour_camion"]);
+      const retourCuve = isTruck ? sumQty15(dayMovs, ["retour_cuve_camion"]) : 0;
+      const stockTheorique = stockDebut + reception + retourCamions - ventes - retourCuve;
       const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
       const stockJauge = inv ? inv.stockPhysique15 : null;
-      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
 
   const totalReception = days.reduce((a, d) => a + d.reception, 0);
   const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
+  const totalRetourCuve = days.reduce((a, d) => a + d.retourCuve, 0);
   const daysWithJauge = days.filter((d) => d.stockJauge !== null);
   const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
   const firstDay = days[0] || null;
   const lastDay = days[days.length - 1] || null;
   const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
 
+  const receptionLabel = isTruck ? "Chargement" : "Réception";
+  const ventesLabel = isTruck ? "Sortie Fiche Terrain" : "Ventes";
+
   const doExcel = () => exportToExcel(`SOMIP_Synthese15_${site?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse 15°C", rows: days.map((d) => ({
-      Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), "Réception 15°C (L)": Math.round(d.reception), "Ventes 15°C (L)": Math.round(d.ventes),
+      Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), [`${receptionLabel} 15°C (L)`]: Math.round(d.reception), [`${ventesLabel} 15°C (L)`]: Math.round(d.ventes),
+      ...(isTruck ? { "Retour Cuve 15°C (L)": Math.round(d.retourCuve) } : {}),
       "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
       "Stock théorique 15°C (L)": Math.round(d.stockTheorique), "Stock jauge 15°C (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte 15°C (L)": d.ecart !== null ? Math.round(d.ecart) : "",
@@ -2562,7 +2581,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
         <Field label="Site">
           <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {sites.filter((s) => !s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
           </select>
         </Field>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
@@ -2573,8 +2592,9 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
           <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name} (15°C)</h4>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
-            <MiniStat label="Total Réceptions" value={`+${fmt(totalReception)} L`} color={C.success} />
-            <MiniStat label="Total Ventes" value={`${fmt(totalVentes)} L`} />
+            <MiniStat label={`Total ${receptionLabel}`} value={`+${fmt(totalReception)} L`} color={C.success} />
+            <MiniStat label={`Total ${ventesLabel}`} value={`${fmt(totalVentes)} L`} />
+            {isTruck && <MiniStat label="Total Retour Cuve" value={`${fmt(totalRetourCuve)} L`} />}
             <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
             <MiniStat label="Stock jauge (dernière mesure 15°C)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
             <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
@@ -2590,20 +2610,22 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
             <thead>
               <tr>
                 <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
-                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th>
+                <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
+                {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
                 <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isTruck ? 10 : 9} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
+                  {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
