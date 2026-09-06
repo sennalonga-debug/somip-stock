@@ -886,10 +886,10 @@ export default function App() {
 
   /* ---- mutations : inventaires ---- */
   const addInventaire = ({ siteId, product = "gasoil", date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => withSync(async () => {
-    // Le Gain/Perte "officiel" est toujours le résultat de l'équation de stock en base ambiante
-    // (Stock physique mesuré − Stock théorique). La base 15°C est fournie à titre indicatif
-    // (page "État des stocks — 15°C"), mais ne doit jamais se substituer à ce résultat, pour
-    // éviter de confondre un écart réel avec un simple effet de conversion ambiant/15°C.
+    // Le Stock théorique reste toujours un calcul PUR (Réceptions + Retours − Ventes), jamais
+    // recalé automatiquement par l'écart mesuré : aucun mouvement "Ajustement" n'est créé ici.
+    // Le Gain/Perte (physique − théorique) est uniquement enregistré et affiché, sans jamais
+    // modifier le calcul du théorique des jours suivants.
     const theoriqueAmbiant = stockOf(siteId, product);
     const theorique15 = stockOf15(siteId, product);
     const basisEcart = "ambiant";
@@ -899,38 +899,21 @@ export default function App() {
     const cls = classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
     const has15 = stockPhysique15 !== undefined;
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
-    const adjMovementDraft = {
-      siteId, product, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
-      commentaire: `Ajustement suite à l'inventaire du ${date} (base ambiante)`,
-      createdBy: currentUserName, createdAt: new Date().toISOString(),
-    };
-    const { data: dataM, error: e1 } = await supabase.from("movements").insert(movementToRow(adjMovementDraft)).select().maybeSingle();
-    if (e1) throw e1;
-    if (!dataM) throw new Error("L'ajustement n'a pas pu être confirmé par le serveur — réessaie.");
-    const adjMovement = rowToMovement(dataM);
     const invDraft = {
       siteId, product, date, stockPhysique, commentaire, basisEcart,
       stockTheoriqueAmbiant: theoriqueAmbiant, stockTheorique15: theorique15,
       stockTheorique: theoriqueUsed, stockPhysiqueUsed: physiqueUsed,
       ecart: cls.ecartL, ecartPermille: cls.ecartPermille, nature: cls.nature,
       tauxFreinte: cls.tauxFreinte, objectifUtilise: cls.objectif, conformite: cls.conformite,
-      adjustmentId: adjMovement.id, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
+      adjustmentId: null, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
     };
     const { data: dataI, error: e2 } = await supabase.from("inventaires").insert(inventaireToRow(invDraft)).select().maybeSingle();
-    if (e2) {
-      // Annule l'ajustement déjà inséré pour ne pas laisser un mouvement orphelin sans inventaire associé.
-      await supabase.from("movements").delete().eq("id", adjMovement.id);
-      throw e2;
-    }
-    if (!dataI) {
-      await supabase.from("movements").delete().eq("id", adjMovement.id);
-      throw new Error("L'inventaire n'a pas pu être confirmé par le serveur — réessaie.");
-    }
+    if (e2) throw e2;
+    if (!dataI) throw new Error("L'inventaire n'a pas pu être confirmé par le serveur — réessaie.");
     const invRecord = rowToInventaire(dataI);
-    setMovements((prev) => [...prev, adjMovement]);
     setInventaires((prev) => [...prev, invRecord]);
     appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
-    flash("Inventaire enregistré et stock ajusté.");
+    flash("Inventaire enregistré.");
   });
   const deleteInventaire = (inv) => withSync(async () => {
     const { data, error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id).select();
@@ -1534,7 +1517,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
     try {
       if (isFirstOfMonth) {
         const diff = Number(stockDebutConfirm) - stockDebut;
-        if (diff !== 0) {
+        if (Math.abs(diff) >= 1) {
           const prev = new Date(date);
           prev.setDate(prev.getDate() - 1);
           const adjDate = `${prev.getFullYear()}-${pad2(prev.getMonth() + 1)}-${pad2(prev.getDate())}`;
