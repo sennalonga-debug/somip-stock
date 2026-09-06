@@ -65,7 +65,7 @@ const SETTINGS_SEED = { objectifFreinte: 3 };
 
 const TYPE_META = {
   reception: { label: "Réception", color: C.success, sign: "+" },
-  sortie: { label: "Sortie", color: C.danger, sign: "−" },
+  sortie: { label: "Vente", color: C.ink, sign: "" },
   sortie_camion: { label: "Sortie vers camion laitier", color: C.orange, sign: "−" },
   retour_camion: { label: "Retour camion (cuve)", color: C.success, sign: "+" },
   retour_cuve_camion: { label: "Retour cuve (camion)", color: C.danger, sign: "−" },
@@ -178,6 +178,15 @@ function movementsInRange(movements, siteId, startInclusive, endInclusive, produ
 }
 function sumQty15(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + movementQty15(m), 0);
+}
+// Retourne l'inventaire le plus récent d'une liste (date la plus tardive, puis heure de
+// saisie la plus tardive en cas d'égalité) — "la dernière jauge saisie" pour cette journée.
+function pickLatestInv(list) {
+  return list.reduce((best, cur) => {
+    if (!best) return cur;
+    if (cur.date !== best.date) return cur.date > best.date ? cur : best;
+    return (cur.createdAt || "") > (best.createdAt || "") ? cur : best;
+  }, null);
 }
 function sumQty(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + m.quantity, 0);
@@ -2332,7 +2341,7 @@ function DailyReport({ sites, movements, inventaires }) {
     const sorties = sumQty(dayMovs, ["sortie", "sortie_camion"]);
     const ajustement = dayMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
     const stockFin = stockDebut + receptions + retours - sorties + ajustement;
-    const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
+    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === date));
     return { site: s, stockDebut, receptions, retours, sorties, ajustement, stockFin, inv };
   });
   const totals = rows.reduce((a, r) => ({ stockDebut: a.stockDebut + r.stockDebut, receptions: a.receptions + r.receptions, retours: a.retours + r.retours, sorties: a.sorties + r.sorties, stockFin: a.stockFin + r.stockFin }), { stockDebut: 0, receptions: 0, retours: 0, sorties: 0, stockFin: 0 });
@@ -2557,7 +2566,7 @@ function StockStatementAmbiant({ sites, movements, inventaires }) {
     const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
     const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
     const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
-    const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
+    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === date));
     const stockFin = inv ? inv.stockPhysique : null;
     const ecart = stockFin !== null ? stockFin - stockTheorique : null;
     return { site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique, stockFin, ecart };
@@ -2640,7 +2649,7 @@ function StockStatement15({ sites, movements, inventaires }) {
     const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
     const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
     const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
-    const inv = inventaires.find((i) => i.siteId === s.id && i.date === date);
+    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === date));
     const stockFin = inv && inv.stockPhysique15 !== undefined ? inv.stockPhysique15 : null;
     const ecart = stockFin !== null ? stockFin - stockTheorique : null;
     return { site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique, stockFin, ecart, hasTemp: inv ? inv.stockPhysique15 !== undefined : false };
@@ -2784,7 +2793,7 @@ function GasoilSynthesisReport({ sites, movements, inventaires }) {
     const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
     const stockTheoriqueFin = stockDebut + reception + retourCamions - sorties + ajustement;
     const monthInv = inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1));
-    const dernierInv = monthInv[0] || null;
+    const dernierInv = pickLatestInv(monthInv);
     const stockFin = dernierInv ? dernierInv.stockPhysique : null;
     const ecart = stockFin !== null ? stockFin - stockTheoriqueFin : null;
     return { site, stockDebut, reception, retourCamions, sorties, stockTheoriqueFin, stockFin, ecart };
@@ -2860,7 +2869,7 @@ function TruckSynthesisReport({ sites, movements, inventaires }) {
     const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
     const stockTheoriqueFin = stockDebut + chargement - sortieTerrain - retourCuve + ajustement;
     const monthInv = inventaires.filter((i) => i.siteId === truck.id && (i.product || "gasoil") === "gasoil" && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1));
-    const dernierInv = monthInv[0] || null;
+    const dernierInv = pickLatestInv(monthInv);
     const stockFin = dernierInv ? dernierInv.stockPhysique : null;
     const ecart = stockFin !== null ? stockFin - stockTheoriqueFin : null;
     return { truck, stockDebut, chargement, sortieTerrain, retourCuve, stockTheoriqueFin, stockFin, ecart };
@@ -2972,7 +2981,8 @@ function StationSynthesisReport({ sites, movements, inventaires, truckAssignment
   const stockTheoriqueCombine = siteStockTheoriqueFin + truckRows.filter((r) => r.stillAssigned).reduce((a, r) => a + (r.stockFinTruck || 0), 0);
 
   const monthInv = station ? inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1)) : [];
-  const stockFinMesureSite = monthInv[0] ? monthInv[0].stockPhysique : null;
+  const dernierInvSite = pickLatestInv(monthInv);
+  const stockFinMesureSite = dernierInvSite ? dernierInvSite.stockPhysique : null;
 
   const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_${station?.code || stationId}_${month}.xlsx`, [
     {
@@ -3137,7 +3147,7 @@ function LubricantSynthesisReport({ sites, movements, inventaires, productStocks
       const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
       const stockTheoriqueFin = stockDebut + reception - sorties + ajustement;
       const monthInv = inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === lub.id && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1));
-      const dernierInv = monthInv[0] || null;
+      const dernierInv = pickLatestInv(monthInv);
       const stockFin = dernierInv ? dernierInv.stockPhysique : null;
       const ecart = stockFin !== null ? stockFin - stockTheoriqueFin : null;
       rows.push({
