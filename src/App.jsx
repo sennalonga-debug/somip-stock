@@ -2365,6 +2365,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     <div className="somip-fade">
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <button className={`somip-tab ${tab === "synthese_mensuelle_site" ? "active" : ""}`} onClick={() => setTab("synthese_mensuelle_site")}>Synthèse journalière du mois</button>
+        <button className={`somip-tab ${tab === "synthese_mensuelle_site_15" ? "active" : ""}`} onClick={() => setTab("synthese_mensuelle_site_15")}>Synthèse journalière du mois — 15°C</button>
         <button className="somip-btn somip-btn-secondary" style={{ marginLeft: "auto", fontSize: 12, padding: "6px 12px" }} onClick={() => setShowAdvanced((v) => !v)}>
           {showAdvanced ? "Masquer les rapports avancés" : "Voir plus de rapports (avancés)"}
         </button>
@@ -2377,6 +2378,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
         </div>
       )}
       {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "journalier" && <DailyReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "decadaire" && <DecadeReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "mensuel" && <MonthlyReport sites={sites} movements={movements} inventaires={inventaires} settings={settings} />}
@@ -2422,6 +2424,16 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
     }
   }
 
+  const totalReception = days.reduce((a, d) => a + d.reception, 0);
+  const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
+  const daysWithJauge = days.filter((d) => d.stockJauge !== null);
+  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
+  const firstDay = days[0] || null;
+  const lastDay = days[days.length - 1] || null;
+  const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
+  const joursEnPerte = days.filter((d) => d.ecart !== null && d.ecart < 0).length;
+  const joursEnGain = days.filter((d) => d.ecart !== null && d.ecart > 0).length;
+
   const doExcel = () => exportToExcel(`SOMIP_Synthese_${site?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse", rows: days.map((d) => ({
       Date: d.date, "Stock début (L)": Math.round(d.stockDebut), "Réception (L)": Math.round(d.reception), "Ventes (L)": Math.round(d.ventes),
@@ -2441,6 +2453,22 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
         </Field>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
       </div>
+
+      {site && (
+        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name}</h4>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
+            <MiniStat label="Total Réceptions" value={`+${fmt(totalReception)} L`} color={C.success} />
+            <MiniStat label="Total Ventes" value={`${fmt(totalVentes)} L`} />
+            <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
+            <MiniStat label="Stock jauge (dernière mesure)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
+            <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
+            <MiniStat label="Jours en perte / en gain" value={`${joursEnPerte} / ${joursEnGain}`} />
+          </div>
+        </div>
+      )}
+
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
         <ReportHeader title={`Synthèse journalière — ${site?.name || ""}`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
         <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
@@ -2477,6 +2505,119 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Synthèse journalière du mois, par site — Base 15°C ---- */
+function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
+  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+  const [month, setMonth] = useState(currentMonth());
+  const site = sites.find((s) => s.id === siteId);
+  const bounds = monthBounds(month);
+
+  const days = [];
+  if (site) {
+    let cur = new Date(bounds.start);
+    const end = new Date(bounds.end);
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const stockDebut = stockBeforeDate15(site, movements, d);
+      const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty15(dayMovs, ["reception"]);
+      const retourCamions = sumQty15(dayMovs, ["retour_camion"]);
+      const ventes = sumQty15(dayMovs, ["sortie", "sortie_camion"]);
+      const stockTheorique = stockDebut + reception + retourCamions - ventes;
+      const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+      const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
+      const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
+      const stockJauge = inv ? inv.stockPhysique15 : null;
+      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const totalReception = days.reduce((a, d) => a + d.reception, 0);
+  const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
+  const daysWithJauge = days.filter((d) => d.stockJauge !== null);
+  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
+  const firstDay = days[0] || null;
+  const lastDay = days[days.length - 1] || null;
+  const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese15_${site?.code || ""}_${month}.xlsx`, [{
+    name: "Synthèse 15°C", rows: days.map((d) => ({
+      Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), "Réception 15°C (L)": Math.round(d.reception), "Ventes 15°C (L)": Math.round(d.ventes),
+      "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
+      "Stock théorique 15°C (L)": Math.round(d.stockTheorique), "Stock jauge 15°C (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
+      "Gain/Perte 15°C (L)": d.ecart !== null ? Math.round(d.ecart) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Site">
+          <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+            {sites.filter((s) => !s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+
+      {site && (
+        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name} (15°C)</h4>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
+            <MiniStat label="Total Réceptions" value={`+${fmt(totalReception)} L`} color={C.success} />
+            <MiniStat label="Total Ventes" value={`${fmt(totalVentes)} L`} />
+            <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
+            <MiniStat label="Stock jauge (dernière mesure 15°C)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
+            <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
+          </div>
+        </div>
+      )}
+
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title={`Synthèse journalière — ${site?.name || ""} — Base 15°C`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
+                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th>
+                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
+                <th style={{ textAlign: "right" }}>Gain/Perte</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne un site." />}
+              {days.map((d) => (
+                <tr key={d.date}>
+                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
+                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Toutes les valeurs sont corrigées à 15°C. Stock jauge = dernière mesure avec température/densité renseignées ce mois-ci. Les jours sans température/densité saisie n'affichent pas de Stock jauge ici (voir la version Ambiant).
         </p>
       </div>
     </div>
