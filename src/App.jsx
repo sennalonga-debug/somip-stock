@@ -6,6 +6,8 @@ import {
   FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu,
 } from "lucide-react";
 import * as XLSX from "xlsx";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine, Legend,
 } from "recharts";
@@ -257,6 +259,53 @@ function exportToExcel(filename, sheets) {
   XLSX.writeFile(wb, filename);
 }
 
+// Génère un PDF téléchargeable avec l'en-tête SOMIP (bandeau bleu/orange) et un tableau —
+// pour un envoi direct par mail, sans passer par la boîte de dialogue d'impression.
+function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
+  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  // Bandeau bicolore SOMIP.
+  doc.setFillColor(0, 113, 189); // C.blue
+  doc.rect(0, 0, pageWidth * 0.6, 6, "F");
+  doc.setFillColor(241, 107, 22); // C.orange
+  doc.rect(pageWidth * 0.6, 0, pageWidth * 0.4, 6, "F");
+  doc.setFontSize(15);
+  doc.setTextColor(0, 113, 189);
+  doc.setFont(undefined, "bold");
+  doc.text("SOMIP — Stock Gasoil", 30, 28);
+  doc.setFontSize(9);
+  doc.setTextColor(90, 100, 110);
+  doc.setFont(undefined, "normal");
+  doc.text("Zone Sud-Est · Gabon", 30, 42);
+  doc.setFontSize(9);
+  doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, pageWidth - 30, 28, { align: "right" });
+  doc.setDrawColor(0, 113, 189);
+  doc.setLineWidth(1);
+  doc.line(30, 50, pageWidth - 30, 50);
+  doc.setFontSize(13);
+  doc.setTextColor(20, 30, 40);
+  doc.setFont(undefined, "bold");
+  doc.text(title, 30, 68);
+  if (period) {
+    doc.setFontSize(10);
+    doc.setTextColor(241, 107, 22);
+    doc.setFont(undefined, "bold");
+    doc.text(period, 30, 82);
+  }
+  autoTable(doc, {
+    startY: 94,
+    head: [columns],
+    body: rows,
+    foot: totalsRow ? [totalsRow] : undefined,
+    theme: "grid",
+    headStyles: { fillColor: [0, 113, 189], textColor: 255, fontStyle: "bold" },
+    footStyles: { fillColor: [241, 107, 22, 0.15], textColor: [20, 30, 40], fontStyle: "bold" },
+    styles: { fontSize: 9, cellPadding: 5 },
+    margin: { left: 30, right: 30 },
+  });
+  doc.save(filename);
+}
+
 function ReportHeader({ title, period }) {
   return (
     <div className="somip-print-only" style={{ marginBottom: 16 }}>
@@ -276,11 +325,12 @@ function ReportHeader({ title, period }) {
   );
 }
 
-function ReportToolbar({ onExcel, onPrint }) {
+function ReportToolbar({ onExcel, onPrint, onPdf }) {
   return (
-    <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+    <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
       <button className="somip-btn somip-btn-ghost" onClick={onExcel}><Download size={14} /> Export Excel</button>
-      <button className="somip-btn somip-btn-ghost" onClick={onPrint}><Printer size={14} /> Export PDF (impression)</button>
+      {onPdf && <button className="somip-btn somip-btn-primary" onClick={onPdf}><Download size={14} /> Télécharger PDF</button>}
+      <button className="somip-btn somip-btn-ghost" onClick={onPrint}><Printer size={14} /> Imprimer</button>
     </div>
   );
 }
@@ -3036,8 +3086,10 @@ function ExposureReport({ sites, movements, inventaires }) {
     const ventesCumulees = sumQty(rangeMovs, ["sortie", "sortie_camion"]);
     const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= bounds.end));
     const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : null;
-    const demandeAppro = jaugeADate !== null ? Math.max(0, s.capacity - jaugeADate) : null;
-    return { site: s, ventesCumulees, jaugeADate, jaugeDate: jaugeInv ? jaugeInv.date : null, demandeAppro };
+    // Les camions ne livrent que par multiples de 5000 L (5000/15000/20000/35000) :
+    // la demande d'approvisionnement est toujours arrondie à l'inférieur, au multiple de 5000 le plus proche.
+    const demandeAppro = jaugeADate !== null ? Math.floor(Math.max(0, s.capacity - jaugeADate) / 5000) * 5000 : null;
+    return { site: s, ventesCumulees, jaugeADate, demandeAppro };
   });
   const totalVentes = rows.reduce((a, r) => a + r.ventesCumulees, 0);
   const totalDemande = rows.reduce((a, r) => a + (r.demandeAppro || 0), 0);
@@ -3045,10 +3097,24 @@ function ExposureReport({ sites, movements, inventaires }) {
   const doExcel = () => exportToExcel(`SOMIP_Exposition_${month}_D${decadeNum}.xlsx`, [{
     name: "Exposition", rows: rows.map((r) => ({
       Site: r.site.name, "Ventes cumulées décade (L)": Math.round(r.ventesCumulees),
-      "Jauge à date (L)": r.jaugeADate !== null ? Math.round(r.jaugeADate) : "", "Date de la jauge": r.jaugeDate || "",
-      "Capacité (L)": r.site.capacity, "Demande d'approvisionnement (L)": r.demandeAppro !== null ? Math.round(r.demandeAppro) : "",
+      "Jauge à date (L)": r.jaugeADate !== null ? Math.round(r.jaugeADate) : "",
+      "Demande d'approvisionnement (L)": r.demandeAppro !== null ? Math.round(r.demandeAppro) : "",
     })),
   }]);
+
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
+    title: "Exposition — Ventes cumulées & demande d'approvisionnement",
+    period: `${bounds.label} — ${bounds.start} au ${bounds.end}`,
+    columns: ["Site", "Ventes cumulées (décade)", "Jauge à date", "Demande d'approvisionnement"],
+    rows: rows.map((r) => [
+      `${r.site.name} (${r.site.code})`,
+      `${fmt(r.ventesCumulees)} L`,
+      r.jaugeADate !== null ? `${fmt(r.jaugeADate)} L` : "—",
+      r.demandeAppro !== null ? `${fmt(r.demandeAppro)} L` : "—",
+    ]),
+    totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, "", `${fmt(totalDemande)} L`],
+  });
 
   return (
     <div>
@@ -3064,7 +3130,7 @@ function ExposureReport({ sites, movements, inventaires }) {
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
         <ReportHeader title="Exposition — Ventes cumulées &amp; demande d'approvisionnement" period={`${bounds.label} — ${bounds.start} au ${bounds.end}`} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
           <StatCard label="Ventes cumulées réseau (décade)" value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
@@ -3076,8 +3142,7 @@ function ExposureReport({ sites, movements, inventaires }) {
             <thead>
               <tr>
                 <th>Site</th><th style={{ textAlign: "right" }}>Ventes cumulées (décade)</th>
-                <th style={{ textAlign: "right" }}>Jauge à date</th><th>Date de la jauge</th>
-                <th style={{ textAlign: "right" }}>Capacité</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                <th style={{ textAlign: "right" }}>Jauge à date</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
             <tbody>
@@ -3086,22 +3151,20 @@ function ExposureReport({ sites, movements, inventaires }) {
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventesCumulees)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.jaugeADate !== null ? `${fmt(r.jaugeADate)} L` : "—"}</td>
-                  <td style={{ color: C.sub }}>{r.jaugeDate || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{fmt(r.site.capacity)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{r.demandeAppro !== null ? `${fmt(r.demandeAppro)} L` : "—"}</td>
                 </tr>
               ))}
               <tr>
                 <td style={{ fontWeight: 700 }}>Total réseau</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
-                <td colSpan={3}></td>
+                <td></td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalDemande)} L</td>
               </tr>
             </tbody>
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Ventes cumulées = somme des ventes (et sorties vers camion) de la décade sélectionnée. Jauge à date = dernière mesure physique connue à la fin de la décade. Demande d'approvisionnement = Capacité − Jauge à date.
+          Ventes cumulées = somme des ventes (et sorties vers camion) de la décade sélectionnée. Jauge à date = dernière mesure physique connue à la fin de la décade. Demande d'approvisionnement = Capacité − Jauge à date, arrondie à l'inférieur au multiple de 5000 L (livraisons par camions de 5000/15000/20000/35000 L).
         </p>
       </div>
     </div>
