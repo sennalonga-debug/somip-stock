@@ -721,10 +721,12 @@ export default function App() {
       await fn();
       setSyncStatus("ok");
       setLastSync(new Date());
+      return true;
     } catch (e) {
       setSyncStatus("error");
       console.error(e);
       flash(e?.message ? `Erreur : ${e.message}` : "Action refusée ou erreur de sauvegarde.", "error");
+      return false;
     }
   };
 
@@ -1495,36 +1497,53 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
     setStockFinMesure(""); setTempCFin(""); setDensiteFin(""); setCommentaireInv("");
   };
 
-  const submit = () => {
-    if (!siteId || !date || !canSubmit) return;
-    if (isFirstOfMonth) {
-      const diff = Number(stockDebutConfirm) - stockDebut;
-      if (diff !== 0) {
-        addMovement({ siteId, product, type: "ajustement", date, quantity: Math.abs(diff), delta: diff, commentaire: "Confirmation du stock début de mois" });
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    if (!siteId || !date || !canSubmit || submitting) return;
+    setSubmitting(true);
+    try {
+      if (isFirstOfMonth) {
+        const diff = Number(stockDebutConfirm) - stockDebut;
+        if (diff !== 0) {
+          const prev = new Date(date);
+          prev.setDate(prev.getDate() - 1);
+          const adjDate = `${prev.getFullYear()}-${pad2(prev.getMonth() + 1)}-${pad2(prev.getDate())}`;
+          const ok = await addMovement({ siteId, product, type: "ajustement", date: adjDate, quantity: Math.abs(diff), delta: diff, commentaire: "Confirmation du stock début de mois" });
+          if (!ok) return;
+        }
       }
-    }
-    if (receptionN > 0) {
-      addMovement({ siteId, product, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
-    }
-    if (sortieQty > 0) {
-      if (isLub || isMobileSite) {
-        addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire });
-      } else {
-        const base = { siteId, product, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), ...vcfExtra(sortieQty) };
-        addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
+      if (receptionN > 0) {
+        const ok = await addMovement({ siteId, product, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
+        if (!ok) return;
       }
+      if (sortieQty > 0) {
+        let ok;
+        if (isLub || isMobileSite) {
+          ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire });
+        } else {
+          const base = { siteId, product, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), ...vcfExtra(sortieQty) };
+          ok = await addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
+        }
+        if (!ok) return;
+      }
+      if (retourN > 0) {
+        const ok = await addMovement({ siteId, product, type: "retour_camion", date, quantity: retourN, delta: retourN, camion: retourCamionTruckId || undefined, destination: retourNote, ...vcfExtra(retourN) });
+        if (!ok) return;
+      }
+      if (retourCuveTruckN > 0) {
+        const ok = await addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: -retourCuveTruckN, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
+        if (!ok) return;
+      }
+      const invExtra = vcfFin
+        ? { temperatureC: Number(tempCFin), densiteObservee: Number(densiteFin), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
+        : {};
+      const okInv = await addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
+      if (!okInv) return;
+      resetDayFields();
+    } finally {
+      setSubmitting(false);
     }
-    if (retourN > 0) {
-      addMovement({ siteId, product, type: "retour_camion", date, quantity: retourN, delta: retourN, camion: retourCamionTruckId || undefined, destination: retourNote, ...vcfExtra(retourN) });
-    }
-    if (retourCuveTruckN > 0) {
-      addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: -retourCuveTruckN, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
-    }
-    const invExtra = vcfFin
-      ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
-      : {};
-    addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
-    resetDayFields();
   };
 
   const dayMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date === date).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
@@ -1726,8 +1745,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
             </div>
           )}
 
-          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!canSubmit}>
-            <Plus size={15} /> Enregistrer la journée
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!canSubmit || submitting}>
+            {submitting ? <Loader2 size={15} style={{ animation: "somipSpin .8s linear infinite" }} /> : <Plus size={15} />} {submitting ? "Enregistrement..." : "Enregistrer la journée"}
           </button>
           {!canSubmit && stockFinMesure === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock fin (jauge) est obligatoire pour enregistrer.</p>}
           {!canSubmit && stockFinMesure !== "" && isFirstOfMonth && stockDebutConfirm === "" && <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Le Stock début du mois est obligatoire pour enregistrer.</p>}
@@ -2567,7 +2586,7 @@ function StockStatementAmbiant({ sites, movements, inventaires }) {
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.danger : C.sub }}>{r.ventes ? `−${fmt(r.ventes)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.ink : C.sub, fontWeight: r.ventes ? 600 : 400 }}>{r.ventes ? `${fmt(r.ventes)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
@@ -2650,7 +2669,7 @@ function StockStatement15({ sites, movements, inventaires }) {
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.danger : C.sub }}>{r.ventes ? `−${fmt(r.ventes)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.ink : C.sub, fontWeight: r.ventes ? 600 : 400 }}>{r.ventes ? `${fmt(r.ventes)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
@@ -2977,7 +2996,7 @@ function StationSynthesisReport({ sites, movements, inventaires, truckAssignment
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
           <MiniStat label="Stock début (site)" value={`${fmt(siteStockDebut)} L`} />
           <MiniStat label="Réception (site)" value={`+${fmt(siteReception)} L`} color={C.success} />
-          <MiniStat label="Ventes globales (site + terrain camions)" value={`−${fmt(ventesGlobales)} L`} color={C.danger} />
+          <MiniStat label="Ventes globales (site + terrain camions)" value={`${fmt(ventesGlobales)} L`} />
           <MiniStat label="Stock théorique combiné fin" value={`${fmt(stockTheoriqueCombine)} L`} bold />
           <MiniStat label="Stock fin mesuré (site, dernier inv.)" value={stockFinMesureSite !== null ? `${fmt(stockFinMesureSite)} L` : "—"} />
         </div>
@@ -2994,7 +3013,7 @@ function StationSynthesisReport({ sites, movements, inventaires, truckAssignment
                   <td className="somip-mono">{r.iv.start}</td>
                   <td className="somip-mono">{r.iv.end}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{r.chargement ? `+${fmt(r.chargement)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>{r.ventesTerrain ? `−${fmt(r.ventesTerrain)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventesTerrain ? C.ink : C.sub, fontWeight: r.ventesTerrain ? 600 : 400 }}>{r.ventesTerrain ? `${fmt(r.ventesTerrain)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>{r.retourCuve ? `−${fmt(r.retourCuve)} L` : "—"}</td>
                   <td>{r.stillAssigned ? <Badge color={C.success}>Oui</Badge> : <Badge color={C.sub}>Non — réaffecté</Badge>}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{r.stockFinTruck !== null ? `${fmt(r.stockFinTruck)} L` : "—"}</td>
