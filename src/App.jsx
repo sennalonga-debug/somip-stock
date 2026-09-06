@@ -42,7 +42,16 @@ const SITES_SEED = [
   { id: "cmm", code: "CMM", name: "CMM (C2M)", capacity: 20000, stockInitial: 16000 },
 ];
 
-const TRUCKS = Array.from({ length: 6 }, (_, i) => `Camion Laitier ${i + 1}`);
+const TRUCKS = ["FK253AA", "FK254AA", "JJ751AA", "JJ752AA", "JJ763AA", "JL232AA"];
+// Lubrifiants gérés sur Prehomo et Okouma uniquement, en plus du gasoil.
+const LUBRICANTS = [
+  { id: "ac30", label: "AC30", densite: 0.89 },
+  { id: "ac50", label: "AC50", densite: 0.90 },
+  { id: "sw10", label: "SW10", densite: 0.88 },
+  { id: "rubia_tir7400", label: "Rubia Tir7400", densite: 0.883 },
+];
+const LUBRICANT_SITE_IDS = ["prehomo", "okouma"];
+const PRODUCTS = [{ id: "gasoil", label: "Gasoil" }, ...LUBRICANTS];
 
 const MOVEMENTS_SEED = [
   { id: "m1", siteId: "okouma", type: "reception", date: "2026-08-28", quantity: 15000, delta: 15000, ref: "BL-2891", commentaire: "Livraison TotalEnergies", isDemo: true },
@@ -59,6 +68,7 @@ const TYPE_META = {
   sortie: { label: "Sortie", color: C.danger, sign: "−" },
   sortie_camion: { label: "Sortie vers camion laitier", color: C.orange, sign: "−" },
   retour_camion: { label: "Retour camion (cuve)", color: C.success, sign: "+" },
+  retour_cuve_camion: { label: "Retour cuve (camion)", color: C.danger, sign: "−" },
   ajustement: { label: "Ajustement d'inventaire", color: C.blue, sign: "±" },
 };
 
@@ -152,19 +162,22 @@ function movementQty15(m) {
 /* Rapports — fonctions de calcul par période                          */
 /* ------------------------------------------------------------------ */
 function stockBeforeDate(site, movements, dateExclusive) {
-  return movements.filter((m) => m.siteId === site.id && m.date < dateExclusive).reduce((a, m) => a + m.delta, site.stockInitial);
+  return movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date < dateExclusive).reduce((a, m) => a + m.delta, site.stockInitial);
 }
 function stockThroughDate(site, movements, dateInclusive) {
-  return movements.filter((m) => m.siteId === site.id && m.date <= dateInclusive).reduce((a, m) => a + m.delta, site.stockInitial);
+  return movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date <= dateInclusive).reduce((a, m) => a + m.delta, site.stockInitial);
 }
 function stockBeforeDate15(site, movements, dateExclusive) {
-  return movements.filter((m) => m.siteId === site.id && m.date < dateExclusive).reduce((a, m) => a + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
+  return movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date < dateExclusive).reduce((a, m) => a + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
+}
+function stockBeforeDateProduct(stockInitial, movements, siteId, product, dateExclusive) {
+  return movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date < dateExclusive).reduce((a, m) => a + m.delta, stockInitial);
+}
+function movementsInRange(movements, siteId, startInclusive, endInclusive, product = "gasoil") {
+  return movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date >= startInclusive && m.date <= endInclusive);
 }
 function sumQty15(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + movementQty15(m), 0);
-}
-function movementsInRange(movements, siteId, startInclusive, endInclusive) {
-  return movements.filter((m) => m.siteId === siteId && m.date >= startInclusive && m.date <= endInclusive);
 }
 function sumQty(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + m.quantity, 0);
@@ -241,11 +254,12 @@ function permsFor(role) {
 /* ------------------------------------------------------------------ */
 const numOrUndef = (v) => (v === null || v === undefined ? undefined : Number(v));
 
-const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial) });
-const siteToRow = (s) => ({ id: s.id, code: s.code, name: s.name, capacity: s.capacity, stock_initial: s.stockInitial });
+const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile });
+const siteToRow = (s) => ({ id: s.id, code: s.code, name: s.name, capacity: s.capacity, stock_initial: s.stockInitial, is_mobile: !!s.isMobile });
 
 const rowToMovement = (r) => ({
   id: r.id, siteId: r.site_id, type: r.type, date: r.date, quantity: Number(r.quantity), delta: Number(r.delta),
+  product: r.product || "gasoil",
   ref: r.ref || undefined, commentaire: r.commentaire || "", destinataire: r.destinataire || undefined,
   camion: r.camion || undefined, destination: r.destination || undefined, isDemo: !!r.is_demo,
   temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee),
@@ -255,6 +269,7 @@ const rowToMovement = (r) => ({
 });
 const movementToRow = (m) => ({
   site_id: m.siteId, type: m.type, date: m.date, quantity: m.quantity, delta: m.delta,
+  product: m.product || "gasoil",
   ref: m.ref ?? null, commentaire: m.commentaire ?? null, destinataire: m.destinataire ?? null,
   camion: m.camion ?? null, destination: m.destination ?? null, is_demo: !!m.isDemo,
   temperature_c: m.temperatureC ?? null, densite_observee: m.densiteObservee ?? null,
@@ -265,6 +280,7 @@ const movementToRow = (m) => ({
 
 const rowToInventaire = (r) => ({
   id: r.id, siteId: r.site_id, date: r.date, stockPhysique: Number(r.stock_physique), commentaire: r.commentaire || "",
+  product: r.product || "gasoil",
   basisEcart: r.basis_ecart, stockTheoriqueAmbiant: numOrUndef(r.stock_theorique_ambiant), stockTheorique15: numOrUndef(r.stock_theorique15),
   stockTheorique: numOrUndef(r.stock_theorique), stockPhysiqueUsed: numOrUndef(r.stock_physique_used),
   ecart: Number(r.ecart), ecartPermille: Number(r.ecart_permille), nature: r.nature, tauxFreinte: Number(r.taux_freinte),
@@ -274,12 +290,20 @@ const rowToInventaire = (r) => ({
 });
 const inventaireToRow = (i) => ({
   site_id: i.siteId, date: i.date, stock_physique: i.stockPhysique, commentaire: i.commentaire ?? null,
+  product: i.product || "gasoil",
   basis_ecart: i.basisEcart, stock_theorique_ambiant: i.stockTheoriqueAmbiant ?? null, stock_theorique15: i.stockTheorique15 ?? null,
   stock_theorique: i.stockTheorique ?? null, stock_physique_used: i.stockPhysiqueUsed ?? null, ecart: i.ecart, ecart_permille: i.ecartPermille,
   nature: i.nature, taux_freinte: i.tauxFreinte, objectif_utilise: i.objectifUtilise ?? null, conformite: i.conformite,
   adjustment_id: i.adjustmentId ?? null, temperature_c: i.temperatureC ?? null, densite_observee: i.densiteObservee ?? null,
   densite15: i.densite15 ?? null, vcf: i.vcf ?? null, stock_physique15: i.stockPhysique15 ?? null, created_by: i.createdBy ?? null,
 });
+
+const rowToProductStock = (r) => ({ id: r.id, siteId: r.site_id, product: r.product, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial) });
+const productStockToRow = (p) => ({ site_id: p.siteId, product: p.product, capacity: p.capacity, stock_initial: p.stockInitial });
+
+const rowToAssignment = (r) => ({ id: r.id, truckId: r.truck_id, stationId: r.station_id, startDate: r.start_date, endDate: r.end_date || null });
+const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, start_date: a.startDate, end_date: a.endDate ?? null });
+
 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
 const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role });
@@ -556,6 +580,8 @@ export default function App() {
   const [sites, setSites] = useState([]);
   const [movements, setMovements] = useState([]);
   const [inventaires, setInventaires] = useState([]);
+  const [productStocks, setProductStocks] = useState([]);
+  const [truckAssignments, setTruckAssignments] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [audit, setAudit] = useState([]);
   const [settings, setSettings] = useState(SETTINGS_SEED);
@@ -621,19 +647,21 @@ export default function App() {
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData] = await Promise.all([
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData] = await Promise.all([
             fetchTable("sites", rowToSite),
             fetchTable("movements", rowToMovement, "date"),
             fetchTable("inventaires", rowToInventaire, "date"),
             fetchTable("profiles", rowToProfile),
             fetchTable("audit", rowToAudit, "ts", false),
+            fetchTable("product_stocks", rowToProductStock),
+            fetchTable("truck_assignments", rowToAssignment, "start_date"),
           ]);
           let settingsRow = null;
           try {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
@@ -642,6 +670,8 @@ export default function App() {
         setInventaires(result.inventairesData);
         setProfiles(result.profilesData);
         setAudit(result.auditData);
+        setProductStocks(result.productStocksData);
+        setTruckAssignments(result.assignmentsData);
         setSettings(result.settingsRow ? { objectifFreinte: Number(result.settingsRow.objectif_freinte) } : SETTINGS_SEED);
         setLastSync(new Date());
         setLoadError(null);
@@ -659,14 +689,16 @@ export default function App() {
   useEffect(() => {
     if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
-      const [s, m, i, p, a] = await Promise.all([
+      const [s, m, i, p, a, ps, ta] = await Promise.all([
         fetchTable("sites", rowToSite),
         fetchTable("movements", rowToMovement, "date"),
         fetchTable("inventaires", rowToInventaire, "date"),
         fetchTable("profiles", rowToProfile),
         fetchTable("audit", rowToAudit, "ts", false),
+        fetchTable("product_stocks", rowToProductStock),
+        fetchTable("truck_assignments", rowToAssignment, "start_date"),
       ]);
-      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a);
+      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta);
       const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
       if (se) setSettings({ objectifFreinte: Number(se.objectif_freinte) });
       setLastSync(new Date());
@@ -693,20 +725,65 @@ export default function App() {
   };
 
   /* ---- dérivés ---- */
-  const stockOf = (siteId) => {
-    const site = sites.find((s) => s.id === siteId);
-    if (!site) return 0;
-    return movements.filter((m) => m.siteId === siteId).reduce((acc, m) => acc + m.delta, site.stockInitial);
+  const stockOf = (siteId, product = "gasoil") => {
+    if (product === "gasoil") {
+      const site = sites.find((s) => s.id === siteId);
+      if (!site) return 0;
+      return movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === "gasoil").reduce((acc, m) => acc + m.delta, site.stockInitial);
+    }
+    const ps = productStocks.find((p) => p.siteId === siteId && p.product === product);
+    if (!ps) return 0;
+    return movements.filter((m) => m.siteId === siteId && m.product === product).reduce((acc, m) => acc + m.delta, ps.stockInitial);
   };
-  const stockOf15 = (siteId) => {
-    const site = sites.find((s) => s.id === siteId);
-    if (!site) return 0;
-    return movements.filter((m) => m.siteId === siteId).reduce((acc, m) => acc + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
+  const stockOf15 = (siteId, product = "gasoil") => {
+    if (product === "gasoil") {
+      const site = sites.find((s) => s.id === siteId);
+      if (!site) return 0;
+      return movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === "gasoil").reduce((acc, m) => acc + Math.sign(m.delta) * movementQty15(m), site.stockInitial);
+    }
+    const ps = productStocks.find((p) => p.siteId === siteId && p.product === product);
+    if (!ps) return 0;
+    return movements.filter((m) => m.siteId === siteId && m.product === product).reduce((acc, m) => acc + Math.sign(m.delta) * movementQty15(m), ps.stockInitial);
   };
+
+  /* ---- mutations : stocks de lubrifiants (Superviseur uniquement) ---- */
+  const saveProductStock = ({ siteId, product, capacity, stockInitial }) => withSync(async () => {
+    const row = productStockToRow({ siteId, product, capacity: Number(capacity), stockInitial: Number(stockInitial) || 0 });
+    const { data, error } = await supabase.from("product_stocks").upsert(row, { onConflict: "site_id,product" }).select().maybeSingle();
+    if (error) throw error;
+    const saved = data ? rowToProductStock(data) : { id: uid(), siteId, product, capacity: Number(capacity), stockInitial: Number(stockInitial) || 0 };
+    setProductStocks((prev) => {
+      const exists = prev.some((p) => p.siteId === siteId && p.product === product);
+      return exists ? prev.map((p) => (p.siteId === siteId && p.product === product ? saved : p)) : [...prev, saved];
+    });
+    appendAudit("Réglage lubrifiant", `${LUBRICANTS.find((l) => l.id === product)?.label || product} — ${sites.find((s) => s.id === siteId)?.name || ""}`);
+    flash("Stock de lubrifiant mis à jour.");
+  });
+
+  /* ---- mutations : affectation des camions aux stations (Superviseur uniquement) ---- */
+  const assignTruck = ({ truckId, stationId, startDate }) => withSync(async () => {
+    // Ferme toute affectation encore ouverte pour ce camion, juste avant la nouvelle date de début.
+    const openAssignment = truckAssignments.find((a) => a.truckId === truckId && !a.endDate);
+    if (openAssignment) {
+      const prevDay = new Date(startDate);
+      prevDay.setDate(prevDay.getDate() - 1);
+      const endDate = prevDay.toISOString().slice(0, 10);
+      const { error: e1 } = await supabase.from("truck_assignments").update({ end_date: endDate }).eq("id", openAssignment.id);
+      if (e1) throw e1;
+      setTruckAssignments((prev) => prev.map((a) => (a.id === openAssignment.id ? { ...a, endDate } : a)));
+    }
+    const record = { truckId, stationId, startDate, endDate: null };
+    const { data, error } = await supabase.from("truck_assignments").insert(assignmentToRow(record)).select().maybeSingle();
+    if (error) throw error;
+    const saved = data ? rowToAssignment(data) : { id: uid(), ...record };
+    setTruckAssignments((prev) => [...prev, saved]);
+    appendAudit("Affectation camion", `${sites.find((s) => s.id === truckId)?.name || truckId} → ${sites.find((s) => s.id === stationId)?.name || stationId} (depuis le ${startDate})`);
+    flash("Camion affecté.");
+  });
 
   /* ---- mutations : sites (Superviseur uniquement) ---- */
   const addSite = (form) => withSync(async () => {
-    const site = { id: uid(), name: form.name.trim(), code: form.code.trim().toUpperCase(), capacity: Number(form.capacity), stockInitial: Number(form.stockInitial) || 0 };
+    const site = { id: uid(), name: form.name.trim(), code: form.code.trim().toUpperCase(), capacity: Number(form.capacity), stockInitial: Number(form.stockInitial) || 0, isMobile: !!form.isMobile };
     const { error } = await supabase.from("sites").insert(siteToRow(site));
     if (error) throw error;
     setSites((prev) => [...prev, site]);
@@ -714,7 +791,7 @@ export default function App() {
     flash("Site ajouté.");
   });
   const editSite = (id, patch) => withSync(async () => {
-    const updated = { ...patch, capacity: Number(patch.capacity), stockInitial: Number(patch.stockInitial) };
+    const updated = { ...patch, capacity: Number(patch.capacity), stockInitial: Number(patch.stockInitial), isMobile: !!patch.isMobile };
     const { error } = await supabase.from("sites").update(siteToRow({ id, ...updated })).eq("id", id);
     if (error) throw error;
     setSites((prev) => prev.map((s) => (s.id === id ? { ...s, ...updated } : s)));
@@ -738,6 +815,39 @@ export default function App() {
     const saved = data ? rowToMovement(data) : record;
     setMovements((prev) => [...prev, saved]);
     appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
+
+    // Miroir automatique site <-> camion, pour que les deux équations restent toujours synchronisées.
+    const isTruckId = (id) => sites.some((s) => s.id === id && s.isMobile);
+    if (payload.type === "sortie_camion" && isTruckId(payload.camion)) {
+      const mirror = {
+        id: uid(), siteId: payload.camion, product: "gasoil", type: "reception", date: payload.date,
+        quantity: payload.quantity, delta: payload.quantity, ref: `Chargement automatique depuis ${sites.find((s) => s.id === payload.siteId)?.name || ""}`,
+        temperatureC: payload.temperatureC, densiteObservee: payload.densiteObservee, densite15: payload.densite15, vcf: payload.vcf, volumeCorrige15: payload.volumeCorrige15,
+        createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
+      };
+      const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
+      if (!em) setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+    }
+    if (payload.type === "retour_camion" && isTruckId(payload.camion)) {
+      const mirror = {
+        id: uid(), siteId: payload.camion, product: "gasoil", type: "retour_cuve_camion", date: payload.date,
+        quantity: payload.quantity, delta: -payload.quantity, destination: payload.siteId,
+        temperatureC: payload.temperatureC, densiteObservee: payload.densiteObservee, densite15: payload.densite15, vcf: payload.vcf, volumeCorrige15: payload.volumeCorrige15,
+        createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
+      };
+      const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
+      if (!em) setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+    }
+    if (payload.type === "retour_cuve_camion" && sites.some((s) => s.id === payload.destination)) {
+      const mirror = {
+        id: uid(), siteId: payload.destination, product: "gasoil", type: "retour_camion", date: payload.date,
+        quantity: payload.quantity, delta: payload.quantity, camion: payload.siteId, destination: `Retour automatique depuis ${sites.find((s) => s.id === payload.siteId)?.name || ""}`,
+        temperatureC: payload.temperatureC, densiteObservee: payload.densiteObservee, densite15: payload.densite15, vcf: payload.vcf, volumeCorrige15: payload.volumeCorrige15,
+        createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
+      };
+      const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
+      if (!em) setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+    }
   });
   const deleteMovement = (id) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
@@ -757,9 +867,9 @@ export default function App() {
   });
 
   /* ---- mutations : inventaires ---- */
-  const addInventaire = ({ siteId, date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => withSync(async () => {
-    const theoriqueAmbiant = stockOf(siteId);
-    const theorique15 = stockOf15(siteId);
+  const addInventaire = ({ siteId, product = "gasoil", date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => withSync(async () => {
+    const theoriqueAmbiant = stockOf(siteId, product);
+    const theorique15 = stockOf15(siteId, product);
     const has15 = stockPhysique15 !== undefined;
     const basisEcart = has15 ? "15c" : "ambiant";
     const theoriqueUsed = has15 ? theorique15 : theoriqueAmbiant;
@@ -769,12 +879,12 @@ export default function App() {
     const adjId = uid();
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
     const adjMovement = {
-      id: adjId, siteId, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
+      id: adjId, siteId, product, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
       commentaire: `Ajustement suite à l'inventaire du ${date} (base ${has15 ? "15°C" : "ambiante"})`,
       createdBy: currentUserName, createdAt: new Date().toISOString(),
     };
     const invRecord = {
-      id: uid(), siteId, date, stockPhysique, commentaire, basisEcart,
+      id: uid(), siteId, product, date, stockPhysique, commentaire, basisEcart,
       stockTheoriqueAmbiant: theoriqueAmbiant, stockTheorique15: theorique15,
       stockTheorique: theoriqueUsed, stockPhysiqueUsed: physiqueUsed,
       ecart: cls.ecartL, ecartPermille: cls.ecartPermille, nature: cls.nature,
@@ -989,11 +1099,11 @@ export default function App() {
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
-          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} settings={settings} stockOf={stockOf} />}
+          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} />}
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} session={session} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
@@ -1016,8 +1126,8 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   const totalStock = rows.reduce((a, r) => a + r.stock, 0);
   const totalCapacity = rows.reduce((a, r) => a + r.capacity, 0);
   const alerts = rows.filter((r) => r.status !== "ok");
-  const receptionsMonth = movements.filter((m) => m.type === "reception" && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
-  const sortiesMonth = movements.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
+  const receptionsMonth = movements.filter((m) => m.type === "reception" && (m.product || "gasoil") === "gasoil" && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
+  const sortiesMonth = movements.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && (m.product || "gasoil") === "gasoil" && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
   const recent = [...movements].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 8);
   const demoCount = movements.filter((m) => m.isDemo).length;
   const statusColor = { ok: C.blue, warning: C.warning, danger: C.danger };
@@ -1111,18 +1221,41 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite }) {
-  const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "" });
+function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, productStocks, saveProductStock, truckAssignments, assignTruck }) {
+  const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
+  const [lubSiteId, setLubSiteId] = useState(LUBRICANT_SITE_IDS[0]);
+  const [lubProduct, setLubProduct] = useState(LUBRICANTS[0].id);
+  const [lubForm, setLubForm] = useState({ capacity: "", stockInitial: "" });
+  const trucks = sites.filter((s) => s.isMobile);
+  const stations = sites.filter((s) => !s.isMobile);
+  const [assignForm, setAssignForm] = useState({ truckId: trucks[0]?.id || "", stationId: stations[0]?.id || "", startDate: todayStr() });
 
   const submitAdd = () => {
     if (!form.name.trim() || !form.code.trim() || !form.capacity) return;
     addSite(form);
-    setForm({ name: "", code: "", capacity: "", stockInitial: "" });
+    setForm({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   };
   const startEdit = (s) => { setEditingId(s.id); setEditForm({ ...s }); };
   const saveEdit = () => { editSite(editingId, editForm); setEditingId(null); };
+
+  const currentLubStock = productStocks.find((p) => p.siteId === lubSiteId && p.product === lubProduct);
+  const loadLubForEdit = (siteId, product) => {
+    setLubSiteId(siteId); setLubProduct(product);
+    const ps = productStocks.find((p) => p.siteId === siteId && p.product === product);
+    setLubForm({ capacity: ps ? String(ps.capacity) : "", stockInitial: ps ? String(ps.stockInitial) : "" });
+  };
+  const submitLub = () => {
+    if (!lubForm.capacity) return;
+    saveProductStock({ siteId: lubSiteId, product: lubProduct, capacity: lubForm.capacity, stockInitial: lubForm.stockInitial });
+  };
+
+  const submitAssign = () => {
+    if (!assignForm.truckId || !assignForm.stationId || !assignForm.startDate) return;
+    assignTruck(assignForm);
+  };
+  const assignmentsSorted = [...truckAssignments].sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1151,7 +1284,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite })
                   ) : (
                     <>
                       <td style={{ fontWeight: 700, color: C.blue }}>{s.code}</td>
-                      <td>{s.name}</td>
+                      <td>{s.name}{s.isMobile && <span style={{ marginLeft: 6 }}><Badge color={C.orange}>Camion</Badge></span>}</td>
                       <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(s.capacity)}</td>
                       <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(stock)}</td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
@@ -1169,14 +1302,83 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite })
 
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
         <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Ajouter un site</h3>
-        <Field label="Nom du site"><input className="somip-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex : Dépôt Moanda" /></Field>
-        <Field label="Code (court)"><input className="somip-input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Ex : DPM" /></Field>
+        <Field label="Nom du site"><input className="somip-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex : Dépôt Moanda, ou FK253AA" /></Field>
+        <Field label="Code (court)"><input className="somip-input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Ex : DPM, ou FK253AA" /></Field>
         <Field label="Capacité (L)"><input type="number" className="somip-input" value={form.capacity} onChange={(e) => setForm({ ...form, capacity: e.target.value })} placeholder="30000" /></Field>
         <Field label="Stock initial (L)"><input type="number" className="somip-input" value={form.stockInitial} onChange={(e) => setForm({ ...form, stockInitial: e.target.value })} placeholder="0" /></Field>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "4px 0 14px", fontSize: 12.5, cursor: "pointer" }}>
+          <input type="checkbox" checked={form.isMobile} onChange={(e) => setForm({ ...form, isMobile: e.target.checked })} />
+          Camion (station mobile) — ex : FK253AA
+        </label>
         <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submitAdd} disabled={!form.name || !form.code || !form.capacity}>
           <Plus size={15} /> Ajouter le site
         </button>
       </div>
+
+      <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Lubrifiants (Prehomo / Okouma)</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Capacité et stock initial par produit, en litres.</p>
+        <Field label="Site">
+          <select className="somip-select" value={lubSiteId} onChange={(e) => loadLubForEdit(e.target.value, lubProduct)}>
+            {LUBRICANT_SITE_IDS.map((id) => <option key={id} value={id}>{sites.find((s) => s.id === id)?.name || id}</option>)}
+          </select>
+        </Field>
+        <Field label="Produit">
+          <select className="somip-select" value={lubProduct} onChange={(e) => loadLubForEdit(lubSiteId, e.target.value)}>
+            {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label} (densité {l.densite})</option>)}
+          </select>
+        </Field>
+        <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ flex: 1 }}><Field label="Capacité (L)"><input type="number" className="somip-input" value={lubForm.capacity} onChange={(e) => setLubForm({ ...lubForm, capacity: e.target.value })} placeholder="Ex : 1000" /></Field></div>
+          <div style={{ flex: 1 }}><Field label="Stock initial (L)"><input type="number" className="somip-input" value={lubForm.stockInitial} onChange={(e) => setLubForm({ ...lubForm, stockInitial: e.target.value })} placeholder="0" /></Field></div>
+        </div>
+        {currentLubStock && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>Déjà enregistré : capacité {fmt(currentLubStock.capacity)} L, stock initial {fmt(currentLubStock.stockInitial)} L.</p>}
+        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submitLub} disabled={!lubForm.capacity}>
+          <Check size={15} /> Enregistrer
+        </button>
+      </div>
+
+      {trucks.length > 0 && (
+        <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Affectation des camions</h3>
+          <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Quel camion travaille sur quelle station, avec l'historique des changements (panne, remplacement...).</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Camion">
+                <select className="somip-select" value={assignForm.truckId} onChange={(e) => setAssignForm({ ...assignForm, truckId: e.target.value })}>
+                  {trucks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div style={{ flex: 1 }}>
+              <Field label="Station">
+                <select className="somip-select" value={assignForm.stationId} onChange={(e) => setAssignForm({ ...assignForm, stationId: e.target.value })}>
+                  {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </Field>
+            </div>
+          </div>
+          <Field label="Depuis le"><input type="date" className="somip-input" value={assignForm.startDate} onChange={(e) => setAssignForm({ ...assignForm, startDate: e.target.value })} /></Field>
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center", marginBottom: 16 }} onClick={submitAssign}>
+            <Check size={15} /> Affecter
+          </button>
+          <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: C.ink }}>Historique</p>
+          <table className="somip-table">
+            <thead><tr><th>Camion</th><th>Station</th><th>Depuis</th><th>Jusqu'au</th></tr></thead>
+            <tbody>
+              {assignmentsSorted.length === 0 && <EmptyRow colSpan={4} text="Aucune affectation." />}
+              {assignmentsSorted.map((a) => (
+                <tr key={a.id}>
+                  <td>{sites.find((s) => s.id === a.truckId)?.name || a.truckId}</td>
+                  <td>{sites.find((s) => s.id === a.stationId)?.name || a.stationId}</td>
+                  <td className="somip-mono">{a.startDate}</td>
+                  <td className="somip-mono">{a.endDate || <Badge color={C.success}>en cours</Badge>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -1187,8 +1389,9 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite })
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, addMovement, addInventaire, deleteMovement, settings, canWrite, canManage }) {
+function DailyEntryView({ sites, movements, inventaires, productStocks, addMovement, addInventaire, deleteMovement, settings, canWrite, canManage }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
+  const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
   const [receptionQty, setReceptionQty] = useState("");
   const [receptionRef, setReceptionRef] = useState("");
@@ -1196,49 +1399,67 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
   const [indexApres, setIndexApres] = useState("");
   const [sortieMode, setSortieMode] = useState("vente"); // "vente" | "camion"
   const [destinataire, setDestinataire] = useState("");
-  const [camion, setCamion] = useState(TRUCKS[0]);
+  const [camion, setCamion] = useState("");
   const [destination, setDestination] = useState("");
   const [retourQty, setRetourQty] = useState("");
   const [retourNote, setRetourNote] = useState("");
+  const [retourCamionTruckId, setRetourCamionTruckId] = useState("");
+  const [retourCuveTruckQty, setRetourCuveTruckQty] = useState("");
+  const [retourCuveTruckNote, setRetourCuveTruckNote] = useState("");
   const [tempC, setTempC] = useState("");
   const [densite, setDensite] = useState("");
   const [stockFinMesure, setStockFinMesure] = useState("");
   const [commentaireInv, setCommentaireInv] = useState("");
   const [stockDebutConfirm, setStockDebutConfirm] = useState("");
 
+  const truckSites = sites.filter((s) => s.isMobile);
+  const stationSites = sites.filter((s) => !s.isMobile);
+  const isLubSite = LUBRICANT_SITE_IDS.includes(siteId);
+  const isLub = product !== "gasoil";
+  const lubDensite = LUBRICANTS.find((l) => l.id === product)?.densite || 0;
+  const isMobileSite = sites.find((s) => s.id === siteId)?.isMobile || false;
+  const skipVcf = isLub;
+
+  useEffect(() => { if (!isLubSite) setProduct("gasoil"); }, [siteId, isLubSite]);
+  useEffect(() => { if (truckSites[0] && !camion) setCamion(truckSites[0].id); }, [truckSites, camion]);
+
   const site = sites.find((s) => s.id === siteId);
-  const stockDebut = site ? stockBeforeDate(site, movements, date) : 0;
+  const productStockEntry = productStocks.find((p) => p.siteId === siteId && p.product === product);
+  const stockDebut = isLub
+    ? stockBeforeDateProduct(productStockEntry?.stockInitial || 0, movements, siteId, product, date)
+    : (site ? stockBeforeDate(site, movements, date) : 0);
   const isFirstOfMonth = date.slice(-2) === "01";
 
   useEffect(() => {
     if (isFirstOfMonth) setStockDebutConfirm(String(Math.round(stockDebut)));
     else setStockDebutConfirm("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [siteId, date]);
+  }, [siteId, product, date]);
   const stockDebutEffective = isFirstOfMonth && stockDebutConfirm !== "" ? Number(stockDebutConfirm) : stockDebut;
   const receptionN = Number(receptionQty) || 0;
-  const retourN = Number(retourQty) || 0;
+  const retourN = (isLub || isMobileSite) ? 0 : (Number(retourQty) || 0);
+  const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
   const sortieQty = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
   const sortieValid = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQty > 0);
-  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty;
-  const stockTheorique15 = site ? stockBeforeDate15(site, movements, date) : 0;
+  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty - retourCuveTruckN;
+  const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date) : 0;
 
-  // Ventes, chargements et retours camions partagent souvent le même compteur (Prehomo, Okouma...).
+  // Chaque produit (gasoil, chaque lubrifiant) et chaque camion a son propre compteur de sortie.
   const lastIndexForSite = movements
-    .filter((m) => m.siteId === siteId && (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion") && m.indexApres !== undefined)
+    .filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && ((isLub || isMobileSite) ? m.type === "sortie" : (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion")) && m.indexApres !== undefined)
     .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
     .slice(-1)[0]?.indexApres;
   const indexMismatch = lastIndexForSite !== undefined && indexAvant !== "" && Number(indexAvant) !== lastIndexForSite;
 
-  const vcfFor = (qty) => correctVolumeTo15({ volumeAmbiant: qty, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
+  const vcfFor = (qty) => (skipVcf ? null : correctVolumeTo15({ volumeAmbiant: qty, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 }));
   const vcfExtra = (qty) => {
     const r = vcfFor(qty);
     return r ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: r.densite15, vcf: r.vcf, volumeCorrige15: r.volume15 } : {};
   };
-  const vcfPreview = vcfFor(receptionN || sortieQty || retourN || 1);
+  const vcfPreview = skipVcf ? null : vcfFor(receptionN || sortieQty || retourN || retourCuveTruckN || 1);
 
   const stockFinN = Number(stockFinMesure) || 0;
-  const vcfFin = correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
+  const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
   const has15 = !!vcfFin;
   const theoriqueUsed = has15 ? stockTheorique15 : stockTheoriqueAmbiant;
   const physiqueUsed = has15 ? vcfFin.volume15 : stockFinN;
@@ -1250,7 +1471,7 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setDestination("");
-    setRetourQty(""); setRetourNote(""); setTempC(""); setDensite("");
+    setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
     setStockFinMesure(""); setCommentaireInv("");
   };
 
@@ -1259,28 +1480,35 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
     if (isFirstOfMonth) {
       const diff = Number(stockDebutConfirm) - stockDebut;
       if (diff !== 0) {
-        addMovement({ siteId, type: "ajustement", date, quantity: Math.abs(diff), delta: diff, commentaire: "Confirmation du stock début de mois" });
+        addMovement({ siteId, product, type: "ajustement", date, quantity: Math.abs(diff), delta: diff, commentaire: "Confirmation du stock début de mois" });
       }
     }
     if (receptionN > 0) {
-      addMovement({ siteId, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
+      addMovement({ siteId, product, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
     }
     if (sortieQty > 0) {
-      const base = { siteId, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), ...vcfExtra(sortieQty) };
-      addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
+      if (isLub || isMobileSite) {
+        addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire });
+      } else {
+        const base = { siteId, product, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), ...vcfExtra(sortieQty) };
+        addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
+      }
     }
     if (retourN > 0) {
-      addMovement({ siteId, type: "retour_camion", date, quantity: retourN, delta: retourN, camion, destination: retourNote, ...vcfExtra(retourN) });
+      addMovement({ siteId, product, type: "retour_camion", date, quantity: retourN, delta: retourN, camion: retourCamionTruckId || undefined, destination: retourNote, ...vcfExtra(retourN) });
+    }
+    if (retourCuveTruckN > 0) {
+      addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: -retourCuveTruckN, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
     }
     const invExtra = vcfFin
       ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
       : {};
-    addInventaire({ siteId, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
+    addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
     resetDayFields();
   };
 
-  const dayMovs = movements.filter((m) => m.siteId === siteId && m.date === date).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-  const existingInv = inventaires.find((i) => i.siteId === siteId && i.date === date);
+  const dayMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date === date).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+  const existingInv = inventaires.find((i) => i.siteId === siteId && (i.product || "gasoil") === product && i.date === date);
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1300,15 +1528,29 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
             </div>
           </div>
 
+          {isLubSite && (
+            <Field label="Produit">
+              <select className="somip-select" value={product} onChange={(e) => setProduct(e.target.value)}>
+                {PRODUCTS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+              </select>
+            </Field>
+          )}
+
+          {isLub && !productStockEntry && (
+            <p style={{ margin: "-6px 0 12px", fontSize: 11.5, color: C.warning }}>
+              Aucune capacité/stock initial défini pour {LUBRICANTS.find((l) => l.id === product)?.label} sur ce site — configure-le sur la page "Sites" (Superviseur).
+            </p>
+          )}
+
           {existingInv && (
             <p style={{ margin: "-6px 0 12px", fontSize: 11.5, color: C.warning }}>
-              Un Stock fin a déjà été enregistré pour ce site à cette date ({fmt(existingInv.stockPhysique)} L). Enregistrer à nouveau ajoutera un second inventaire.
+              Un Stock fin a déjà été enregistré pour ce site/produit à cette date ({fmt(existingInv.stockPhysique)} L). Enregistrer à nouveau ajoutera un second inventaire.
             </p>
           )}
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (calculé)</span>
-            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
+            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L{isLub && ` (≈ ${fmt(stockDebut * lubDensite)} kg)`}</span>
           </div>
 
           {isFirstOfMonth && (
@@ -1323,58 +1565,122 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
             </>
           )}
 
-          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Réception</p>
+          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Chargement" : "Réception"}</p>
           <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
             <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>
           </div>
+          {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
 
-          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <button className={`somip-tab ${sortieMode === "vente" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("vente")}>Vente</button>
-            <button className={`somip-tab ${sortieMode === "camion" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("camion")}>Vers camion</button>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
-            <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
-          </div>
-          {lastIndexForSite !== undefined && (
-            <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
-              Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
-            </p>
-          )}
-          {sortieMode === "vente" ? (
-            <Field label="Destinataire / motif (optionnel)"><input className="somip-input" value={destinataire} onChange={(e) => setDestinataire(e.target.value)} placeholder="Ex : Atelier, Engin X..." /></Field>
-          ) : (
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}>
-                <Field label="Camion">
-                  <select className="somip-select" value={camion} onChange={(e) => setCamion(e.target.value)}>
-                    {TRUCKS.map((t) => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </Field>
+          {(isLub || isMobileSite) ? (
+            <>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Sortie Fiche Terrain (compteur)" : "Sortie (compteur de livraison)"}</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 120" /></Field></div>
+                <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 145" /></Field></div>
               </div>
-              <div style={{ flex: 1 }}><Field label="Destination"><input className="somip-input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Ex : Carrière Nord" /></Field></div>
-            </div>
+              {lastIndexForSite !== undefined && (
+                <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
+                  Dernier index enregistré pour {isMobileSite ? "ce camion" : "ce produit"} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+                </p>
+              )}
+              <Field label="Destinataire / motif (optionnel)"><input className="somip-input" value={destinataire} onChange={(e) => setDestinataire(e.target.value)} placeholder={isMobileSite ? "Ex : Carrière Nord" : "Ex : Engin X"} /></Field>
+              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
+              {isLub && sortieQty > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(sortieQty * lubDensite)} kg</p>}
+            </>
+          ) : (
+            <>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <button className={`somip-tab ${sortieMode === "vente" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("vente")}>Vente</button>
+                <button className={`somip-tab ${sortieMode === "camion" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("camion")}>Vers camion</button>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
+                <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
+              </div>
+              {lastIndexForSite !== undefined && (
+                <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
+                  Dernier index enregistré sur ce site : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+                </p>
+              )}
+              {sortieMode === "vente" ? (
+                <Field label="Destinataire / motif (optionnel)"><input className="somip-input" value={destinataire} onChange={(e) => setDestinataire(e.target.value)} placeholder="Ex : Atelier, Engin X..." /></Field>
+              ) : (
+                <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Camion">
+                      <select className="somip-select" value={camion} onChange={(e) => setCamion(e.target.value)}>
+                        {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <div style={{ flex: 1 }}><Field label="Destination"><input className="somip-input" value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Ex : Carrière Nord" /></Field></div>
+                </div>
+              )}
+              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
+            </>
           )}
-          {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
 
-          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Retour cuve (camion)</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}><Field label="Quantité retournée (L)"><input type="number" className="somip-input" value={retourQty} onChange={(e) => setRetourQty(e.target.value)} placeholder="0" /></Field></div>
-            <div style={{ flex: 1 }}><Field label="Provenance / motif (optionnel)"><input className="somip-input" value={retourNote} onChange={(e) => setRetourNote(e.target.value)} placeholder="Ex : Reliquat Carrière Nord" /></Field></div>
-          </div>
+          {!isLub && !isMobileSite && (
+            <>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Retour cuve (camion)</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Quantité retournée (L)"><input type="number" className="somip-input" value={retourQty} onChange={(e) => setRetourQty(e.target.value)} placeholder="0" /></Field></div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Camion">
+                    <select className="somip-select" value={retourCamionTruckId} onChange={(e) => setRetourCamionTruckId(e.target.value)}>
+                      <option value="">— non précisé —</option>
+                      {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              </div>
+              {retourCamionTruckId && (
+                <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>
+                  Créera automatiquement un "Retour Cuve" de {fmt(Number(retourQty) || 0)} L côté {truckSites.find((t) => t.id === retourCamionTruckId)?.name}.
+                </p>
+              )}
+            </>
+          )}
 
-          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Température &amp; densité (du jour)</p>
-          <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfPreview} compact />
+          {isMobileSite && (
+            <>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Retour Cuve (vers un site)</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Quantité rendue (L)"><input type="number" className="somip-input" value={retourCuveTruckQty} onChange={(e) => setRetourCuveTruckQty(e.target.value)} placeholder="0" /></Field></div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Site destinataire">
+                    <select className="somip-select" value={retourCuveTruckNote} onChange={(e) => setRetourCuveTruckNote(e.target.value)}>
+                      <option value="">— choisir —</option>
+                      {stationSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              </div>
+              {retourCuveTruckQty && retourCuveTruckNote && (
+                <p style={{ margin: "-6px 0 12px", fontSize: 11, color: C.sub }}>
+                  Créera automatiquement un "Retour camion (cuve)" de {fmt(retourCuveTruckN)} L côté {stationSites.find((s) => s.id === retourCuveTruckNote)?.name}.
+                </p>
+              )}
+            </>
+          )}
+
+          {!isLub && (
+            <>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Température &amp; densité (du jour)</p>
+              <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfPreview} compact />
+            </>
+          )}
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "12px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
-            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheoriqueAmbiant)} L</span>
+            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheoriqueAmbiant)} L{isLub && ` (≈ ${fmt(stockTheoriqueAmbiant * lubDensite)} kg)`}</span>
           </div>
 
           <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Stock fin — jauge mesurée <span style={{ color: C.danger, fontWeight: 700 }}>*</span></p>
-          <Field label="Stock fin mesuré (L, obligatoire)"><input type="number" className="somip-input" value={stockFinMesure} onChange={(e) => setStockFinMesure(e.target.value)} placeholder="Lecture directe de la jauge" /></Field>
+          <Field label={`Stock fin mesuré (L, obligatoire)`}><input type="number" className="somip-input" value={stockFinMesure} onChange={(e) => setStockFinMesure(e.target.value)} placeholder="Lecture directe de la jauge" /></Field>
+          {isLub && stockFinMesure !== "" && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(stockFinN * lubDensite)} kg</p>}
           <Field label="Commentaire inventaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaireInv} onChange={(e) => setCommentaireInv(e.target.value)} /></Field>
 
           {preview && (
@@ -1385,7 +1691,7 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                 <span style={{ color: C.sub }}>Écart</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: NATURE_META[preview.nature].color }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: NATURE_META[preview.nature].color }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L{isLub && ` (${ecart >= 0 ? "+" : ""}${fmt(ecart * lubDensite)} kg)`}</span>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between" }}>
                 <span style={{ color: C.sub }}>Nature</span>
@@ -1403,15 +1709,16 @@ function DailyEntryView({ sites, movements, inventaires, addMovement, addInventa
       )}
 
       <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Mouvements du {date} — {site?.name}</h3>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Mouvements du {date} — {site?.name}{isLub && ` — ${LUBRICANTS.find((l) => l.id === product)?.label}`}</h3>
         <table className="somip-table">
           <thead><tr><th>Type</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th>{canManage && <th></th>}</tr></thead>
           <tbody>
             {dayMovs.length === 0 && <EmptyRow colSpan={canManage ? 4 : 3} text="Aucune écriture pour ce jour." />}
             {dayMovs.map((m) => {
               const meta = TYPE_META[m.type];
-              const label = m.type === "reception" ? "Réception" : m.type === "sortie" ? "Vente" : m.type === "sortie_camion" ? "Camion" : m.type === "retour_camion" ? "Retour" : "Ajustement";
-              const detail = m.type === "reception" ? (m.ref || "—") : m.type === "sortie" ? (m.destinataire || "—") : m.camion ? `${m.camion} ${m.type === "retour_camion" ? "←" : "→"} ${m.destination || "—"}` : "—";
+              const label = m.type === "reception" ? (isMobileSite ? "Chargement" : "Réception") : m.type === "sortie" ? (isMobileSite ? "Sortie terrain" : "Vente") : m.type === "sortie_camion" ? "Camion" : m.type === "retour_camion" ? "Retour" : m.type === "retour_cuve_camion" ? "Retour cuve" : "Ajustement";
+              const nameOf = (id) => sites.find((s) => s.id === id)?.name || id;
+              const detail = m.type === "reception" ? (m.ref || "—") : m.type === "sortie" ? (m.destinataire || "—") : m.type === "retour_cuve_camion" ? (m.destination ? nameOf(m.destination) : "—") : m.camion ? `${nameOf(m.camion)} ${m.type === "retour_camion" ? "←" : "→"} ${m.destination || "—"}` : "—";
               return (
                 <tr key={m.id}>
                   <td><Badge color={meta.color}>{label}</Badge></td>
@@ -1914,16 +2221,21 @@ function VcfView() {
 /* ------------------------------------------------------------------ */
 /* Rapports                                                              */
 /* ------------------------------------------------------------------ */
-function ReportsView({ sites, movements, inventaires, settings, stockOf }) {
+function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf }) {
   const [tab, setTab] = useState("journalier");
   const TABS = [
     { id: "journalier", label: "Journalier" },
     { id: "decadaire", label: "Décadaire" },
     { id: "mensuel", label: "Mensuel" },
+    { id: "synthese_gasoil", label: "Synthèse Gasoil" },
+    { id: "synthese_camions", label: "Synthèse Camions" },
+    { id: "synthese_station", label: "Synthèse Station (Prehomo/Okouma)" },
     { id: "etat_ambiant", label: "État des stocks — Ambiant" },
     { id: "etat_15", label: "État des stocks — 15°C" },
     { id: "exposition", label: "Exposition" },
     { id: "pertesgains", label: "Pertes/Gains par site" },
+    { id: "lubrifiants", label: "Synthèse Lubrifiants" },
+    { id: "bons", label: "Bons de livraison" },
   ];
   return (
     <div className="somip-fade">
@@ -1935,10 +2247,16 @@ function ReportsView({ sites, movements, inventaires, settings, stockOf }) {
       {tab === "journalier" && <DailyReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "decadaire" && <DecadeReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "mensuel" && <MonthlyReport sites={sites} movements={movements} inventaires={inventaires} settings={settings} />}
+      {tab === "synthese_gasoil" && <GasoilSynthesisReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "synthese_camions" && <TruckSynthesisReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "synthese_station" && <StationSynthesisReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
       {tab === "etat_ambiant" && <StockStatementAmbiant sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "etat_15" && <StockStatement15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "exposition" && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} />}
       {tab === "pertesgains" && <LossGainReport sites={sites} inventaires={inventaires} />}
+      {tab === "synthese_gasoil" && <GasoilSynthesisReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "lubrifiants" && <LubricantSynthesisReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
+      {tab === "bons" && <DeliveryNotesReport sites={sites} movements={movements} />}
     </div>
   );
 }
@@ -1948,7 +2266,7 @@ function DailyReport({ sites, movements, inventaires }) {
   const [date, setDate] = useState(todayStr());
   const rows = sites.map((s) => {
     const stockDebut = stockBeforeDate(s, movements, date);
-    const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
+    const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === date);
     const receptions = sumQty(dayMovs, ["reception"]);
     const retours = sumQty(dayMovs, ["retour_camion"]);
     const sorties = sumQty(dayMovs, ["sortie", "sortie_camion"]);
@@ -2168,7 +2486,7 @@ function StockStatementAmbiant({ sites, movements, inventaires }) {
 
   const rows = sites.map((s) => {
     const stockDebut = stockBeforeDate(s, movements, date);
-    const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
+    const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === date);
     const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
     const reception = sumQty(dayMovs, ["reception"]);
     const ventes = sumQty(dayMovs, ["sortie"]);
@@ -2251,7 +2569,7 @@ function StockStatement15({ sites, movements, inventaires }) {
 
   const rows = sites.map((s) => {
     const stockDebut = stockBeforeDate15(s, movements, date);
-    const dayMovs = movements.filter((m) => m.siteId === s.id && m.date === date);
+    const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === date);
     const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
     const reception = sumQty15(dayMovs, ["reception"]);
     const ventes = sumQty15(dayMovs, ["sortie"]);
@@ -2343,8 +2661,8 @@ function ExposureReport({ sites, movements, inventaires, stockOf }) {
   const totalCap = rows.reduce((a, r) => a + r.site.capacity, 0);
   const alertSites = rows.filter((r) => r.status !== "ok");
   const nonConformes = rows.filter((r) => r.lastInv?.conformite === "non_conforme");
-  const receptionsMonth = movements.filter((m) => m.type === "reception" && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
-  const sortiesMonth = movements.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
+  const receptionsMonth = movements.filter((m) => m.type === "reception" && (m.product || "gasoil") === "gasoil" && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
+  const sortiesMonth = movements.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && (m.product || "gasoil") === "gasoil" && m.date.startsWith(month)).reduce((a, m) => a + m.quantity, 0);
   const statusColor = { ok: C.blue, warning: C.warning, danger: C.danger };
 
   const doExcel = () => exportToExcel(`SOMIP_Exposition_${todayStr()}.xlsx`, [{
@@ -2392,6 +2710,445 @@ function ExposureReport({ sites, movements, inventaires, stockOf }) {
 }
 
 /* ---- Pertes / Gains par site ---- */
+/* ---- Synthèse Gasoil (les 8 sites) ---- */
+function GasoilSynthesisReport({ sites, movements, inventaires }) {
+  const [month, setMonth] = useState(currentMonth());
+  const bounds = monthBounds(month);
+
+  const rows = sites.filter((s) => !s.isMobile).map((site) => {
+    const stockDebut = stockBeforeDate(site, movements, bounds.start);
+    const rangeMovs = movementsInRange(movements, site.id, bounds.start, bounds.end);
+    const reception = sumQty(rangeMovs, ["reception"]);
+    const retourCamions = sumQty(rangeMovs, ["retour_camion"]);
+    const sorties = sumQty(rangeMovs, ["sortie", "sortie_camion"]);
+    const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
+    const stockTheoriqueFin = stockDebut + reception + retourCamions - sorties + ajustement;
+    const monthInv = inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1));
+    const dernierInv = monthInv[0] || null;
+    const stockFin = dernierInv ? dernierInv.stockPhysique : null;
+    const ecart = stockFin !== null ? stockFin - stockTheoriqueFin : null;
+    return { site, stockDebut, reception, retourCamions, sorties, stockTheoriqueFin, stockFin, ecart };
+  });
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_Gasoil_${month}.xlsx`, [{
+    name: "Synthèse Gasoil", rows: rows.map((r) => ({
+      Site: r.site.name, "Stock début mois (L)": Math.round(r.stockDebut), "Réception (L)": Math.round(r.reception),
+      "Retour camions (L)": Math.round(r.retourCamions), "Sorties (L)": Math.round(r.sorties),
+      "Stock théorique fin (L)": Math.round(r.stockTheoriqueFin),
+      "Stock fin mesuré (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
+      "Écart (L)": r.ecart !== null ? Math.round(r.ecart) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14 }}>
+        <Field label="Mois de la synthèse"><input type="month" className="somip-input" style={{ maxWidth: 220 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Synthèse Gasoil — Zone Sud-Est" period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Site</th>
+                <th style={{ textAlign: "right" }}>Stock début mois</th>
+                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Retour camions</th><th style={{ textAlign: "right" }}>Sorties</th>
+                <th style={{ textAlign: "right" }}>Stock théorique fin</th><th style={{ textAlign: "right" }}>Stock fin mesuré</th>
+                <th style={{ textAlign: "right" }}>Écart</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.danger : C.sub }}>{r.sorties ? `−${fmt(r.sorties)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheoriqueFin)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
+                    {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Stock fin mesuré = dernier inventaire gasoil enregistré pour ce site dans le mois.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Synthèse Camions (stations mobiles) ---- */
+function TruckSynthesisReport({ sites, movements, inventaires }) {
+  const [month, setMonth] = useState(currentMonth());
+  const bounds = monthBounds(month);
+  const trucks = sites.filter((s) => s.isMobile);
+
+  const rows = trucks.map((truck) => {
+    const stockDebut = stockBeforeDate(truck, movements, bounds.start);
+    const rangeMovs = movementsInRange(movements, truck.id, bounds.start, bounds.end);
+    const chargement = sumQty(rangeMovs, ["reception"]);
+    const sortieTerrain = sumQty(rangeMovs, ["sortie"]);
+    const retourCuve = sumQty(rangeMovs, ["retour_cuve_camion"]);
+    const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
+    const stockTheoriqueFin = stockDebut + chargement - sortieTerrain - retourCuve + ajustement;
+    const monthInv = inventaires.filter((i) => i.siteId === truck.id && (i.product || "gasoil") === "gasoil" && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1));
+    const dernierInv = monthInv[0] || null;
+    const stockFin = dernierInv ? dernierInv.stockPhysique : null;
+    const ecart = stockFin !== null ? stockFin - stockTheoriqueFin : null;
+    return { truck, stockDebut, chargement, sortieTerrain, retourCuve, stockTheoriqueFin, stockFin, ecart };
+  });
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_Camions_${month}.xlsx`, [{
+    name: "Synthèse Camions", rows: rows.map((r) => ({
+      Camion: r.truck.name, "Stock début mois (L)": Math.round(r.stockDebut), "Chargement (L)": Math.round(r.chargement),
+      "Sortie Fiche Terrain (L)": Math.round(r.sortieTerrain), "Retour Cuve (L)": Math.round(r.retourCuve),
+      "Stock théorique fin (L)": Math.round(r.stockTheoriqueFin),
+      "Stock fin mesuré (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
+      "Écart (L)": r.ecart !== null ? Math.round(r.ecart) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14 }}>
+        <Field label="Mois de la synthèse"><input type="month" className="somip-input" style={{ maxWidth: 220 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Synthèse Camions laitiers" period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        {trucks.length === 0 ? (
+          <p style={{ fontSize: 12.5, color: C.sub }}>Aucun camion enregistré. Ajoute-les sur la page "Sites" en cochant "Camion (station mobile)".</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table className="somip-table">
+              <thead>
+                <tr>
+                  <th>Camion</th>
+                  <th style={{ textAlign: "right" }}>Stock début mois</th>
+                  <th style={{ textAlign: "right" }}>Chargement</th><th style={{ textAlign: "right" }}>Sortie Fiche Terrain</th><th style={{ textAlign: "right" }}>Retour Cuve</th>
+                  <th style={{ textAlign: "right" }}>Stock théorique fin</th><th style={{ textAlign: "right" }}>Stock fin mesuré</th>
+                  <th style={{ textAlign: "right" }}>Écart</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.truck.id}>
+                    <td style={{ fontWeight: 700, color: C.blue }}>{r.truck.name}</td>
+                    <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: r.chargement ? C.success : C.sub }}>{r.chargement ? `+${fmt(r.chargement)} L` : "—"}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: r.sortieTerrain ? C.danger : C.sub }}>{r.sortieTerrain ? `−${fmt(r.sortieTerrain)} L` : "—"}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: r.retourCuve ? C.danger : C.sub }}>{r.retourCuve ? `−${fmt(r.retourCuve)} L` : "—"}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheoriqueFin)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
+                      {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Équation : Stock début + Chargement − Sortie Fiche Terrain − Retour Cuve = Stock théorique fin. Stock fin mesuré = dernier inventaire du mois pour ce camion.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Synthèse Station (site fixe + camions rattachés, ex : Prehomo/Okouma) ---- */
+function trucksAssignedAt(assignments, stationId, dateStr) {
+  return assignments.filter((a) => a.stationId === stationId && a.startDate <= dateStr && (!a.endDate || a.endDate >= dateStr)).map((a) => a.truckId);
+}
+function truckIntervalsForStation(assignments, stationId, boundsStart, boundsEnd) {
+  return assignments
+    .filter((a) => a.stationId === stationId && a.startDate <= boundsEnd && (!a.endDate || a.endDate >= boundsStart))
+    .map((a) => ({
+      truckId: a.truckId,
+      start: a.startDate > boundsStart ? a.startDate : boundsStart,
+      end: a.endDate && a.endDate < boundsEnd ? a.endDate : boundsEnd,
+    }));
+}
+
+function StationSynthesisReport({ sites, movements, inventaires, truckAssignments }) {
+  const stations = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+  const [stationId, setStationId] = useState(stations[0]?.id || "");
+  const [month, setMonth] = useState(currentMonth());
+  const bounds = monthBounds(month);
+  const station = sites.find((s) => s.id === stationId);
+
+  const intervals = station ? truckIntervalsForStation(truckAssignments, stationId, bounds.start, bounds.end) : [];
+  const truckIdsAtEnd = station ? trucksAssignedAt(truckAssignments, stationId, bounds.end) : [];
+
+  const siteStockDebut = station ? stockBeforeDate(station, movements, bounds.start) : 0;
+  const siteRangeMovs = station ? movementsInRange(movements, station.id, bounds.start, bounds.end) : [];
+  const siteReception = sumQty(siteRangeMovs, ["reception"]);
+  const siteRetourCamions = sumQty(siteRangeMovs, ["retour_camion"]);
+  const siteVentesDirectes = sumQty(siteRangeMovs, ["sortie"]);
+  const siteSortieCamion = sumQty(siteRangeMovs, ["sortie_camion"]);
+  const siteStockTheoriqueFin = station ? stockThroughDate(station, movements, bounds.end) : 0;
+
+  const truckRows = intervals.map((iv) => {
+    const truck = sites.find((s) => s.id === iv.truckId);
+    const intervalMovs = movements.filter((m) => m.siteId === iv.truckId && (m.product || "gasoil") === "gasoil" && m.date >= iv.start && m.date <= iv.end);
+    const ventesTerrain = sumQty(intervalMovs, ["sortie"]);
+    const chargement = sumQty(intervalMovs, ["reception"]);
+    const retourCuve = sumQty(intervalMovs, ["retour_cuve_camion"]);
+    const stillAssigned = truckIdsAtEnd.includes(iv.truckId);
+    const stockFinTruck = stillAssigned && truck ? stockThroughDate(truck, movements, bounds.end) : null;
+    return { truck, iv, ventesTerrain, chargement, retourCuve, stillAssigned, stockFinTruck };
+  });
+
+  const ventesGlobales = siteVentesDirectes + truckRows.reduce((a, r) => a + r.ventesTerrain, 0);
+  const stockTheoriqueCombine = siteStockTheoriqueFin + truckRows.filter((r) => r.stillAssigned).reduce((a, r) => a + (r.stockFinTruck || 0), 0);
+
+  const monthInv = station ? inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1)) : [];
+  const stockFinMesureSite = monthInv[0] ? monthInv[0].stockPhysique : null;
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_${station?.code || stationId}_${month}.xlsx`, [
+    {
+      name: "Global", rows: [{
+        Station: station?.name || "", "Stock début mois (L)": Math.round(siteStockDebut),
+        "Réception site (L)": Math.round(siteReception), "Retour camions site (L)": Math.round(siteRetourCamions),
+        "Ventes globales (site + camions terrain) (L)": Math.round(ventesGlobales),
+        "Stock théorique combiné fin (L)": Math.round(stockTheoriqueCombine),
+      }],
+    },
+    {
+      name: "Détail camions", rows: truckRows.map((r) => ({
+        Camion: r.truck?.name || r.iv.truckId, Du: r.iv.start, Au: r.iv.end,
+        "Chargement (L)": Math.round(r.chargement), "Ventes terrain (L)": Math.round(r.ventesTerrain), "Retour cuve (L)": Math.round(r.retourCuve),
+        "Toujours affecté fin de mois": r.stillAssigned ? "Oui" : "Non",
+        "Stock camion fin de mois (L)": r.stockFinTruck !== null ? Math.round(r.stockFinTruck) : "",
+      })),
+    },
+  ]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Station">
+          <select className="somip-select" style={{ maxWidth: 240 }} value={stationId} onChange={(e) => setStationId(e.target.value)}>
+            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 220 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title={`Synthèse Station — ${station?.name || ""}`} period={`Mois de ${bounds.start} au ${bounds.end} (site + camions rattachés)`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+
+        <h4 style={{ margin: "0 0 10px", fontSize: 13 }}>Vue globale (consolidée)</h4>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
+          <MiniStat label="Stock début (site)" value={`${fmt(siteStockDebut)} L`} />
+          <MiniStat label="Réception (site)" value={`+${fmt(siteReception)} L`} color={C.success} />
+          <MiniStat label="Ventes globales (site + terrain camions)" value={`−${fmt(ventesGlobales)} L`} color={C.danger} />
+          <MiniStat label="Stock théorique combiné fin" value={`${fmt(stockTheoriqueCombine)} L`} bold />
+          <MiniStat label="Stock fin mesuré (site, dernier inv.)" value={stockFinMesureSite !== null ? `${fmt(stockFinMesureSite)} L` : "—"} />
+        </div>
+
+        <h4 style={{ margin: "0 0 10px", fontSize: 13 }}>Détail par camion rattaché sur la période</h4>
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead><tr><th>Camion</th><th>Du</th><th>Au</th><th style={{ textAlign: "right" }}>Chargement</th><th style={{ textAlign: "right" }}>Ventes terrain</th><th style={{ textAlign: "right" }}>Retour cuve</th><th>Affecté fin de mois</th><th style={{ textAlign: "right" }}>Stock camion fin</th></tr></thead>
+            <tbody>
+              {truckRows.length === 0 && <EmptyRow colSpan={8} text="Aucun camion rattaché à cette station sur cette période." />}
+              {truckRows.map((r, idx) => (
+                <tr key={idx}>
+                  <td style={{ fontWeight: 700, color: C.blue }}>{r.truck?.name || r.iv.truckId}</td>
+                  <td className="somip-mono">{r.iv.start}</td>
+                  <td className="somip-mono">{r.iv.end}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{r.chargement ? `+${fmt(r.chargement)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>{r.ventesTerrain ? `−${fmt(r.ventesTerrain)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.danger }}>{r.retourCuve ? `−${fmt(r.retourCuve)} L` : "—"}</td>
+                  <td>{r.stillAssigned ? <Badge color={C.success}>Oui</Badge> : <Badge color={C.sub}>Non — réaffecté</Badge>}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{r.stockFinTruck !== null ? `${fmt(r.stockFinTruck)} L` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          "Ventes globales" additionne les ventes directes du site et les sorties fiche terrain de chaque camion, uniquement pour ses jours de rattachement à cette station (les transferts internes site↔camion s'annulent automatiquement). "Stock théorique combiné fin" n'inclut que les camions encore rattachés à cette station à la fin du mois — un camion réaffecté ailleurs en cours de mois apparaît "Non" et son stock de fin appartient désormais à sa nouvelle station.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function MiniStat({ label, value, color, bold }) {
+  return (
+    <div style={{ background: C.bg, borderRadius: 8, padding: "10px 14px", minWidth: 150 }}>
+      <div style={{ fontSize: 11, color: C.sub, fontWeight: 600, marginBottom: 4 }}>{label}</div>
+      <div className="somip-mono" style={{ fontSize: 15, fontWeight: bold ? 700 : 600, color: color || C.ink }}>{value}</div>
+    </div>
+  );
+}
+
+/* ---- Registre des bons de livraison ---- */
+function DeliveryNotesReport({ sites, movements }) {
+  const [filterSite, setFilterSite] = useState("all");
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+  const [search, setSearch] = useState("");
+
+  const rows = movements
+    .filter((m) => m.type === "reception")
+    .filter((m) => filterSite === "all" || m.siteId === filterSite)
+    .filter((m) => (!start || m.date >= start) && (!end || m.date <= end))
+    .filter((m) => !search.trim() || (m.ref || "").toLowerCase().includes(search.trim().toLowerCase()))
+    .sort((a, b) => (a.date < b.date ? 1 : (a.date > b.date ? -1 : (a.createdAt || "").localeCompare(b.createdAt || ""))));
+
+  const productLabel = (m) => PRODUCTS.find((p) => p.id === (m.product || "gasoil"))?.label || m.product;
+
+  const doExcel = () => exportToExcel(`SOMIP_Bons_Livraison.xlsx`, [{
+    name: "Bons de livraison", rows: rows.map((m) => ({
+      Date: m.date, Site: sites.find((s) => s.id === m.siteId)?.name || m.siteId, Produit: productLabel(m),
+      "N° Bon": m.ref || "", "Quantité (L)": Math.round(m.quantity), "Quantité 15°C (L)": m.volumeCorrige15 ? Math.round(m.volumeCorrige15) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Rechercher un N° de bon"><input className="somip-input" style={{ maxWidth: 220 }} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Ex : BL-2451" /></Field>
+        <Field label="Site">
+          <select className="somip-select" style={{ maxWidth: 240 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
+            <option value="all">Tous les sites</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Du (optionnel)"><input type="date" className="somip-input" style={{ maxWidth: 180 }} value={start} onChange={(e) => setStart(e.target.value)} /></Field>
+        <Field label="Au (optionnel)"><input type="date" className="somip-input" style={{ maxWidth: 180 }} value={end} onChange={(e) => setEnd(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Registre des bons de livraison" period={start || end ? `Du ${start || "…"} au ${end || "…"}` : "Toutes les réceptions"} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th></tr></thead>
+            <tbody>
+              {rows.length === 0 && <EmptyRow colSpan={6} text="Aucune réception trouvée." />}
+              {rows.map((m) => (
+                <tr key={m.id}>
+                  <td className="somip-mono">{m.date}</td>
+                  <td style={{ fontWeight: 600 }}>{sites.find((s) => s.id === m.siteId)?.name || m.siteId}</td>
+                  <td>{productLabel(m)}</td>
+                  <td className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{m.ref || "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+{fmt(m.quantity)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          {rows.length} bon(s) listé(s). Les "Chargements" créés automatiquement côté camion (miroir d'une sortie vers camion) apparaissent aussi ici — repérables par leur mention "Chargement automatique depuis...".
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Synthèse Lubrifiants (Prehomo, Okouma) ---- */
+function LubricantSynthesisReport({ sites, movements, inventaires, productStocks }) {
+  const [month, setMonth] = useState(currentMonth());
+  const bounds = monthBounds(month);
+
+  const rows = [];
+  LUBRICANT_SITE_IDS.forEach((siteId) => {
+    const site = sites.find((s) => s.id === siteId);
+    LUBRICANTS.forEach((lub) => {
+      const ps = productStocks.find((p) => p.siteId === siteId && p.product === lub.id);
+      const stockInitial = ps ? ps.stockInitial : 0;
+      const stockDebut = stockBeforeDateProduct(stockInitial, movements, siteId, lub.id, bounds.start);
+      const rangeMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === lub.id && m.date >= bounds.start && m.date <= bounds.end);
+      const reception = sumQty(rangeMovs, ["reception"]);
+      const sorties = sumQty(rangeMovs, ["sortie"]);
+      const ajustement = rangeMovs.filter((m) => m.type === "ajustement").reduce((a, m) => a + m.delta, 0);
+      const stockTheoriqueFin = stockDebut + reception - sorties + ajustement;
+      const monthInv = inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === lub.id && i.date >= bounds.start && i.date <= bounds.end).sort((a, b) => (a.date < b.date ? 1 : -1));
+      const dernierInv = monthInv[0] || null;
+      const stockFin = dernierInv ? dernierInv.stockPhysique : null;
+      const ecart = stockFin !== null ? stockFin - stockTheoriqueFin : null;
+      rows.push({
+        site, siteId, lub, hasConfig: !!ps, stockDebut, reception, sorties, stockTheoriqueFin, stockFin, ecart,
+      });
+    });
+  });
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_Lubrifiants_${month}.xlsx`, [{
+    name: "Synthèse Lubrifiants", rows: rows.map((r) => ({
+      Site: r.site?.name || r.siteId, Produit: r.lub.label, "Densité (kg/L)": r.lub.densite,
+      "Stock début mois (L)": Math.round(r.stockDebut), "Stock début mois (kg)": Math.round(r.stockDebut * r.lub.densite),
+      "Réception (L)": Math.round(r.reception), "Sorties (L)": Math.round(r.sorties),
+      "Stock théorique fin (L)": Math.round(r.stockTheoriqueFin), "Stock théorique fin (kg)": Math.round(r.stockTheoriqueFin * r.lub.densite),
+      "Stock fin mesuré (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
+      "Stock fin mesuré (kg)": r.stockFin !== null ? Math.round(r.stockFin * r.lub.densite) : "",
+      "Écart (L)": r.ecart !== null ? Math.round(r.ecart) : "", "Écart (kg)": r.ecart !== null ? Math.round(r.ecart * r.lub.densite) : "",
+    })),
+  }]);
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14 }}>
+        <Field label="Mois de la synthèse"><input type="month" className="somip-input" style={{ maxWidth: 220 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Synthèse Lubrifiants — Prehomo &amp; Okouma" period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Site</th><th>Produit</th>
+                <th style={{ textAlign: "right" }}>Stock début mois</th>
+                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Sorties</th>
+                <th style={{ textAlign: "right" }}>Stock théorique fin</th><th style={{ textAlign: "right" }}>Stock fin mesuré</th>
+                <th style={{ textAlign: "right" }}>Écart</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.siteId}-${r.lub.id}`}>
+                  <td style={{ fontWeight: 600 }}>{r.site?.name || r.siteId}</td>
+                  <td>{r.lub.label} <span style={{ color: C.sub, fontSize: 11 }}>(d={r.lub.densite})</span></td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>
+                    {r.hasConfig ? <>{fmt(r.stockDebut)} L<div style={{ color: C.sub, fontSize: 10.5 }}>{fmt(r.stockDebut * r.lub.densite)} kg</div></> : <span style={{ color: C.warning, fontSize: 11 }}>non configuré</span>}
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.sorties ? C.danger : C.sub }}>{r.sorties ? `−${fmt(r.sorties)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>
+                    {fmt(r.stockTheoriqueFin)} L<div style={{ color: C.sub, fontSize: 10.5, fontWeight: 500 }}>{fmt(r.stockTheoriqueFin * r.lub.densite)} kg</div>
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>
+                    {r.stockFin !== null ? <>{fmt(r.stockFin)} L<div style={{ color: C.sub, fontSize: 10.5, fontWeight: 500 }}>{fmt(r.stockFin * r.lub.densite)} kg</div></> : "—"}
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
+                    {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Stock fin mesuré = dernier inventaire enregistré pour ce produit dans le mois. "Non configuré" = capacité/stock initial pas encore défini sur la page Sites.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function LossGainReport({ sites, inventaires }) {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
