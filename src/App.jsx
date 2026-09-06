@@ -766,7 +766,8 @@ export default function App() {
     const row = productStockToRow({ siteId, product, capacity: Number(capacity), stockInitial: Number(stockInitial) || 0 });
     const { data, error } = await supabase.from("product_stocks").upsert(row, { onConflict: "site_id,product" }).select().maybeSingle();
     if (error) throw error;
-    const saved = data ? rowToProductStock(data) : { id: uid(), siteId, product, capacity: Number(capacity), stockInitial: Number(stockInitial) || 0 };
+    if (!data) throw new Error("La mise à jour n'a pas pu être confirmée par le serveur — réessaie.");
+    const saved = rowToProductStock(data);
     setProductStocks((prev) => {
       const exists = prev.some((p) => p.siteId === siteId && p.product === product);
       return exists ? prev.map((p) => (p.siteId === siteId && p.product === product ? saved : p)) : [...prev, saved];
@@ -790,7 +791,8 @@ export default function App() {
     const record = { truckId, stationId, startDate, endDate: null };
     const { data, error } = await supabase.from("truck_assignments").insert(assignmentToRow(record)).select().maybeSingle();
     if (error) throw error;
-    const saved = data ? rowToAssignment(data) : { id: uid(), ...record };
+    if (!data) throw new Error("L'affectation n'a pas pu être confirmée par le serveur — réessaie.");
+    const saved = rowToAssignment(data);
     setTruckAssignments((prev) => [...prev, saved]);
     appendAudit("Affectation camion", `${sites.find((s) => s.id === truckId)?.name || truckId} → ${sites.find((s) => s.id === stationId)?.name || stationId} (depuis le ${startDate})`);
     flash("Camion affecté.");
@@ -866,8 +868,9 @@ export default function App() {
   });
   const deleteMovement = (id) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
-    const { error } = await supabase.from("movements").delete().eq("id", id);
+    const { data, error } = await supabase.from("movements").delete().eq("id", id).select();
     if (error) throw error;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données (droits insuffisants ou ligne déjà supprimée) — le mouvement n'a pas été retiré.");
     setMovements((prev) => prev.filter((mm) => mm.id !== id));
     if (m) appendAudit("Suppression mouvement", `${TYPE_META[m.type]?.label || m.type} — ${fmt(m.quantity)} L`);
   });
@@ -894,34 +897,45 @@ export default function App() {
     const physiqueUsed = stockPhysique;
     const ecart = physiqueUsed - theoriqueUsed;
     const cls = classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
-    const adjId = uid();
     const has15 = stockPhysique15 !== undefined;
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
-    const adjMovement = {
-      id: adjId, siteId, product, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
+    const adjMovementDraft = {
+      siteId, product, type: "ajustement", date, quantity: Math.abs(ecart), delta: ecart, isDemo: false,
       commentaire: `Ajustement suite à l'inventaire du ${date} (base ambiante)`,
       createdBy: currentUserName, createdAt: new Date().toISOString(),
     };
-    const invRecord = {
-      id: uid(), siteId, product, date, stockPhysique, commentaire, basisEcart,
+    const { data: dataM, error: e1 } = await supabase.from("movements").insert(movementToRow(adjMovementDraft)).select().maybeSingle();
+    if (e1) throw e1;
+    if (!dataM) throw new Error("L'ajustement n'a pas pu être confirmé par le serveur — réessaie.");
+    const adjMovement = rowToMovement(dataM);
+    const invDraft = {
+      siteId, product, date, stockPhysique, commentaire, basisEcart,
       stockTheoriqueAmbiant: theoriqueAmbiant, stockTheorique15: theorique15,
       stockTheorique: theoriqueUsed, stockPhysiqueUsed: physiqueUsed,
       ecart: cls.ecartL, ecartPermille: cls.ecartPermille, nature: cls.nature,
       tauxFreinte: cls.tauxFreinte, objectifUtilise: cls.objectif, conformite: cls.conformite,
-      adjustmentId: adjId, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
+      adjustmentId: adjMovement.id, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
     };
-    const { error: e1 } = await supabase.from("movements").insert(movementToRow(adjMovement));
-    if (e1) throw e1;
-    const { error: e2 } = await supabase.from("inventaires").insert(inventaireToRow(invRecord));
-    if (e2) throw e2;
+    const { data: dataI, error: e2 } = await supabase.from("inventaires").insert(inventaireToRow(invDraft)).select().maybeSingle();
+    if (e2) {
+      // Annule l'ajustement déjà inséré pour ne pas laisser un mouvement orphelin sans inventaire associé.
+      await supabase.from("movements").delete().eq("id", adjMovement.id);
+      throw e2;
+    }
+    if (!dataI) {
+      await supabase.from("movements").delete().eq("id", adjMovement.id);
+      throw new Error("L'inventaire n'a pas pu être confirmé par le serveur — réessaie.");
+    }
+    const invRecord = rowToInventaire(dataI);
     setMovements((prev) => [...prev, adjMovement]);
     setInventaires((prev) => [...prev, invRecord]);
     appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
     flash("Inventaire enregistré et stock ajusté.");
   });
   const deleteInventaire = (inv) => withSync(async () => {
-    const { error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id);
+    const { data, error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id).select();
     if (e1) throw e1;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données (droits insuffisants ou ligne déjà supprimée) — l'inventaire n'a pas été retiré.");
     if (inv.adjustmentId) await supabase.from("movements").delete().eq("id", inv.adjustmentId);
     setInventaires((prev) => prev.filter((i) => i.id !== inv.id));
     setMovements((prev) => prev.filter((m) => m.id !== inv.adjustmentId));
