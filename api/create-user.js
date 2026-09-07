@@ -7,6 +7,15 @@ const supabaseUrl = process.env.VITE_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const VALID_ROLES = ["superviseur", "operateur", "chauffeur", "lecture"];
 
+function slugify(str) {
+  return String(str)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // retire les accents
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 40) || "utilisateur";
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "Méthode non autorisée." });
@@ -44,8 +53,8 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { email, password, fullName, role } = req.body || {};
-  if (!email || !password || !fullName || !role) {
+  const { username, email: providedEmail, password, fullName, role } = req.body || {};
+  if ((!username && !providedEmail) || !password || !fullName || !role) {
     res.status(400).json({ error: "Tous les champs sont requis." });
     return;
   }
@@ -56,6 +65,23 @@ export default async function handler(req, res) {
   if (String(password).length < 6) {
     res.status(400).json({ error: "Le mot de passe doit contenir au moins 6 caractères." });
     return;
+  }
+
+  // Si un vrai e-mail est fourni, on l'utilise tel quel. Sinon, on génère un identifiant
+  // interne à partir du nom d'utilisateur (les opérateurs n'ont pas tous d'e-mail professionnel).
+  let email = providedEmail && providedEmail.includes("@") ? providedEmail.trim() : null;
+  let baseSlug = null;
+  if (!email) {
+    baseSlug = slugify(username);
+    email = `${baseSlug}@somip.local`;
+    let attempt = 1;
+    // Vérifie l'unicité et ajoute un suffixe numérique si besoin.
+    while (attempt < 20) {
+      const { data: existing } = await admin.auth.admin.listUsers({ page: 1, perPage: 1, email });
+      if (!existing || !existing.users || existing.users.length === 0) break;
+      attempt += 1;
+      email = `${baseSlug}${attempt}@somip.local`;
+    }
   }
 
   const { data: created, error: createErr } = await admin.auth.admin.createUser({
@@ -70,9 +96,9 @@ export default async function handler(req, res) {
   const { error: updateErr } = await admin
     .from("profiles").update({ role, full_name: fullName }).eq("id", created.user.id);
   if (updateErr) {
-    res.status(200).json({ warning: "Compte créé, mais le rôle n'a pas pu être appliqué automatiquement.", userId: created.user.id });
+    res.status(200).json({ warning: "Compte créé, mais le rôle n'a pas pu être appliqué automatiquement.", userId: created.user.id, loginEmail: email });
     return;
   }
 
-  res.status(200).json({ success: true, userId: created.user.id });
+  res.status(200).json({ success: true, userId: created.user.id, loginEmail: email });
 }
