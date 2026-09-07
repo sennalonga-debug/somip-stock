@@ -413,7 +413,7 @@ const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, 
 
 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
-const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null });
+const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null });
 
 async function fetchTable(table, mapper, orderCol, ascending) {
   if (!SUPABASE_CONFIGURED) return [];
@@ -1071,6 +1071,14 @@ export default function App() {
     appendAudit("Modification rôle utilisateur", `${target?.name || ""} → ${ROLE_LABELS[role]}`);
     flash("Rôle mis à jour.");
   });
+  const updateUserSite = (userId, assignedSiteId) => withSync(async () => {
+    const { error } = await supabase.from("profiles").update({ assigned_site_id: assignedSiteId || null }).eq("id", userId);
+    if (error) throw error;
+    const target = profiles.find((u) => u.id === userId);
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, assignedSiteId: assignedSiteId || null } : u)));
+    appendAudit("Modification site assigné", `${target?.name || ""} → ${sites.find((s) => s.id === assignedSiteId)?.name || "Tous les sites"}`);
+    flash("Site assigné mis à jour.");
+  });
 
   const NAV = [
     { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: true },
@@ -1259,11 +1267,11 @@ export default function App() {
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteId={profile?.assignedSiteId} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} />}
-          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} session={session} />}
+          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSite={updateUserSite} sites={sites} session={session} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
       </div>
@@ -1587,8 +1595,9 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage }) {
-  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage, assignedSiteId }) {
+  const availableSites = assignedSiteId ? sites.filter((s) => s.id === assignedSiteId) : sites;
+  const [siteId, setSiteId] = useState(assignedSiteId || sites[0]?.id || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
   const [receptionQty, setReceptionQty] = useState("");
@@ -1780,9 +1789,15 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}>
               <Field label="Site">
-                <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-                  {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
+                {assignedSiteId ? (
+                  <div className="somip-input" style={{ background: C.bg, color: C.ink, fontWeight: 600, display: "flex", alignItems: "center" }}>
+                    {sites.find((s) => s.id === assignedSiteId)?.name || "Site assigné"}
+                  </div>
+                ) : (
+                  <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+                    {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                  </select>
+                )}
               </Field>
             </div>
             <div style={{ flex: 1 }}>
@@ -3873,16 +3888,21 @@ function LossGainReport({ sites, inventaires }) {
 /* ------------------------------------------------------------------ */
 /* Utilisateurs                                                          */
 /* ------------------------------------------------------------------ */
-function UsersView({ profiles, updateUserRole, session }) {
+function UsersView({ profiles, updateUserRole, updateUserSite, sites, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
-  const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture" });
+  const [siteDraft, setSiteDraft] = useState("");
+  const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture", assignedSiteId: "" });
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
   const [createMsg, setCreateMsg] = useState(null);
 
-  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); };
-  const saveEdit = () => { updateUserRole(editingId, roleDraft); setEditingId(null); };
+  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); setSiteDraft(u.assignedSiteId || ""); };
+  const saveEdit = () => {
+    updateUserRole(editingId, roleDraft);
+    updateUserSite(editingId, siteDraft || null);
+    setEditingId(null);
+  };
 
   const isOnline = (u) => {
     if (!u.lastSeenAt) return false;
@@ -3907,12 +3927,12 @@ function UsersView({ profiles, updateUserRole, session }) {
       const res = await fetch("/api/create-user", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
-        body: JSON.stringify({ username: form.username.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role }),
+        body: JSON.stringify({ username: form.username.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role, assignedSiteId: form.assignedSiteId || null }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erreur lors de la création du compte.");
       setCreateMsg(`Compte créé pour ${form.fullName.trim()} (${ROLE_LABELS[form.role]}). Identifiant de connexion : "${data.loginEmail}" — communique-le avec le mot de passe.`);
-      setForm({ fullName: "", username: "", password: "", role: "lecture" });
+      setForm({ fullName: "", username: "", password: "", role: "lecture", assignedSiteId: "" });
     } catch (e) {
       setCreateErr(e.message || "Erreur lors de la création du compte.");
     } finally {
@@ -3922,15 +3942,15 @@ function UsersView({ profiles, updateUserRole, session }) {
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-      <div className="somip-panel" style={{ flex: "1 1 520px", padding: 18 }}>
+      <div className="somip-panel" style={{ flex: "1 1 560px", padding: 18 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Comptes ({profiles.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>
-          Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle ici à tout moment.
+          Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle et le site assigné ici à tout moment.
         </p>
         <table className="somip-table">
-          <thead><tr><th>Nom</th><th>Rôle</th><th>Présence</th><th></th></tr></thead>
+          <thead><tr><th>Nom</th><th>Rôle</th><th>Site assigné</th><th>Présence</th><th></th></tr></thead>
           <tbody>
-            {profiles.length === 0 && <EmptyRow colSpan={4} text="Aucun compte pour le moment." />}
+            {profiles.length === 0 && <EmptyRow colSpan={5} text="Aucun compte pour le moment." />}
             {profiles.map((u) => {
               const isEditing = editingId === u.id;
               return (
@@ -3943,6 +3963,12 @@ function UsersView({ profiles, updateUserRole, session }) {
                           {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
                         </select>
                       </td>
+                      <td>
+                        <select className="somip-select" value={siteDraft} onChange={(e) => setSiteDraft(e.target.value)}>
+                          <option value="">Tous les sites</option>
+                          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                        </select>
+                      </td>
                       <td></td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         <button className="somip-btn somip-btn-primary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={saveEdit}>OK</button>
@@ -3953,6 +3979,7 @@ function UsersView({ profiles, updateUserRole, session }) {
                     <>
                       <td style={{ fontWeight: 600 }}>{u.name}</td>
                       <td><Badge color={C.blue}>{ROLE_LABELS[u.role] || u.role}</Badge></td>
+                      <td style={{ color: C.sub, fontSize: 12.5 }}>{u.assignedSiteId ? (sites.find((s) => s.id === u.assignedSiteId)?.name || u.assignedSiteId) : "Tous les sites"}</td>
                       <td>
                         {isOnline(u) ? (
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, color: C.success, fontWeight: 600 }}>
@@ -3982,6 +4009,12 @@ function UsersView({ profiles, updateUserRole, session }) {
         <Field label="Rôle">
           <select className="somip-select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
             {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+          </select>
+        </Field>
+        <Field label="Site assigné (optionnel)">
+          <select className="somip-select" value={form.assignedSiteId} onChange={(e) => setForm({ ...form, assignedSiteId: e.target.value })}>
+            <option value="">Tous les sites</option>
+            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </Field>
         {createErr && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 10px" }}>{createErr}</p>}
