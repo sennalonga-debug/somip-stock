@@ -53,7 +53,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { username, email: providedEmail, password, fullName, role } = req.body || {};
+  const { username, email: providedEmail, password, fullName, role, assignedSiteId } = req.body || {};
   if ((!username && !providedEmail) || !password || !fullName || !role) {
     res.status(400).json({ error: "Tous les champs sont requis." });
     return;
@@ -94,7 +94,7 @@ export default async function handler(req, res) {
 
   // Le compte est créé avec le rôle par défaut "lecture" (déclencheur automatique) : on l'ajuste.
   const { error: updateErr } = await admin
-    .from("profiles").update({ role, full_name: fullName }).eq("id", created.user.id);
+    .from("profiles").update({ role, full_name: fullName, assigned_site_id: assignedSiteId || null }).eq("id", created.user.id);
   if (updateErr) {
     res.status(200).json({ warning: "Compte créé, mais le rôle n'a pas pu être appliqué automatiquement.", userId: created.user.id, loginEmail: email });
     return;
