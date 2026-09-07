@@ -2612,6 +2612,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
   const isTruck = !!site?.isMobile;
+  const isLubSite = site ? LUBRICANT_SITE_IDS.includes(site.id) : false;
   const bounds = monthBounds(month);
 
   const days = [];
@@ -2623,22 +2624,24 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
       const stockDebut = stockBeforeDate(site, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = isTruck ? sumQty(dayMovs, ["sortie"]) : sumQty(dayMovs, ["sortie", "sortie_camion"]);
+      const ventes = sumQty(dayMovs, ["sortie"]);
+      const chargementLaitiers = isTruck ? 0 : sumQty(dayMovs, ["sortie_camion"]);
       const retourCamions = isTruck ? 0 : sumQty(dayMovs, ["retour_camion"]);
       const retourCuve = isTruck ? sumQty(dayMovs, ["retour_cuve_camion"]) : 0;
-      const stockTheorique = stockDebut + reception + retourCamions - ventes - retourCuve;
+      const stockTheorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers - retourCuve;
       const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       const stockJauge = inv ? inv.stockPhysique : null;
-      days.push({ date: d, stockDebut, reception, ventes, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
 
   const totalReception = days.reduce((a, d) => a + d.reception, 0);
   const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
+  const totalChargementLaitiers = days.reduce((a, d) => a + d.chargementLaitiers, 0);
   const totalRetourCuve = days.reduce((a, d) => a + d.retourCuve, 0);
   const daysWithJauge = days.filter((d) => d.stockJauge !== null);
   const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
@@ -2654,6 +2657,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
   const doExcel = () => exportToExcel(`SOMIP_Synthese_${site?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse", rows: days.map((d) => ({
       Date: d.date, "Stock début (L)": Math.round(d.stockDebut), [`${receptionLabel} (L)`]: Math.round(d.reception), [`${ventesLabel} (L)`]: Math.round(d.ventes),
+      ...(isLubSite ? { "Chargement laitiers (L)": Math.round(d.chargementLaitiers) } : {}),
       ...(isTruck ? { "Retour Cuve (L)": Math.round(d.retourCuve) } : {}),
       "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
       "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
@@ -2679,6 +2683,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
             <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
             <MiniStat label={`Total ${receptionLabel}`} value={`+${fmt(totalReception)} L`} color={C.success} />
             <MiniStat label={`Total ${ventesLabel}`} value={`${fmt(totalVentes)} L`} />
+            {isLubSite && <MiniStat label="Total Chargement laitiers" value={`${fmt(totalChargementLaitiers)} L`} color={C.orange} />}
             {isTruck && <MiniStat label="Total Retour Cuve" value={`${fmt(totalRetourCuve)} L`} />}
             <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
             <MiniStat label="Stock jauge (dernière mesure)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
@@ -2697,6 +2702,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
               <tr>
                 <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
                 <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
+                {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
                 {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
                 <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
@@ -2704,13 +2710,14 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isTruck ? 10 : 9} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 10 : 9} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
+                  {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
@@ -2727,6 +2734,8 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           {isTruck
             ? "Stock théorique = Stock début + Chargement − Sortie Fiche Terrain − Retour Cuve (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
+            : isLubSite
+            ? "Stock théorique = Stock début + Réception − Ventes − Chargement laitiers (calcul pur). Le Chargement laitiers crée automatiquement le Chargement correspondant côté camion. Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
             : "Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."}
         </p>
       </div>
@@ -2740,6 +2749,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
   const isTruck = !!site?.isMobile;
+  const isLubSite = site ? LUBRICANT_SITE_IDS.includes(site.id) : false;
   const bounds = monthBounds(month);
 
   const days = [];
@@ -2751,22 +2761,24 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
       const stockDebut = stockBeforeDate15(site, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty15(dayMovs, ["reception"]);
-      const ventes = isTruck ? sumQty15(dayMovs, ["sortie"]) : sumQty15(dayMovs, ["sortie", "sortie_camion"]);
+      const ventes = sumQty15(dayMovs, ["sortie"]);
+      const chargementLaitiers = isTruck ? 0 : sumQty15(dayMovs, ["sortie_camion"]);
       const retourCamions = isTruck ? 0 : sumQty15(dayMovs, ["retour_camion"]);
       const retourCuve = isTruck ? sumQty15(dayMovs, ["retour_cuve_camion"]) : 0;
-      const stockTheorique = stockDebut + reception + retourCamions - ventes - retourCuve;
+      const stockTheorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers - retourCuve;
       const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
       const stockJauge = inv ? inv.stockPhysique15 : null;
-      days.push({ date: d, stockDebut, reception, ventes, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
 
   const totalReception = days.reduce((a, d) => a + d.reception, 0);
   const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
+  const totalChargementLaitiers = days.reduce((a, d) => a + d.chargementLaitiers, 0);
   const totalRetourCuve = days.reduce((a, d) => a + d.retourCuve, 0);
   const daysWithJauge = days.filter((d) => d.stockJauge !== null);
   const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
@@ -2780,6 +2792,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
   const doExcel = () => exportToExcel(`SOMIP_Synthese15_${site?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse 15°C", rows: days.map((d) => ({
       Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), [`${receptionLabel} 15°C (L)`]: Math.round(d.reception), [`${ventesLabel} 15°C (L)`]: Math.round(d.ventes),
+      ...(isLubSite ? { "Chargement laitiers 15°C (L)": Math.round(d.chargementLaitiers) } : {}),
       ...(isTruck ? { "Retour Cuve 15°C (L)": Math.round(d.retourCuve) } : {}),
       "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
       "Stock théorique 15°C (L)": Math.round(d.stockTheorique), "Stock jauge 15°C (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
@@ -2805,6 +2818,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
             <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
             <MiniStat label={`Total ${receptionLabel}`} value={`+${fmt(totalReception)} L`} color={C.success} />
             <MiniStat label={`Total ${ventesLabel}`} value={`${fmt(totalVentes)} L`} />
+            {isLubSite && <MiniStat label="Total Chargement laitiers" value={`${fmt(totalChargementLaitiers)} L`} color={C.orange} />}
             {isTruck && <MiniStat label="Total Retour Cuve" value={`${fmt(totalRetourCuve)} L`} />}
             <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
             <MiniStat label="Stock jauge (dernière mesure 15°C)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
@@ -2822,6 +2836,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
               <tr>
                 <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
                 <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
+                {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
                 {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
                 <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
@@ -2829,13 +2844,14 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isTruck ? 10 : 9} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 10 : 9} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
+                  {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
@@ -3892,10 +3908,26 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
   const [siteDraft, setSiteDraft] = useState("");
+  const [deletingErr, setDeletingErr] = useState(null);
   const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture", assignedSiteId: "" });
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
   const [createMsg, setCreateMsg] = useState(null);
+
+  const deleteAccount = async (userId) => {
+    setDeletingErr(null);
+    try {
+      const res = await fetch("/api/delete-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
+        body: JSON.stringify({ userId }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erreur lors de la suppression du compte.");
+    } catch (e) {
+      setDeletingErr(e.message || "Erreur lors de la suppression du compte.");
+    }
+  };
 
   const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); setSiteDraft(u.assignedSiteId || ""); };
   const saveEdit = () => {
@@ -3947,6 +3979,7 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>
           Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle et le site assigné ici à tout moment.
         </p>
+        {deletingErr && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 10px" }}>{deletingErr}</p>}
         <table className="somip-table">
           <thead><tr><th>Nom</th><th>Rôle</th><th>Site assigné</th><th>Présence</th><th></th></tr></thead>
           <tbody>
@@ -3991,6 +4024,7 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
                       </td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
                         <button onClick={() => startEdit(u)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
+                        {u.id !== session?.user?.id && <ConfirmIconButton onConfirm={() => deleteAccount(u.id)} />}
                       </td>
                     </>
                   )}
