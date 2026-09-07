@@ -1521,6 +1521,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const [indexAvant, setIndexAvant] = useState("");
   const [indexApres, setIndexApres] = useState("");
   const [compteur, setCompteur] = useState("");
+  const [compteurReadings, setCompteurReadings] = useState([{ compteur: "", indexAvant: "", indexApres: "" }]);
   const [chargements, setChargements] = useState([{ camion: "", quantite: "" }]);
   const [destinataire, setDestinataire] = useState("");
   const [retourQty, setRetourQty] = useState("");
@@ -1548,6 +1549,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const site = sites.find((s) => s.id === siteId);
   const meters = metersForSite(site);
   useEffect(() => { setCompteur(meters[0] || "Compteur"); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const lastIndexForMeter = (meterName) => movements
+    .filter((m) => m.siteId === siteId && (m.product || "gasoil") === "gasoil" && (m.compteur || meters[0]) === meterName && (m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion") && m.indexApres !== undefined)
+    .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
+    .slice(-1)[0]?.indexApres;
   const productStockEntry = productStocks.find((p) => p.siteId === siteId && p.product === product);
   const stockDebut = isLub
     ? stockBeforeDateProduct(productStockEntry?.stockInitial || 0, movements, siteId, product, date, inventaires)
@@ -1563,8 +1569,16 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const receptionN = Number(receptionQty) || 0;
   const retourN = (isLub || isMobileSite) ? 0 : (Number(retourQty) || 0);
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
-  const sortieQty = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
-  const sortieValid = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQty > 0);
+  const isMultiCompteurEntry = isLubSite && !isLub && !isMobileSite;
+  const readingFlows = compteurReadings.map((r) => ({
+    ...r,
+    flow: r.indexAvant !== "" && r.indexApres !== "" ? Number(r.indexApres) - Number(r.indexAvant) : 0,
+    valid: r.indexAvant === "" && r.indexApres === "" ? true : (r.indexAvant !== "" && r.indexApres !== "" && Number(r.indexApres) > Number(r.indexAvant)),
+  }));
+  const sortieQtySingle = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
+  const sortieValidSingle = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQtySingle > 0);
+  const sortieQty = isMultiCompteurEntry ? readingFlows.reduce((a, r) => a + r.flow, 0) : sortieQtySingle;
+  const sortieValid = isMultiCompteurEntry ? readingFlows.every((r) => r.valid) : sortieValidSingle;
   const totalChargements = isLubSite && !isLub ? chargements.reduce((a, c) => a + (Number(c.quantite) || 0), 0) : 0;
   const chargementsValid = totalChargements <= sortieQty;
   const venteStation = isLubSite && !isLub ? Math.max(0, sortieQty - totalChargements) : sortieQty;
@@ -1602,6 +1616,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
+    setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]);
     setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
     setStockFinMesure(""); setCommentaireInv("");
   };
@@ -1631,19 +1646,26 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
         if (isLub || isMobileSite) {
           const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
           if (!ok) return;
-        } else if (isLubSite) {
-          // Le compteur mesure le flux total (vente + chargements camions confondus) : on
-          // enregistre la part "vente" avec l'index complet, puis chaque chargement camion
-          // séparément (quantité directe, sans index propre) — ce qui crée automatiquement
-          // la réception/chargement correspondante côté camion.
-          if (venteStation > 0) {
-            const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: venteStation, delta: -venteStation, indexAvant: Number(indexAvant), indexApres: Number(indexApres), compteur: compteurField, destinataire, ...vcfExtra(venteStation) });
-            if (!ok) return;
+        } else if (isMultiCompteurEntry) {
+          // Le(s) compteur(s) mesurent le flux total (vente + chargements camions confondus) :
+          // on répartit les chargements sur les compteurs saisis (dans l'ordre), puis on
+          // enregistre le reliquat "vente" par compteur avec son propre index. Chaque
+          // chargement camion crée automatiquement la réception correspondante côté camion.
+          let remaining = totalChargements;
+          for (const r of readingFlows) {
+            if (r.flow <= 0) continue;
+            const used = Math.min(r.flow, remaining);
+            remaining -= used;
+            const vente = r.flow - used;
+            if (vente > 0) {
+              const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: vente, delta: -vente, indexAvant: Number(r.indexAvant), indexApres: Number(r.indexApres), compteur: r.compteur || undefined, destinataire, ...vcfExtra(vente) });
+              if (!ok) return;
+            }
           }
           for (const c of chargements) {
             const qty = Number(c.quantite) || 0;
             if (qty > 0 && c.camion) {
-              const ok = await addMovement({ siteId, product, type: "sortie_camion", date, quantity: qty, delta: -qty, camion: c.camion, compteur: compteurField, ...vcfExtra(qty) });
+              const ok = await addMovement({ siteId, product, type: "sortie_camion", date, quantity: qty, delta: -qty, camion: c.camion, ...vcfExtra(qty) });
               if (!ok) return;
             }
           }
@@ -1759,24 +1781,48 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
             </>
           ) : isLubSite ? (
             <>
-              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur — flux total : vente + chargements camions)</p>
-              {meters.length > 1 && (
-                <Field label="Compteur">
-                  <select className="somip-select" value={compteur} onChange={(e) => setCompteur(e.target.value)}>
-                    {meters.map((m) => <option key={m} value={m}>{m}</option>)}
-                  </select>
-                </Field>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteurs — flux total : vente + chargements camions)</p>
+              {compteurReadings.map((r, idx) => {
+                const lastIdx = r.compteur ? lastIndexForMeter(r.compteur) : undefined;
+                const mismatch = lastIdx !== undefined && r.indexAvant !== "" && Number(r.indexAvant) !== lastIdx;
+                return (
+                  <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                      {meters.length > 1 && (
+                        <div style={{ flex: 1 }}>
+                          <Field label="Compteur">
+                            <select className="somip-select" value={r.compteur} onChange={(e) => setCompteurReadings((prev) => prev.map((row, i) => (i === idx ? { ...row, compteur: e.target.value } : row)))}>
+                              {meters.map((m) => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                          </Field>
+                        </div>
+                      )}
+                      <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={r.indexAvant} onChange={(e) => setCompteurReadings((prev) => prev.map((row, i) => (i === idx ? { ...row, indexAvant: e.target.value } : row)))} placeholder="Ex : 45210" /></Field></div>
+                      <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={r.indexApres} onChange={(e) => setCompteurReadings((prev) => prev.map((row, i) => (i === idx ? { ...row, indexApres: e.target.value } : row)))} placeholder="Ex : 47210" /></Field></div>
+                      {compteurReadings.length > 1 && (
+                        <button onClick={() => setCompteurReadings((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                          <X size={16} color={C.danger} />
+                        </button>
+                      )}
+                    </div>
+                    {lastIdx !== undefined && (
+                      <p style={{ margin: "4px 0 0", fontSize: 11, color: mismatch ? C.warning : C.sub }}>
+                        Dernier index enregistré ({r.compteur}) : {fmt(lastIdx)}{mismatch && " — vérifie ton index avant."}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+              {compteurReadings.length < meters.length && (
+                <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => {
+                  const used = compteurReadings.map((r) => r.compteur);
+                  const next = meters.find((m) => !used.includes(m)) || meters[0];
+                  setCompteurReadings((prev) => [...prev, { compteur: next, indexAvant: "", indexApres: "" }]);
+                }}>
+                  <Plus size={13} /> Ajouter un 2e compteur (même journée)
+                </button>
               )}
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Index avant"><input type="number" className="somip-input" value={indexAvant} onChange={(e) => setIndexAvant(e.target.value)} placeholder="Ex : 45210" /></Field></div>
-                <div style={{ flex: 1 }}><Field label="Index après"><input type="number" className="somip-input" value={indexApres} onChange={(e) => setIndexApres(e.target.value)} placeholder="Ex : 47210" /></Field></div>
-              </div>
-              {lastIndexForSite !== undefined && (
-                <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
-                  Dernier index enregistré sur ce site{meters.length > 1 ? ` (${compteur})` : ""} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
-                </p>
-              )}
-              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
+              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant, pour chaque compteur.</p>}
 
               <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur ce flux)</p>
               {chargements.map((c, idx) => (
@@ -1804,7 +1850,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
               <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
                 <Plus size={13} /> Ajouter un camion
               </button>
-              {!chargementsValid && <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>Le total chargé ({fmt(totalChargements)} L) dépasse le flux du compteur ({fmt(sortieQty)} L).</p>}
+              {!chargementsValid && <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>Le total chargé ({fmt(totalChargements)} L) dépasse le flux total des compteurs ({fmt(sortieQty)} L).</p>}
               {sortieQty > 0 && (
                 <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: totalChargements > 0 ? 4 : 0 }}>
