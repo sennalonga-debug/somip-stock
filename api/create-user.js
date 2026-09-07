@@ -5,6 +5,16 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const VALID_ROLES = ["superviseur", "operateur", "chauffeur", "lecture"];
+
+function slugify(str) {
+  return String(str)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // retire les accents
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ".")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 40) || "utilisateur";
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -25,6 +35,7 @@ export default async function handler(req, res) {
 
   const admin = createClient(supabaseUrl, serviceRoleKey, { auth: { autoRefreshToken: false, persistSession: false } });
 
+  // Vérifie que la personne qui appelle est bien connectée et Superviseur.
   const { data: userData, error: userErr } = await admin.auth.getUser(token);
   if (userErr || !userData?.user) {
     res.status(401).json({ error: "Session invalide, reconnecte-toi." });
@@ -38,27 +49,56 @@ export default async function handler(req, res) {
     return;
   }
   if (detectedRole !== "superviseur") {
-    res.status(403).json({ error: "Seul un Superviseur peut supprimer un compte." });
+    res.status(403).json({ error: `Seul un Superviseur peut créer un compte (rôle détecté pour ton compte : ${detectedRole ? `"${detectedRole}"` : "aucun profil trouvé pour cet identifiant"}).` });
     return;
   }
 
-  const { userId } = req.body || {};
-  if (!userId) {
-    res.status(400).json({ error: "Identifiant de compte manquant." });
+  const { username, email: providedEmail, password, fullName, role, assignedSiteId } = req.body || {};
+  if ((!username && !providedEmail) || !password || !fullName || !role) {
+    res.status(400).json({ error: "Tous les champs sont requis." });
     return;
   }
-  if (userId === userData.user.id) {
-    res.status(400).json({ error: "Tu ne peux pas supprimer ton propre compte." });
+  if (!VALID_ROLES.includes(role)) {
+    res.status(400).json({ error: "Rôle invalide." });
+    return;
+  }
+  if (String(password).length < 6) {
+    res.status(400).json({ error: "Le mot de passe doit contenir au moins 6 caractères." });
     return;
   }
 
-  const { error: deleteErr } = await admin.auth.admin.deleteUser(userId);
-  if (deleteErr) {
-    res.status(400).json({ error: deleteErr.message });
+  // Si un vrai e-mail est fourni, on l'utilise tel quel. Sinon, on génère un identifiant
+  // interne à partir du nom d'utilisateur (les opérateurs n'ont pas tous d'e-mail professionnel).
+  let email = providedEmail && providedEmail.includes("@") ? providedEmail.trim() : null;
+  let baseSlug = null;
+  if (!email) {
+    baseSlug = slugify(username);
+    email = `${baseSlug}@somip.local`;
+    let attempt = 1;
+    // Vérifie l'unicité et ajoute un suffixe numérique si besoin.
+    while (attempt < 20) {
+      const { data: existing } = await admin.auth.admin.listUsers({ page: 1, perPage: 1, email });
+      if (!existing || !existing.users || existing.users.length === 0) break;
+      attempt += 1;
+      email = `${baseSlug}${attempt}@somip.local`;
+    }
+  }
+
+  const { data: created, error: createErr } = await admin.auth.admin.createUser({
+    email, password, email_confirm: true, user_metadata: { full_name: fullName },
+  });
+  if (createErr) {
+    res.status(400).json({ error: createErr.message });
     return;
   }
-  // Sécurité supplémentaire si la fiche profil n'a pas été retirée automatiquement.
-  await admin.from("profiles").delete().eq("id", userId);
 
-  res.status(200).json({ success: true });
+  // Le compte est créé avec le rôle par défaut "lecture" (déclencheur automatique) : on l'ajuste.
+  const { error: updateErr } = await admin
+    .from("profiles").update({ role, full_name: fullName, assigned_site_id: assignedSiteId || null }).eq("id", created.user.id);
+  if (updateErr) {
+    res.status(200).json({ warning: "Compte créé, mais le rôle n'a pas pu être appliqué automatiquement.", userId: created.user.id, loginEmail: email });
+    return;
+  }
+
+  res.status(200).json({ success: true, userId: created.user.id, loginEmail: email });
 }
