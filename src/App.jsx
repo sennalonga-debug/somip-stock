@@ -65,8 +65,10 @@ const SITE_METERS_BY_CODE = {
   GSB: ["Compteur"],
   CIM: ["Compteur 1", "Compteur 2", "Compteur Agglo"],
 };
-function metersForSite(site) {
+function metersForSite(site, dynamicMeters) {
   if (!site) return ["Compteur"];
+  const dyn = (dynamicMeters || []).filter((m) => m.siteId === site.id).map((m) => m.name);
+  if (dyn.length) return dyn;
   return SITE_METERS_BY_CODE[site.code] || ["Compteur"];
 }
 const PRODUCTS = [{ id: "gasoil", label: "Gasoil" }, ...LUBRICANTS];
@@ -403,12 +405,15 @@ const inventaireToRow = (i) => ({
 const rowToProductStock = (r) => ({ id: r.id, siteId: r.site_id, product: r.product, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial) });
 const productStockToRow = (p) => ({ site_id: p.siteId, product: p.product, capacity: p.capacity, stock_initial: p.stockInitial });
 
+const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
+const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
+
 const rowToAssignment = (r) => ({ id: r.id, truckId: r.truck_id, stationId: r.station_id, startDate: r.start_date, endDate: r.end_date || null });
 const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, start_date: a.startDate, end_date: a.endDate ?? null });
 
 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
-const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role });
+const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null });
 
 async function fetchTable(table, mapper, orderCol, ascending) {
   if (!SUPABASE_CONFIGURED) return [];
@@ -643,7 +648,7 @@ function AuthScreen() {
             <input className="somip-input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Ex : Jean Mabiala" />
           </Field>
         )}
-        <Field label="E-mail">
+        <Field label="E-mail ou identifiant">
           <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="prenom.nom@somip-sarl.ga" />
         </Field>
         <Field label="Mot de passe">
@@ -683,6 +688,7 @@ export default function App() {
   const [movements, setMovements] = useState([]);
   const [inventaires, setInventaires] = useState([]);
   const [productStocks, setProductStocks] = useState([]);
+  const [siteMeters, setSiteMeters] = useState([]);
   const [truckAssignments, setTruckAssignments] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [audit, setAudit] = useState([]);
@@ -753,7 +759,7 @@ export default function App() {
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData] = await Promise.all([
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData] = await Promise.all([
             fetchTable("sites", rowToSite),
             fetchTable("movements", rowToMovement, "date"),
             fetchTable("inventaires", rowToInventaire, "date"),
@@ -761,13 +767,14 @@ export default function App() {
             fetchTable("audit", rowToAudit, "ts", false),
             fetchTable("product_stocks", rowToProductStock),
             fetchTable("truck_assignments", rowToAssignment, "start_date"),
+            fetchTable("site_meters", rowToSiteMeter, "name"),
           ]);
           let settingsRow = null;
           try {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
@@ -778,6 +785,7 @@ export default function App() {
         setAudit(result.auditData);
         setProductStocks(result.productStocksData);
         setTruckAssignments(result.assignmentsData);
+        setSiteMeters(result.siteMetersData);
         setSettings(result.settingsRow ? { objectifFreinte: Number(result.settingsRow.objectif_freinte) } : SETTINGS_SEED);
         setLastSync(new Date());
         setLoadError(null);
@@ -792,10 +800,11 @@ export default function App() {
   }, [session, profile, retryKey]);
 
   /* ---- synchronisation périodique : voir les changements des autres utilisateurs ---- */
+  const heartbeatRef = useRef(0);
   useEffect(() => {
     if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
-      const [s, m, i, p, a, ps, ta] = await Promise.all([
+      const [s, m, i, p, a, ps, ta, sm] = await Promise.all([
         fetchTable("sites", rowToSite),
         fetchTable("movements", rowToMovement, "date"),
         fetchTable("inventaires", rowToInventaire, "date"),
@@ -803,11 +812,18 @@ export default function App() {
         fetchTable("audit", rowToAudit, "ts", false),
         fetchTable("product_stocks", rowToProductStock),
         fetchTable("truck_assignments", rowToAssignment, "start_date"),
+        fetchTable("site_meters", rowToSiteMeter, "name"),
       ]);
-      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta);
+      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm);
       const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
       if (se) setSettings({ objectifFreinte: Number(se.objectif_freinte) });
       setLastSync(new Date());
+      // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
+      const now = Date.now();
+      if (now - heartbeatRef.current > 30000) {
+        heartbeatRef.current = now;
+        supabase.from("profiles").update({ last_seen_at: new Date().toISOString() }).eq("id", session.user.id);
+      }
     }, 7000);
     return () => clearInterval(interval);
   }, [loading, session, profile]);
@@ -867,6 +883,26 @@ export default function App() {
     });
     appendAudit("Réglage lubrifiant", `${LUBRICANTS.find((l) => l.id === product)?.label || product} — ${sites.find((s) => s.id === siteId)?.name || ""}`);
     flash("Stock de lubrifiant mis à jour.");
+  });
+
+  /* ---- mutations : compteurs par site (Superviseur uniquement) ---- */
+  const addSiteMeter = ({ siteId, name }) => withSync(async () => {
+    const cleanName = name.trim();
+    if (!cleanName) throw new Error("Le nom du compteur ne peut pas être vide.");
+    const { data, error } = await supabase.from("site_meters").insert(siteMeterToRow({ siteId, name: cleanName })).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("Le compteur n'a pas pu être confirmé par le serveur — réessaie.");
+    setSiteMeters((prev) => [...prev, rowToSiteMeter(data)]);
+    appendAudit("Ajout compteur", `${cleanName} — ${sites.find((s) => s.id === siteId)?.name || ""}`);
+    flash("Compteur ajouté.");
+  });
+  const removeSiteMeter = (meter) => withSync(async () => {
+    const { data, error } = await supabase.from("site_meters").delete().eq("id", meter.id).select();
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données — le compteur n'a pas été retiré.");
+    setSiteMeters((prev) => prev.filter((m) => m.id !== meter.id));
+    appendAudit("Suppression compteur", `${meter.name} — ${sites.find((s) => s.id === meter.siteId)?.name || ""}`);
+    flash("Compteur supprimé.");
   });
 
   /* ---- mutations : affectation des camions aux stations (Superviseur uniquement) ---- */
@@ -1222,8 +1258,8 @@ export default function App() {
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} />}
@@ -1344,7 +1380,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, productStocks, saveProductStock, truckAssignments, assignTruck }) {
+function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter }) {
   const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -1354,6 +1390,8 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
   const trucks = sites.filter((s) => s.isMobile);
   const stations = sites.filter((s) => !s.isMobile);
   const [assignForm, setAssignForm] = useState({ truckId: trucks[0]?.id || "", stationId: stations[0]?.id || "", startDate: todayStr() });
+  const [meterSiteId, setMeterSiteId] = useState(stations[0]?.id || "");
+  const [newMeterName, setNewMeterName] = useState("");
 
   const submitAdd = () => {
     if (!form.name.trim() || !form.code.trim() || !form.capacity) return;
@@ -1379,6 +1417,14 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
     assignTruck(assignForm);
   };
   const assignmentsSorted = [...truckAssignments].sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
+
+  const currentMeters = siteMeters.filter((m) => m.siteId === meterSiteId);
+  const displayedMeters = currentMeters.length ? currentMeters : metersForSite(stations.find((s) => s.id === meterSiteId)).map((name, i) => ({ id: `default-${i}`, name, isDefault: true }));
+  const submitMeter = () => {
+    if (!newMeterName.trim() || !meterSiteId) return;
+    addSiteMeter({ siteId: meterSiteId, name: newMeterName });
+    setNewMeterName("");
+  };
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1502,6 +1548,35 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
           </table>
         </div>
       )}
+
+      <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Compteurs par site</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Ajoute ou retire un compteur si la configuration physique d'un site change.</p>
+        <Field label="Site">
+          <select className="somip-select" value={meterSiteId} onChange={(e) => setMeterSiteId(e.target.value)}>
+            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <table className="somip-table" style={{ marginBottom: 12 }}>
+          <thead><tr><th>Compteur</th><th></th></tr></thead>
+          <tbody>
+            {displayedMeters.length === 0 && <EmptyRow colSpan={2} text="Aucun compteur." />}
+            {displayedMeters.map((m) => (
+              <tr key={m.id}>
+                <td>{m.name}{m.isDefault && <span style={{ color: C.sub, fontSize: 11 }}> (par défaut)</span>}</td>
+                <td style={{ textAlign: "right" }}>{!m.isDefault && <ConfirmIconButton onConfirm={() => removeSiteMeter(m)} />}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input className="somip-input" style={{ flex: 1 }} value={newMeterName} onChange={(e) => setNewMeterName(e.target.value)} placeholder="Ex : Compteur 3" />
+          <button className="somip-btn somip-btn-primary" onClick={submitMeter} disabled={!newMeterName.trim()}><Plus size={15} /></button>
+        </div>
+        <p style={{ marginTop: 10, fontSize: 11, color: C.sub }}>
+          Dès que tu ajoutes un premier compteur pour un site, la liste par défaut est remplacée par celle-ci — pense à recréer les compteurs existants si besoin.
+        </p>
+      </div>
     </div>
   );
 }
@@ -1512,7 +1587,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage }) {
+function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
@@ -1547,7 +1622,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   useEffect(() => { if (!isLubSite) setProduct("gasoil"); }, [siteId, isLubSite]);
 
   const site = sites.find((s) => s.id === siteId);
-  const meters = metersForSite(site);
+  const meters = metersForSite(site, siteMeters);
   useEffect(() => { setCompteur(meters[0] || "Compteur"); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
   const lastIndexForMeter = (meterName) => movements
@@ -3801,7 +3876,7 @@ function LossGainReport({ sites, inventaires }) {
 function UsersView({ profiles, updateUserRole, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
-  const [form, setForm] = useState({ fullName: "", email: "", password: "", role: "lecture" });
+  const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture" });
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
   const [createMsg, setCreateMsg] = useState(null);
@@ -3809,21 +3884,35 @@ function UsersView({ profiles, updateUserRole, session }) {
   const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); };
   const saveEdit = () => { updateUserRole(editingId, roleDraft); setEditingId(null); };
 
+  const isOnline = (u) => {
+    if (!u.lastSeenAt) return false;
+    return Date.now() - new Date(u.lastSeenAt).getTime() < 90 * 1000;
+  };
+  const lastSeenLabel = (u) => {
+    if (!u.lastSeenAt) return "Jamais connecté";
+    const diffMin = Math.round((Date.now() - new Date(u.lastSeenAt).getTime()) / 60000);
+    if (diffMin < 2) return "À l'instant";
+    if (diffMin < 60) return `Il y a ${diffMin} min`;
+    const diffH = Math.round(diffMin / 60);
+    if (diffH < 24) return `Il y a ${diffH} h`;
+    return `Il y a ${Math.round(diffH / 24)} j`;
+  };
+
   const createAccount = async () => {
     setCreateErr(null); setCreateMsg(null);
-    if (!form.fullName.trim() || !form.email.trim() || !form.password) { setCreateErr("Tous les champs sont requis."); return; }
+    if (!form.fullName.trim() || !form.username.trim() || !form.password) { setCreateErr("Tous les champs sont requis."); return; }
     if (form.password.length < 6) { setCreateErr("Le mot de passe doit contenir au moins 6 caractères."); return; }
     setCreating(true);
     try {
       const res = await fetch("/api/create-user", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
-        body: JSON.stringify({ email: form.email.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role }),
+        body: JSON.stringify({ username: form.username.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erreur lors de la création du compte.");
-      setCreateMsg(`Compte créé pour ${form.fullName.trim()} (${ROLE_LABELS[form.role]}). Communique-lui l'e-mail et le mot de passe.`);
-      setForm({ fullName: "", email: "", password: "", role: "lecture" });
+      setCreateMsg(`Compte créé pour ${form.fullName.trim()} (${ROLE_LABELS[form.role]}). Identifiant de connexion : "${data.loginEmail}" — communique-le avec le mot de passe.`);
+      setForm({ fullName: "", username: "", password: "", role: "lecture" });
     } catch (e) {
       setCreateErr(e.message || "Erreur lors de la création du compte.");
     } finally {
@@ -3839,9 +3928,9 @@ function UsersView({ profiles, updateUserRole, session }) {
           Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle ici à tout moment.
         </p>
         <table className="somip-table">
-          <thead><tr><th>Nom</th><th>Rôle</th><th></th></tr></thead>
+          <thead><tr><th>Nom</th><th>Rôle</th><th>Présence</th><th></th></tr></thead>
           <tbody>
-            {profiles.length === 0 && <EmptyRow colSpan={3} text="Aucun compte pour le moment." />}
+            {profiles.length === 0 && <EmptyRow colSpan={4} text="Aucun compte pour le moment." />}
             {profiles.map((u) => {
               const isEditing = editingId === u.id;
               return (
@@ -3854,6 +3943,7 @@ function UsersView({ profiles, updateUserRole, session }) {
                           {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
                         </select>
                       </td>
+                      <td></td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         <button className="somip-btn somip-btn-primary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={saveEdit}>OK</button>
                         <button onClick={() => setEditingId(null)} style={{ border: "none", background: "none", cursor: "pointer", marginLeft: 4 }}><X size={16} color={C.sub} /></button>
@@ -3863,6 +3953,15 @@ function UsersView({ profiles, updateUserRole, session }) {
                     <>
                       <td style={{ fontWeight: 600 }}>{u.name}</td>
                       <td><Badge color={C.blue}>{ROLE_LABELS[u.role] || u.role}</Badge></td>
+                      <td>
+                        {isOnline(u) ? (
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, color: C.success, fontWeight: 600 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: "50%", background: C.success, display: "inline-block" }} /> En ligne
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 12, color: C.sub }}>{lastSeenLabel(u)}</span>
+                        )}
+                      </td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
                         <button onClick={() => startEdit(u)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
                       </td>
@@ -3878,7 +3977,7 @@ function UsersView({ profiles, updateUserRole, session }) {
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
         <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Créer un compte</h3>
         <Field label="Nom complet"><input className="somip-input" value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} placeholder="Ex : Jean Mabiala" /></Field>
-        <Field label="E-mail"><input type="email" className="somip-input" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="prenom.nom@somip-sarl.ga" /></Field>
+        <Field label="Nom d'utilisateur (identifiant de connexion)"><input className="somip-input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="Ex : jean.mabiala" /></Field>
         <Field label="Mot de passe provisoire"><input type="text" className="somip-input" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Au moins 6 caractères" /></Field>
         <Field label="Rôle">
           <select className="somip-select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
@@ -3891,7 +3990,7 @@ function UsersView({ profiles, updateUserRole, session }) {
           <Plus size={15} /> {creating ? "Création..." : "Créer le compte"}
         </button>
         <p style={{ marginTop: 10, fontSize: 11, color: C.sub }}>
-          La personne peut se connecter immédiatement avec cet e-mail et ce mot de passe. Communique-les-lui directement.
+          Aucun e-mail requis : un identifiant de connexion est généré à partir du nom d'utilisateur. Communique cet identifiant et le mot de passe à la personne — elle les saisit à la place de l'e-mail pour se connecter.
         </p>
       </div>
     </div>
