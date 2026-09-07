@@ -1521,10 +1521,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const [indexAvant, setIndexAvant] = useState("");
   const [indexApres, setIndexApres] = useState("");
   const [compteur, setCompteur] = useState("");
-  const [sortieMode, setSortieMode] = useState("vente"); // "vente" | "camion"
+  const [chargements, setChargements] = useState([{ camion: "", quantite: "" }]);
   const [destinataire, setDestinataire] = useState("");
-  const [camion, setCamion] = useState("");
-  const [destination, setDestination] = useState("");
   const [retourQty, setRetourQty] = useState("");
   const [retourNote, setRetourNote] = useState("");
   const [retourCamionTruckId, setRetourCamionTruckId] = useState("");
@@ -1546,8 +1544,6 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const skipVcf = isLub;
 
   useEffect(() => { if (!isLubSite) setProduct("gasoil"); }, [siteId, isLubSite]);
-  useEffect(() => { if (!isLubSite) setSortieMode("vente"); }, [siteId, isLubSite]);
-  useEffect(() => { if (truckSites[0] && !camion) setCamion(truckSites[0].id); }, [truckSites, camion]);
 
   const site = sites.find((s) => s.id === siteId);
   const meters = metersForSite(site);
@@ -1569,6 +1565,9 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
   const sortieQty = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
   const sortieValid = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQty > 0);
+  const totalChargements = isLubSite && !isLub ? chargements.reduce((a, c) => a + (Number(c.quantite) || 0), 0) : 0;
+  const chargementsValid = totalChargements <= sortieQty;
+  const venteStation = isLubSite && !isLub ? Math.max(0, sortieQty - totalChargements) : sortieQty;
   const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty - retourCuveTruckN;
   const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date, inventaires) : 0;
 
@@ -1598,11 +1597,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
 
   const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
   const stockFinConflict = stockFinMesure !== "" && !!existingInv;
-  const canSubmit = sortieValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
+  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
-    setIndexAvant(""); setIndexApres(""); setDestinataire(""); setDestination("");
+    setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
     setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
     setStockFinMesure(""); setCommentaireInv("");
   };
@@ -1628,15 +1627,30 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
         if (!ok) return;
       }
       if (sortieQty > 0) {
-        let ok;
         const compteurField = meters.length > 1 ? compteur : undefined;
         if (isLub || isMobileSite) {
-          ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
+          const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
+          if (!ok) return;
+        } else if (isLubSite) {
+          // Le compteur mesure le flux total (vente + chargements camions confondus) : on
+          // enregistre la part "vente" avec l'index complet, puis chaque chargement camion
+          // séparément (quantité directe, sans index propre) — ce qui crée automatiquement
+          // la réception/chargement correspondante côté camion.
+          if (venteStation > 0) {
+            const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: venteStation, delta: -venteStation, indexAvant: Number(indexAvant), indexApres: Number(indexApres), compteur: compteurField, destinataire, ...vcfExtra(venteStation) });
+            if (!ok) return;
+          }
+          for (const c of chargements) {
+            const qty = Number(c.quantite) || 0;
+            if (qty > 0 && c.camion) {
+              const ok = await addMovement({ siteId, product, type: "sortie_camion", date, quantity: qty, delta: -qty, camion: c.camion, compteur: compteurField, ...vcfExtra(qty) });
+              if (!ok) return;
+            }
+          }
         } else {
-          const base = { siteId, product, type: sortieMode === "camion" ? "sortie_camion" : "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), compteur: compteurField, ...vcfExtra(sortieQty) };
-          ok = await addMovement(sortieMode === "camion" ? { ...base, camion, destination } : { ...base, destinataire });
+          const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), compteur: compteurField, destinataire, ...vcfExtra(sortieQty) });
+          if (!ok) return;
         }
-        if (!ok) return;
       }
       if (retourN > 0) {
         const ok = await addMovement({ siteId, product, type: "retour_camion", date, quantity: retourN, delta: retourN, camion: retourCamionTruckId || undefined, destination: retourNote, ...vcfExtra(retourN) });
@@ -1745,11 +1759,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
             </>
           ) : isLubSite ? (
             <>
-              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur)</p>
-              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-                <button className={`somip-tab ${sortieMode === "vente" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("vente")}>Vente</button>
-                <button className={`somip-tab ${sortieMode === "camion" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setSortieMode("camion")}>Vers camion</button>
-              </div>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteur — flux total : vente + chargements camions)</p>
               {meters.length > 1 && (
                 <Field label="Compteur">
                   <select className="somip-select" value={compteur} onChange={(e) => setCompteur(e.target.value)}>
@@ -1766,18 +1776,49 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, addMovem
                   Dernier index enregistré sur ce site{meters.length > 1 ? ` (${compteur})` : ""} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
                 </p>
               )}
-              {sortieMode === "camion" && (
-                <div style={{ display: "flex", gap: 8 }}>
+              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
+
+              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur ce flux)</p>
+              {chargements.map((c, idx) => (
+                <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
                   <div style={{ flex: 1 }}>
                     <Field label="Camion">
-                      <select className="somip-select" value={camion} onChange={(e) => setCamion(e.target.value)}>
+                      <select className="somip-select" value={c.camion} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, camion: e.target.value } : r)))}>
+                        <option value="">— choisir —</option>
                         {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                       </select>
                     </Field>
                   </div>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Quantité chargée (L)">
+                      <input type="number" className="somip-input" value={c.quantite} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, quantite: e.target.value } : r)))} placeholder="0" />
+                    </Field>
+                  </div>
+                  {chargements.length > 1 && (
+                    <button onClick={() => setChargements((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                      <X size={16} color={C.danger} />
+                    </button>
+                  )}
+                </div>
+              ))}
+              <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
+                <Plus size={13} /> Ajouter un camion
+              </button>
+              {!chargementsValid && <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>Le total chargé ({fmt(totalChargements)} L) dépasse le flux du compteur ({fmt(sortieQty)} L).</p>}
+              {sortieQty > 0 && (
+                <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: totalChargements > 0 ? 4 : 0 }}>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>Vente station (calculée)</span>
+                    <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(venteStation)} L</span>
+                  </div>
+                  {totalChargements > 0 && (
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ color: C.sub, fontWeight: 600 }}>Chargements laitiers (total)</span>
+                      <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(totalChargements)} L</span>
+                    </div>
+                  )}
                 </div>
               )}
-              {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
             </>
           ) : (
             <>
