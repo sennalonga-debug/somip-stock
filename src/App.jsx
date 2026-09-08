@@ -1003,54 +1003,8 @@ export default function App() {
     const saved = data ? rowToMovement(data) : record;
     setMovements((prev) => [...prev, saved]);
     appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
-
-    // Miroir automatique site <-> camion, pour que les deux équations restent toujours synchronisées.
-    const isTruckId = (id) => sites.some((s) => s.id === id && s.isMobile);
-    if (payload.type === "sortie_camion" && isTruckId(payload.camion)) {
-      const mirror = {
-        id: uid(), siteId: payload.camion, product: "gasoil", type: "reception", date: payload.date,
-        quantity: payload.quantity, delta: payload.quantity, ref: `Chargement automatique depuis ${sites.find((s) => s.id === payload.siteId)?.name || ""}`,
-        temperatureC: payload.temperatureC, densiteObservee: payload.densiteObservee, densite15: payload.densite15, vcf: payload.vcf, volumeCorrige15: payload.volumeCorrige15,
-        createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
-      };
-      const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
-      if (em) {
-        console.error("Miroir chargement camion échoué :", em);
-        flash(`Sortie enregistrée, mais le chargement automatique côté camion a échoué : ${em.message}`, "error");
-      } else {
-        setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
-      }
-    }
-    if (payload.type === "retour_camion" && isTruckId(payload.camion)) {
-      const mirror = {
-        id: uid(), siteId: payload.camion, product: "gasoil", type: "retour_cuve_camion", date: payload.date,
-        quantity: payload.quantity, delta: -payload.quantity, destination: payload.siteId,
-        temperatureC: payload.temperatureC, densiteObservee: payload.densiteObservee, densite15: payload.densite15, vcf: payload.vcf, volumeCorrige15: payload.volumeCorrige15,
-        createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
-      };
-      const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
-      if (em) {
-        console.error("Miroir retour cuve échoué :", em);
-        flash(`Retour enregistré, mais le retour cuve automatique côté camion a échoué : ${em.message}`, "error");
-      } else {
-        setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
-      }
-    }
-    if (payload.type === "retour_cuve_camion" && sites.some((s) => s.id === payload.destination)) {
-      const mirror = {
-        id: uid(), siteId: payload.destination, product: "gasoil", type: "retour_camion", date: payload.date,
-        quantity: payload.quantity, delta: payload.quantity, camion: payload.siteId, destination: `Retour automatique depuis ${sites.find((s) => s.id === payload.siteId)?.name || ""}`,
-        temperatureC: payload.temperatureC, densiteObservee: payload.densiteObservee, densite15: payload.densite15, vcf: payload.vcf, volumeCorrige15: payload.volumeCorrige15,
-        createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
-      };
-      const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
-      if (em) {
-        console.error("Miroir retour camion échoué :", em);
-        flash(`Retour cuve enregistré, mais le retour automatique côté site n'a pas fonctionné : ${em.message}`, "error");
-      } else {
-        setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
-      }
-    }
+    // Chargement et retour cuve se saisissent indépendamment des deux côtés (site et camion) —
+    // aucune création automatique de miroir, pour éviter tout risque de double comptage.
   });
   const deleteMovement = (id) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
@@ -1904,20 +1858,17 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             </>
           )}
 
-          {isMobileSite ? (
-            <div style={{ background: C.bg, borderRadius: 8, padding: "10px 12px", marginBottom: 12, fontSize: 12, color: C.sub }}>
-              <strong style={{ color: C.ink }}>Chargement</strong> : automatique dès qu'un "Chargement laitiers" est saisi pour ce camion depuis Prehomo ou Okouma — rien à saisir ici.
-            </div>
-          ) : (
-            <>
-              <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Réception</p>
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
-                <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>
-              </div>
-              {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
-            </>
+          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Chargement" : "Réception"}</p>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
+            {!isMobileSite && <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>}
+          </div>
+          {isMobileSite && (
+            <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.warning }}>
+              Pense à saisir aussi ce chargement côté Prehomo/Okouma (Chargement laitiers) — les deux côtés sont indépendants. Pas de N° de bon pour un chargement interne.
+            </p>
           )}
+          {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
 
           {(isLub || isMobileSite) ? (
             <>
@@ -1980,6 +1931,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant, pour chaque compteur.</p>}
 
               <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur ce flux)</p>
+              <p style={{ margin: "0 0 8px", fontSize: 11, color: C.warning }}>Pense à saisir aussi ce chargement côté camion (Chargement) — les deux côtés sont indépendants.</p>
               {chargements.map((c, idx) => (
                 <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
                   <div style={{ flex: 1 }}>
@@ -2060,11 +2012,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               </div>
               {retourCamionTruckId && (
                 <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>
-                  Créera automatiquement un "Retour Cuve" de {fmt(Number(retourQty) || 0)} L côté {truckSites.find((t) => t.id === retourCamionTruckId)?.name}.
+                  Ce retour ({fmt(Number(retourQty) || 0)} L) concerne {truckSites.find((t) => t.id === retourCamionTruckId)?.name}.
                 </p>
               )}
               <p style={{ margin: "-4px 0 12px", fontSize: 11, color: C.warning }}>
-                ⚠️ N'utilise ce champ que si le camion lui-même n'a pas déjà saisi ce retour de son côté — sinon il sera compté deux fois.
+                Pense à saisir aussi ce retour côté camion (Retour cuve) — les deux côtés sont indépendants.
               </p>
             </>
           )}
@@ -2085,7 +2037,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               </div>
               {retourCuveTruckQty && retourCuveTruckNote && (
                 <p style={{ margin: "-6px 0 12px", fontSize: 11, color: C.sub }}>
-                  Créera automatiquement un "Retour camion (cuve)" de {fmt(retourCuveTruckN)} L côté {stationSites.find((s) => s.id === retourCuveTruckNote)?.name}.
+                  Ce retour ({fmt(retourCuveTruckN)} L) concerne {stationSites.find((s) => s.id === retourCuveTruckNote)?.name}.
                 </p>
               )}
             </>
