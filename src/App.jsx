@@ -1904,12 +1904,20 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             </>
           )}
 
-          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Chargement" : "Réception"}</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
-            <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>
-          </div>
-          {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
+          {isMobileSite ? (
+            <div style={{ background: C.bg, borderRadius: 8, padding: "10px 12px", marginBottom: 12, fontSize: 12, color: C.sub }}>
+              <strong style={{ color: C.ink }}>Chargement</strong> : automatique dès qu'un "Chargement laitiers" est saisi pour ce camion depuis Prehomo ou Okouma — rien à saisir ici.
+            </div>
+          ) : (
+            <>
+              <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Réception</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
+                <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>
+              </div>
+              {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
+            </>
+          )}
 
           {(isLub || isMobileSite) ? (
             <>
