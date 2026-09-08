@@ -408,6 +408,17 @@ const productStockToRow = (p) => ({ site_id: p.siteId, product: p.product, capac
 const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
 
+const rowToBilan = (r) => ({
+  id: r.id, periodType: r.period_type, periodKey: r.period_key,
+  reception15: Number(r.reception15), ventes15: Number(r.ventes15), transferts15: Number(r.transferts15), stockFin15: Number(r.stock_fin15),
+  commentaire: r.commentaire || "", createdBy: r.created_by, createdAt: r.created_at,
+});
+const bilanToRow = (b) => ({
+  period_type: b.periodType, period_key: b.periodKey,
+  reception15: b.reception15, ventes15: b.ventes15, transferts15: b.transferts15, stock_fin15: b.stockFin15,
+  commentaire: b.commentaire ?? null, created_by: b.createdBy ?? null,
+});
+
 const rowToAssignment = (r) => ({ id: r.id, truckId: r.truck_id, stationId: r.station_id, startDate: r.start_date, endDate: r.end_date || null });
 const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, start_date: a.startDate, end_date: a.endDate ?? null });
 
@@ -689,6 +700,7 @@ export default function App() {
   const [inventaires, setInventaires] = useState([]);
   const [productStocks, setProductStocks] = useState([]);
   const [siteMeters, setSiteMeters] = useState([]);
+  const [bilans, setBilans] = useState([]);
   const [truckAssignments, setTruckAssignments] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [audit, setAudit] = useState([]);
@@ -759,7 +771,7 @@ export default function App() {
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData] = await Promise.all([
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData] = await Promise.all([
             fetchTable("sites", rowToSite),
             fetchTable("movements", rowToMovement, "date"),
             fetchTable("inventaires", rowToInventaire, "date"),
@@ -768,13 +780,14 @@ export default function App() {
             fetchTable("product_stocks", rowToProductStock),
             fetchTable("truck_assignments", rowToAssignment, "start_date"),
             fetchTable("site_meters", rowToSiteMeter, "name"),
+            fetchTable("bilan_matieres", rowToBilan, "period_key"),
           ]);
           let settingsRow = null;
           try {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
@@ -786,6 +799,7 @@ export default function App() {
         setProductStocks(result.productStocksData);
         setTruckAssignments(result.assignmentsData);
         setSiteMeters(result.siteMetersData);
+        setBilans(result.bilansData);
         setSettings(result.settingsRow ? { objectifFreinte: Number(result.settingsRow.objectif_freinte) } : SETTINGS_SEED);
         setLastSync(new Date());
         setLoadError(null);
@@ -804,7 +818,7 @@ export default function App() {
   useEffect(() => {
     if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
-      const [s, m, i, p, a, ps, ta, sm] = await Promise.all([
+      const [s, m, i, p, a, ps, ta, sm, bl] = await Promise.all([
         fetchTable("sites", rowToSite),
         fetchTable("movements", rowToMovement, "date"),
         fetchTable("inventaires", rowToInventaire, "date"),
@@ -813,8 +827,9 @@ export default function App() {
         fetchTable("product_stocks", rowToProductStock),
         fetchTable("truck_assignments", rowToAssignment, "start_date"),
         fetchTable("site_meters", rowToSiteMeter, "name"),
+        fetchTable("bilan_matieres", rowToBilan, "period_key"),
       ]);
-      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm);
+      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl);
       const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
       if (se) setSettings({ objectifFreinte: Number(se.objectif_freinte) });
       setLastSync(new Date());
@@ -905,6 +920,28 @@ export default function App() {
     flash("Compteur supprimé.");
   });
 
+  /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
+  const saveBilan = ({ periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire }) => withSync(async () => {
+    const row = bilanToRow({ periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, createdBy: currentUserName });
+    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "period_type,period_key" }).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
+    const saved = rowToBilan(data);
+    setBilans((prev) => {
+      const exists = prev.some((b) => b.periodType === periodType && b.periodKey === periodKey);
+      return exists ? prev.map((b) => (b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
+    });
+    appendAudit("Bilan Matières", `${periodType === "mensuel" ? "Mensuel" : "Trimestriel"} ${periodKey}`);
+    flash("Bilan Matières enregistré.");
+  });
+  const deleteBilan = (bilan) => withSync(async () => {
+    const { data, error } = await supabase.from("bilan_matieres").delete().eq("id", bilan.id).select();
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données.");
+    setBilans((prev) => prev.filter((b) => b.id !== bilan.id));
+    flash("Bilan supprimé.");
+  });
+
   /* ---- mutations : affectation des camions aux stations (Superviseur uniquement) ---- */
   const assignTruck = ({ truckId, stationId, startDate }) => withSync(async () => {
     // Ferme toute affectation encore ouverte pour ce camion, juste avant la nouvelle date de début.
@@ -972,7 +1009,12 @@ export default function App() {
         createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
       };
       const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
-      if (!em) setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+      if (em) {
+        console.error("Miroir chargement camion échoué :", em);
+        flash(`Sortie enregistrée, mais le chargement automatique côté camion a échoué : ${em.message}`, "error");
+      } else {
+        setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+      }
     }
     if (payload.type === "retour_camion" && isTruckId(payload.camion)) {
       const mirror = {
@@ -982,7 +1024,12 @@ export default function App() {
         createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
       };
       const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
-      if (!em) setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+      if (em) {
+        console.error("Miroir retour cuve échoué :", em);
+        flash(`Retour enregistré, mais le retour cuve automatique côté camion a échoué : ${em.message}`, "error");
+      } else {
+        setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+      }
     }
     if (payload.type === "retour_cuve_camion" && sites.some((s) => s.id === payload.destination)) {
       const mirror = {
@@ -992,7 +1039,12 @@ export default function App() {
         createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false,
       };
       const { data: dm, error: em } = await supabase.from("movements").insert(movementToRow(mirror)).select().maybeSingle();
-      if (!em) setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+      if (em) {
+        console.error("Miroir retour camion échoué :", em);
+        flash(`Retour cuve enregistré, mais le retour automatique côté site n'a pas fonctionné : ${em.message}`, "error");
+      } else {
+        setMovements((prev) => [...prev, dm ? rowToMovement(dm) : mirror]);
+      }
     }
   });
   const deleteMovement = (id) => withSync(async () => {
@@ -1270,7 +1322,7 @@ export default function App() {
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteId={profile?.assignedSiteId} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
-          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} />}
+          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSite={updateUserSite} sites={sites} session={session} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
@@ -2583,13 +2635,16 @@ function VcfView() {
 /* ------------------------------------------------------------------ */
 /* Rapports                                                              */
 /* ------------------------------------------------------------------ */
-function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf }) {
+function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage }) {
   const [tab, setTab] = useState("synthese_mensuelle_site");
   const TABS = [
     { id: "synthese_mensuelle_site", label: "Synthèse journalière du mois" },
     { id: "synthese_mensuelle_site_15", label: "Synthèse journalière du mois — 15°C" },
     { id: "synthese_mensuelle_lub", label: "Synthèse journalière du mois — Lubrifiants" },
+    { id: "synthese_station_jour", label: "Synthèse journalière — Station (site + camion)" },
     { id: "exposition", label: "Exposition" },
+    { id: "bons", label: "Bons de livraison" },
+    { id: "bilan", label: "Bilan Matières" },
   ];
   return (
     <div className="somip-fade">
@@ -2601,7 +2656,10 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
+      {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
       {tab === "exposition" && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "bons" && <DeliveryNotesReport sites={sites} movements={movements} />}
+      {tab === "bilan" && <BilanMatieresView bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
     </div>
   );
 }
@@ -2665,6 +2723,25 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
     })),
   }]);
 
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Synthese_${site?.code || ""}_${month}.pdf`,
+    title: `Synthèse journalière — ${site?.name || ""}`,
+    period: `Mois de ${bounds.start} au ${bounds.end}`,
+    columns: [
+      "Date", "Stock début", receptionLabel, ventesLabel,
+      ...(isLubSite ? ["Chargement laitiers"] : []), ...(isTruck ? ["Retour Cuve"] : []),
+      "Index avant", "Index après", "Stock théorique", "Stock jauge", "Gain/Perte",
+    ],
+    rows: days.map((d) => [
+      d.date, `${fmt(d.stockDebut)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventes ? `${fmt(d.ventes)} L` : "—",
+      ...(isLubSite ? [d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"] : []),
+      ...(isTruck ? [d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"] : []),
+      d.indexAvant !== null ? fmt(d.indexAvant) : "—", d.indexApres !== null ? fmt(d.indexApres) : "—",
+      `${fmt(d.stockTheorique)} L`, d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—",
+      d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
+    ]),
+  });
+
   return (
     <div>
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -2695,7 +2772,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
 
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
         <ReportHeader title={`Synthèse journalière — ${site?.name || ""}`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
             <thead>
@@ -3533,6 +3610,159 @@ function truckIntervalsForStation(assignments, stationId, boundsStart, boundsEnd
     }));
 }
 
+/* ---- Synthèse journalière — Station (site fixe + camion(s) rattaché(s), une ligne par jour) ---- */
+function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignments }) {
+  const stations = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+  const [stationId, setStationId] = useState(stations[0]?.id || "");
+  const [month, setMonth] = useState(currentMonth());
+  const station = sites.find((s) => s.id === stationId);
+  const bounds = monthBounds(month);
+
+  const days = [];
+  if (station) {
+    let cur = new Date(bounds.start);
+    const end = new Date(bounds.end);
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const siteStockDebut = stockBeforeDate(station, movements, d, inventaires);
+      const dayMovsSite = movements.filter((m) => m.siteId === station.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty(dayMovsSite, ["reception"]);
+      const ventesDirectes = sumQty(dayMovsSite, ["sortie"]);
+      const chargementLaitiers = sumQty(dayMovsSite, ["sortie_camion"]);
+      const retourCamions = sumQty(dayMovsSite, ["retour_camion"]);
+      const siteTheorique = siteStockDebut + reception + retourCamions - ventesDirectes - chargementLaitiers;
+      const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+
+      const truckIdsToday = trucksAssignedAt(truckAssignments, station.id, d);
+      let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJauge = 0, trucksJaugeComplete = truckIdsToday.length > 0;
+      const truckDetails = [];
+      for (const truckId of truckIdsToday) {
+        const truck = sites.find((s) => s.id === truckId);
+        if (!truck) continue;
+        const tStockDebut = stockBeforeDate(truck, movements, d, inventaires);
+        const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
+        const tChargement = sumQty(dayMovsTruck, ["reception"]);
+        const tSortieTerrain = sumQty(dayMovsTruck, ["sortie"]);
+        const tRetourCuve = sumQty(dayMovsTruck, ["retour_cuve_camion"]);
+        const tTheorique = tStockDebut + tChargement - tSortieTerrain - tRetourCuve;
+        const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === d));
+        trucksStockDebut += tStockDebut;
+        trucksTheorique += tTheorique;
+        trucksVentesTerrain += tSortieTerrain;
+        if (tInv) trucksJauge += tInv.stockPhysique; else trucksJaugeComplete = false;
+        truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique : null });
+      }
+
+      const stockDebutCombine = siteStockDebut + trucksStockDebut;
+      const ventesCombinees = ventesDirectes + trucksVentesTerrain;
+      const stockTheoriqueCombine = siteTheorique + trucksTheorique;
+      const jaugeComplete = siteInv !== null && trucksJaugeComplete;
+      const stockJaugeCombine = jaugeComplete ? (siteInv ? siteInv.stockPhysique : 0) + trucksJauge : null;
+      const ecart = stockJaugeCombine !== null ? stockJaugeCombine - stockTheoriqueCombine : null;
+
+      days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, stockTheoriqueCombine, stockJaugeCombine, ecart, truckDetails, nbTrucks: truckIdsToday.length });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const totalReception = days.reduce((a, d) => a + d.reception, 0);
+  const totalVentes = days.reduce((a, d) => a + d.ventesCombinees, 0);
+  const daysWithJauge = days.filter((d) => d.stockJaugeCombine !== null);
+  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
+  const firstDay = days[0] || null;
+  const lastDay = days[days.length - 1] || null;
+  const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_${station?.code || ""}_${month}.xlsx`, [{
+    name: "Synthèse Station", rows: days.map((d) => ({
+      Date: d.date, "Stock début combiné (L)": Math.round(d.stockDebutCombine), "Réception (L)": Math.round(d.reception),
+      "Ventes combinées (L)": Math.round(d.ventesCombinees), "Chargement laitiers (L)": Math.round(d.chargementLaitiers),
+      "Camions rattachés": d.nbTrucks, "Stock théorique combiné (L)": Math.round(d.stockTheoriqueCombine),
+      "Stock jauge combiné (L)": d.stockJaugeCombine !== null ? Math.round(d.stockJaugeCombine) : "",
+      "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
+    })),
+  }]);
+
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Synthese_Station_${station?.code || ""}_${month}.pdf`,
+    title: `Synthèse journalière — ${station?.name || ""} (site + camions)`,
+    period: `Mois de ${bounds.start} au ${bounds.end}`,
+    columns: ["Date", "Stock début combiné", "Réception", "Ventes combinées", "Chargement laitiers", "Camions", "Stock théorique combiné", "Stock jauge combiné", "Gain/Perte"],
+    rows: days.map((d) => [
+      d.date, `${fmt(d.stockDebutCombine)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—",
+      d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—", String(d.nbTrucks || 0),
+      `${fmt(d.stockTheoriqueCombine)} L`, d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—",
+      d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
+    ]),
+  });
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Station">
+          <select className="somip-select" style={{ maxWidth: 240 }} value={stationId} onChange={(e) => setStationId(e.target.value)}>
+            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+
+      {station && (
+        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {station.name} (site + camions rattachés)</h4>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <MiniStat label="Stock début combiné (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebutCombine)} L` : "—"} />
+            <MiniStat label="Total Réceptions (site)" value={`+${fmt(totalReception)} L`} color={C.success} />
+            <MiniStat label="Total Ventes combinées" value={`${fmt(totalVentes)} L`} />
+            <MiniStat label="Stock théorique combiné (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheoriqueCombine)} L` : "—"} bold />
+            <MiniStat label="Stock jauge combiné (dernière mesure complète)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJaugeCombine)} L (${lastDayWithJauge.date})` : "—"} bold />
+            <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
+          </div>
+        </div>
+      )}
+
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title={`Synthèse journalière — ${station?.name || ""} (site + camions)`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Date</th><th style={{ textAlign: "right" }}>Stock début combiné</th>
+                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes combinées</th>
+                <th style={{ textAlign: "right" }}>Chargement laitiers</th><th style={{ textAlign: "right" }}>Camions</th>
+                <th style={{ textAlign: "right" }}>Stock théorique combiné</th><th style={{ textAlign: "right" }}>Stock jauge combiné</th>
+                <th style={{ textAlign: "right" }}>Gain/Perte</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne une station." />}
+              {days.map((d) => (
+                <tr key={d.date}>
+                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebutCombine)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventesCombinees ? C.ink : C.sub, fontWeight: d.ventesCombinees ? 600 : 400 }}>{d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.nbTrucks || "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheoriqueCombine)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
+                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Équation basée sur les mouvements de la station ET du (des) camion(s) qui lui sont rattachés ce jour-là (page Sites → Affectation des camions) : Stock théorique combiné = équation du site + équation de chaque camion rattaché (le chargement/transfert interne s'annule automatiquement dans la somme). Stock jauge combiné n'apparaît que si le site ET tous les camions rattachés ont une jauge mesurée ce jour-là.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function StationSynthesisReport({ sites, movements, inventaires, truckAssignments }) {
   const stations = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
   const [stationId, setStationId] = useState(stations[0]?.id || "");
@@ -3650,6 +3880,157 @@ function MiniStat({ label, value, color, bold }) {
 }
 
 /* ---- Registre des bons de livraison ---- */
+/* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
+function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
+  const [periodType, setPeriodType] = useState("mensuel");
+  const [monthKey, setMonthKey] = useState(currentMonth());
+  const [year, setYear] = useState(new Date().getFullYear());
+  const [quarter, setQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
+  const periodKey = periodType === "mensuel" ? monthKey : `${year}-Q${quarter}`;
+
+  const [form, setForm] = useState({ reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" });
+
+  const sorted = [...bilans].filter((b) => b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
+  const existing = sorted.find((b) => b.periodKey === periodKey);
+  const idx = sorted.findIndex((b) => b.periodKey === periodKey);
+  const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
+  const stockDebut = previous ? previous.stockFin15 : 0;
+
+  const receptionN = Number(form.reception15) || 0;
+  const ventesN = Number(form.ventes15) || 0;
+  const transfertsN = Number(form.transferts15) || 0;
+  const stockFinN = Number(form.stockFin15) || 0;
+  const stockTheorique = stockDebut + receptionN - ventesN + transfertsN;
+  const ecart = form.stockFin15 !== "" ? stockFinN - stockTheorique : null;
+
+  const submit = () => {
+    if (form.stockFin15 === "") return;
+    saveBilan({ periodType, periodKey, ...form });
+    setForm({ reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" });
+  };
+
+  const loadForEdit = (b) => {
+    setForm({ reception15: String(b.reception15), ventes15: String(b.ventes15), transferts15: String(b.transferts15), stockFin15: String(b.stockFin15), commentaire: b.commentaire || "" });
+  };
+
+  // Historique enrichi pour le tableau + le diagramme.
+  const history = sorted.map((b, i) => {
+    const prev = i > 0 ? sorted[i - 1] : null;
+    const debut = prev ? prev.stockFin15 : 0;
+    const theorique = debut + b.reception15 - b.ventes15 + b.transferts15;
+    const ec = b.stockFin15 - theorique;
+    return { ...b, stockDebut: debut, stockTheorique: theorique, ecart: ec };
+  });
+
+  return (
+    <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+      {canManage && (
+        <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
+            <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
+          </div>
+          {periodType === "mensuel" ? (
+            <Field label="Mois"><input type="month" className="somip-input" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} /></Field>
+          ) : (
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><Field label="Année"><input type="number" className="somip-input" value={year} onChange={(e) => setYear(Number(e.target.value))} /></Field></div>
+              <div style={{ flex: 1 }}>
+                <Field label="Trimestre">
+                  <select className="somip-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
+                    <option value={1}>T1 (Jan-Mars)</option><option value={2}>T2 (Avr-Juin)</option>
+                    <option value={3}>T3 (Juil-Sept)</option><option value={4}>T4 (Oct-Déc)</option>
+                  </select>
+                </Field>
+              </div>
+            </div>
+          )}
+
+          {existing && (
+            <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.warning }}>
+              Une saisie existe déjà pour cette période — enregistrer à nouveau la remplace. <button onClick={() => loadForEdit(existing)} style={{ border: "none", background: "none", color: C.blue, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Charger pour modifier</button>
+            </p>
+          )}
+
+          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente)</span>
+            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
+          </div>
+
+          <Field label="Réception globale à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
+          <Field label="Ventes globales à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
+          <Field label="Transferts entre sites à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field>
+
+          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
+            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
+          </div>
+
+          <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge globale" /></Field>
+          <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
+
+          {ecart !== null && (
+            <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5, display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte</span>
+              <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+            </div>
+          )}
+
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === ""}>
+            <Plus size={15} /> Enregistrer le Bilan
+          </button>
+        </div>
+      )}
+
+      <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Historique — {periodType === "mensuel" ? "Mensuel" : "Trimestriel"}</h3>
+        <div style={{ overflowX: "auto", marginBottom: 20 }}>
+          <table className="somip-table">
+            <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th>{canManage && <th></th>}</tr></thead>
+            <tbody>
+              {history.length === 0 && <EmptyRow colSpan={canManage ? 9 : 8} text="Aucun Bilan Matières enregistré." />}
+              {history.map((b) => (
+                <tr key={b.id}>
+                  <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(b.reception15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.ventes15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockTheorique)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockFin15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub }}>{b.ecart >= 0 ? "+" : ""}{fmt(b.ecart)} L</td>
+                  {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteBilan(b)} /></td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {history.length > 0 && (
+          <div style={{ height: 280 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={history.map((b) => ({ periode: b.periodKey, Réception: b.reception15, Ventes: b.ventes15, "Stock fin": b.stockFin15 }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
+                <XAxis dataKey="periode" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
+                <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                <Bar dataKey="Réception" fill={C.success} radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Ventes" fill={C.orange} radius={[4, 4, 0, 0]} />
+                <Bar dataKey="Stock fin" fill={C.blue} radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Stock théorique = Stock début (= Stock fin de la période précédente) + Réception − Ventes ± Transferts. Toutes les valeurs sont à saisir déjà corrigées à 15°C.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function DeliveryNotesReport({ sites, movements }) {
   const [filterSite, setFilterSite] = useState("all");
   const [start, setStart] = useState("");
@@ -3672,6 +4053,17 @@ function DeliveryNotesReport({ sites, movements }) {
     })),
   }]);
 
+  const doPdf = () => exportToPdf({
+    filename: "SOMIP_Bons_Livraison.pdf",
+    title: "Registre des bons de livraison",
+    period: start || end ? `Du ${start || "…"} au ${end || "…"}` : "Toutes les réceptions",
+    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C"],
+    rows: rows.map((m) => [
+      m.date, sites.find((s) => s.id === m.siteId)?.name || m.siteId, productLabel(m),
+      m.ref || "—", `+${fmt(m.quantity)} L`, m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—",
+    ]),
+  });
+
   return (
     <div>
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -3687,7 +4079,7 @@ function DeliveryNotesReport({ sites, movements }) {
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
         <ReportHeader title="Registre des bons de livraison" period={start || end ? `Du ${start || "…"} au ${end || "…"}` : "Toutes les réceptions"} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
             <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th></tr></thead>
