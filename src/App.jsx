@@ -94,7 +94,12 @@ const TYPE_META = {
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const currentMonth = () => new Date().toISOString().slice(0, 7);
-const fmt = (n) => Math.round(n).toLocaleString("fr-FR");
+const fmt = (n) => {
+  const r = Math.round(n);
+  const neg = r < 0;
+  const s = Math.abs(r).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return neg ? `-${s}` : s;
+};
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 /**
@@ -3634,7 +3639,7 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
       const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date === d));
 
       const truckIdsToday = trucksAssignedAt(truckAssignments, station.id, d);
-      let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJauge = 0, trucksJaugeComplete = truckIdsToday.length > 0;
+      let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJaugeOuTheorique = 0;
       const truckDetails = [];
       for (const truckId of truckIdsToday) {
         const truck = sites.find((s) => s.id === truckId);
@@ -3649,15 +3654,18 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
         trucksStockDebut += tStockDebut;
         trucksTheorique += tTheorique;
         trucksVentesTerrain += tSortieTerrain;
-        if (tInv) trucksJauge += tInv.stockPhysique; else trucksJaugeComplete = false;
+        // Un camion n'est pas forcément jaugé chaque jour : on utilise sa jauge du jour si elle
+        // existe, sinon son théorique (déjà ancré sur sa dernière jauge connue) comme meilleure estimation.
+        trucksJaugeOuTheorique += tInv ? tInv.stockPhysique : tTheorique;
         truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique : null });
       }
 
       const stockDebutCombine = siteStockDebut + trucksStockDebut;
       const ventesCombinees = ventesDirectes + trucksVentesTerrain;
       const stockTheoriqueCombine = siteTheorique + trucksTheorique;
-      const jaugeComplete = siteInv !== null && trucksJaugeComplete;
-      const stockJaugeCombine = jaugeComplete ? (siteInv ? siteInv.stockPhysique : 0) + trucksJauge : null;
+      // Le site est jaugé chaque jour par construction : c'est la seule condition requise pour
+      // afficher un Stock jauge combiné (les camions non jaugés ce jour-là utilisent leur théorique).
+      const stockJaugeCombine = siteInv !== null ? siteInv.stockPhysique + trucksJaugeOuTheorique : null;
       const ecart = stockJaugeCombine !== null ? stockJaugeCombine - stockTheoriqueCombine : null;
 
       days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, stockTheoriqueCombine, stockJaugeCombine, ecart, truckDetails, nbTrucks: truckIdsToday.length });
@@ -3756,7 +3764,7 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Équation basée sur les mouvements de la station ET du (des) camion(s) qui lui sont rattachés ce jour-là (page Sites → Affectation des camions) : Stock théorique combiné = équation du site + équation de chaque camion rattaché (le chargement/transfert interne s'annule automatiquement dans la somme). Stock jauge combiné n'apparaît que si le site ET tous les camions rattachés ont une jauge mesurée ce jour-là.
+          Équation basée sur les mouvements de la station ET du (des) camion(s) qui lui sont rattachés ce jour-là (page Sites → Affectation des camions) : Stock théorique combiné = équation du site + équation de chaque camion rattaché (le chargement/transfert interne s'annule automatiquement dans la somme). Stock jauge combiné apparaît dès que le site est jaugé ce jour-là ; un camion non jaugé ce jour précis utilise son théorique (ancré sur sa dernière jauge connue) à la place.
         </p>
       </div>
     </div>
