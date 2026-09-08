@@ -1928,7 +1928,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               </div>
               {lastIndexForSite !== undefined && (
                 <p style={{ margin: "-6px 0 8px", fontSize: 11, color: indexMismatch ? C.warning : C.sub }}>
-                  Dernier index enregistré pour {isMobileSite ? "ce camion" : "ce produit"} : {fmt(lastIndexForSite)}{indexMismatch && " — vérifie ton index avant."}
+                  Dernier index enregistré pour {isMobileSite ? "ce camion" : "ce produit"} : {fmt(lastIndexForSite)}{indexMismatch && (isMobileSite ? " — écart avec l'index d'avant (normal après un secours en carrière), pas bloquant." : " — vérifie ton index avant.")}
                 </p>
               )}
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
@@ -2063,6 +2063,9 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                   Créera automatiquement un "Retour Cuve" de {fmt(Number(retourQty) || 0)} L côté {truckSites.find((t) => t.id === retourCamionTruckId)?.name}.
                 </p>
               )}
+              <p style={{ margin: "-4px 0 12px", fontSize: 11, color: C.warning }}>
+                ⚠️ N'utilise ce champ que si le camion lui-même n'a pas déjà saisi ce retour de son côté — sinon il sera compté deux fois.
+              </p>
             </>
           )}
 
