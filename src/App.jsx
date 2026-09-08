@@ -3635,6 +3635,7 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
   const bounds = monthBounds(month);
 
   const days = [];
+  const truckEcartByTruck = {}; // { truckId: { name, sum, count } } — cumul propre à chaque camion, sur ses seuls jours jaugés
   if (station) {
     let cur = new Date(bounds.start);
     const end = new Date(bounds.end);
@@ -3648,6 +3649,7 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
       const retourCamions = sumQty(dayMovsSite, ["retour_camion"]);
       const siteTheorique = siteStockDebut + reception + retourCamions - ventesDirectes - chargementLaitiers;
       const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+      const siteEcart = siteInv ? siteInv.stockPhysique - siteTheorique : null;
 
       const truckIdsToday = trucksAssignedAt(truckAssignments, station.id, d);
       let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJaugeOuTheorique = 0;
@@ -3666,8 +3668,13 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
         trucksTheorique += tTheorique;
         trucksVentesTerrain += tSortieTerrain;
         // Un camion n'est pas forcément jaugé chaque jour : on utilise sa jauge du jour si elle
-        // existe, sinon son théorique (déjà ancré sur sa dernière jauge connue) comme meilleure estimation.
+        // existe, sinon son théorique (déjà ancré sur sa dernière jauge connue), pour la ligne du jour.
         trucksJaugeOuTheorique += tInv ? tInv.stockPhysique : tTheorique;
+        if (tInv) {
+          const tEcart = tInv.stockPhysique - tTheorique;
+          if (!truckEcartByTruck[truckId]) truckEcartByTruck[truckId] = { name: truck.name, sum: 0 };
+          truckEcartByTruck[truckId].sum += tEcart;
+        }
         truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique : null });
       }
 
@@ -3679,7 +3686,7 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
       const stockJaugeCombine = siteInv !== null ? siteInv.stockPhysique + trucksJaugeOuTheorique : null;
       const ecart = stockJaugeCombine !== null ? stockJaugeCombine - stockTheoriqueCombine : null;
 
-      days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, stockTheoriqueCombine, stockJaugeCombine, ecart, truckDetails, nbTrucks: truckIdsToday.length });
+      days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, stockTheoriqueCombine, stockJaugeCombine, ecart, siteEcart, truckDetails, nbTrucks: truckIdsToday.length });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -3690,7 +3697,14 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
   const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
   const firstDay = days[0] || null;
   const lastDay = days[days.length - 1] || null;
-  const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
+  // Le cumul "officiel" est la somme des écarts propres du site + de chaque camion, chacun sur
+  // ses seuls jours réellement jaugés — exactement comme leurs rapports individuels respectifs.
+  // (Le cumul jour par jour ci-dessus sert à l'affichage détaillé, mais sous-estime le cumul réel
+  // les jours où un camion n'a pas de jauge, puisqu'il est alors compté comme sans écart ce jour-là.)
+  const siteEcartCumule = days.reduce((a, d) => a + (d.siteEcart || 0), 0);
+  const truckEcarts = Object.values(truckEcartByTruck);
+  const trucksEcartCumule = truckEcarts.reduce((a, t) => a + t.sum, 0);
+  const ecartCumule = siteEcartCumule + trucksEcartCumule;
 
   const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_${station?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse Station", rows: days.map((d) => ({
@@ -3735,8 +3749,13 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
             <MiniStat label="Total Ventes combinées" value={`${fmt(totalVentes)} L`} />
             <MiniStat label="Stock théorique combiné (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheoriqueCombine)} L` : "—"} bold />
             <MiniStat label="Stock jauge combiné (dernière mesure complète)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJaugeCombine)} L (${lastDayWithJauge.date})` : "—"} bold />
-            <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
+            <MiniStat label="Gain/Perte cumulé (site + camions)" value={`${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L`} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
           </div>
+          <p style={{ margin: "12px 0 0", fontSize: 12, color: C.sub }}>
+            Détail du cumul : <strong style={{ color: C.ink }}>{station.name}</strong> {siteEcartCumule >= 0 ? "+" : ""}{fmt(siteEcartCumule)} L
+            {truckEcarts.map((t) => <span key={t.name}> · <strong style={{ color: C.ink }}>{t.name}</strong> {t.sum >= 0 ? "+" : ""}{fmt(t.sum)} L</span>)}
+            {truckEcarts.length === 0 && " (aucun camion jaugé ce mois-ci)"}
+          </p>
         </div>
       )}
 
