@@ -1100,19 +1100,19 @@ export default function App() {
   });
 
   /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
-  const saveBilan = ({ siteId, periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
-    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${siteId}/${periodType}`) : [];
+  const saveBilan = ({ periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
+    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/global/${periodType}`) : [];
     const photoUrls = [...existingPhotoUrls, ...newUrls];
-    const row = bilanToRow({ siteId, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
-    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "site_id,period_type,period_key" }).select().maybeSingle();
+    const row = bilanToRow({ siteId: null, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
+    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "period_type,period_key" }).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
     const saved = rowToBilan(data);
     setBilans((prev) => {
-      const exists = prev.some((b) => b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey);
-      return exists ? prev.map((b) => (b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
+      const exists = prev.some((b) => !b.siteId && b.periodType === periodType && b.periodKey === periodKey);
+      return exists ? prev.map((b) => (!b.siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
     });
-    appendAudit("Bilan Matières", `${sites.find((s) => s.id === siteId)?.name || siteId} — ${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
+    appendAudit("Bilan Matières", `${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
     flash("Bilan Matières enregistré.");
   });
   const deleteBilan = (bilan) => withSync(async () => {
@@ -2841,8 +2841,8 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
       {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
-      {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} />}
-      {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
+      {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
       {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
       {tab === "bilan" && canManage && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
     </div>
@@ -3530,15 +3530,31 @@ function decadeBoundsExplicit(monthStr, decadeNum) {
   return { start: `${monthStr}-21`, end: `${monthStr}-${pad2(lastDay)}`, label: `3e décade (du 21 au ${lastDay})` };
 }
 
-function ExposureReport({ sites, movements, inventaires }) {
+function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
   const [month, setMonth] = useState(currentMonth());
   const [decadeNum, setDecadeNum] = useState(1);
   const bounds = decadeBoundsExplicit(month, decadeNum);
   const fixedSites = sites.filter((s) => !s.isMobile);
 
   const rows = fixedSites.map((s) => {
-    const rangeMovs = movementsInRange(movements, s.id, bounds.start, bounds.end);
-    const ventesCumulees = sumQty(rangeMovs, ["sortie", "sortie_camion"]);
+    // Ventes = ventes propres du site (hors chargements laitiers, qui sont un transfert interne,
+    // pas une vente) + les ventes des camions qui lui sont rattachés chaque jour de la décade
+    // (Sortie Fiche Terrain), en tenant compte des changements d'affectation en cours de période.
+    let ventesSite = 0, ventesTrucks = 0;
+    let cur = new Date(bounds.start);
+    const end = new Date(bounds.end);
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const dayMovsSite = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      ventesSite += sumQty(dayMovsSite, ["sortie"]);
+      const truckIds = trucksAssignedAt(truckAssignments, s.id, d);
+      for (const truckId of truckIds) {
+        const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
+        ventesTrucks += sumQty(dayMovsTruck, ["sortie"]);
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+    const ventesCumulees = ventesSite + ventesTrucks;
     const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= bounds.end));
     const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : null;
     // Les camions ne livrent que par multiples de 5000 L (5000/15000/20000/35000) :
@@ -3629,15 +3645,23 @@ function ExposureReport({ sites, movements, inventaires }) {
 const COMILOG_SITE_CODES = ["PRH", "OKM", "CIM", "CMM", "GTR"];
 
 /* ---- Exposition Comilog — envoi quotidien : ventes & réception de la veille, creux à date ---- */
-function ExpositionComilogReport({ sites, movements, inventaires }) {
+function ExpositionComilogReport({ sites, movements, inventaires, truckAssignments }) {
   const [mvtDate, setMvtDate] = useState(todayStr());
   const [stockDate, setStockDate] = useState(todayStr());
   const comilogSites = sites.filter((s) => COMILOG_SITE_CODES.includes(s.code));
 
   const rows = comilogSites.map((s) => {
+    // Ventes = ventes propres du site (hors chargements laitiers, transfert interne, pas une
+    // vente) + les ventes du/des camion(s) rattaché(s) ce jour-là (Sortie Fiche Terrain).
     const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
-    const ventes = sumQty(dayMovs, ["sortie", "sortie_camion"]);
+    const ventesSite = sumQty(dayMovs, ["sortie"]);
     const reception = sumQty(dayMovs, ["reception"]);
+    let ventesTrucks = 0;
+    for (const truckId of trucksAssignedAt(truckAssignments, s.id, mvtDate)) {
+      const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
+      ventesTrucks += sumQty(dayMovsTruck, ["sortie"]);
+    }
+    const ventes = ventesSite + ventesTrucks;
     const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= stockDate));
     const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : stockThroughDate(s, movements, stockDate, inventaires);
     const creux = Math.max(0, s.capacity - jaugeADate);
@@ -4176,8 +4200,6 @@ function MiniStat({ label, value, color, bold }) {
 /* ---- Registre des bons de livraison ---- */
 /* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
 function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage }) {
-  const fixedSites = sites.filter((s) => !s.isMobile);
-  const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [periodType, setPeriodType] = useState("mensuel");
   const [monthKey, setMonthKey] = useState(currentMonth());
   const [year, setYear] = useState(new Date().getFullYear());
@@ -4185,14 +4207,14 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
   const [decadeMonth, setDecadeMonth] = useState(currentMonth());
   const [decadeNum, setDecadeNum] = useState(1);
   const periodKey = periodType === "mensuel" ? monthKey : periodType === "trimestriel" ? `${year}-Q${quarter}` : `${decadeMonth}-D${decadeNum}`;
-  const site = sites.find((s) => s.id === siteId);
 
   const emptyForm = { reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" };
   const [form, setForm] = useState(emptyForm);
   const [photoFiles, setPhotoFiles] = useState([]);
   const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
 
-  const sorted = [...bilans].filter((b) => b.siteId === siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
+  // Saisie globale (tous sites confondus) : on ne retient que les entrées sans site_id.
+  const sorted = [...bilans].filter((b) => !b.siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
   const existing = sorted.find((b) => b.periodKey === periodKey);
   const idx = sorted.findIndex((b) => b.periodKey === periodKey);
   const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
@@ -4208,8 +4230,8 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
   const resetForm = () => { setForm(emptyForm); setPhotoFiles([]); setExistingPhotoUrls([]); };
 
   const submit = () => {
-    if (form.stockFin15 === "" || !siteId) return;
-    saveBilan({ siteId, periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
+    if (form.stockFin15 === "") return;
+    saveBilan({ periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
     resetForm();
   };
 
@@ -4228,18 +4250,25 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
     return { ...b, stockDebut: debut, stockTheorique: theorique, ecart: ec };
   });
 
-  const doPptx = () => exportBilanToPptx(history, periodType, site?.name);
+  const doPptx = () => exportBilanToPptx(history, periodType, null);
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Bilan_Matieres_${periodType}_${new Date().toISOString().slice(0, 10)}.pdf`,
+    title: "Bilan Matières — Tous sites",
+    period: PERIOD_TYPE_LABELS[periodType],
+    columns: ["Période", "Stock début", "Réception", "Ventes", "Transferts", "Stock théorique", "Stock fin", "Gain/Perte"],
+    rows: history.map((b) => [
+      b.periodKey, `${fmt(b.stockDebut)} L`, `${fmt(b.reception15)} L`, `${fmt(b.ventes15)} L`,
+      `${b.transferts15 >= 0 ? "+" : ""}${fmt(b.transferts15)} L`, `${fmt(b.stockTheorique)} L`, `${fmt(b.stockFin15)} L`,
+      `${b.ecart >= 0 ? "+" : ""}${fmt(b.ecart)} L`,
+    ]),
+  });
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canManage && (
         <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
-          <Field label="Site">
-            <select className="somip-select" value={siteId} onChange={(e) => { setSiteId(e.target.value); resetForm(); }}>
-              {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-            </select>
-          </Field>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
+          <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Saisie globale — tous sites confondus.</p>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
             <button className={`somip-tab ${periodType === "decadaire" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("decadaire")}>Décadaire</button>
@@ -4281,12 +4310,12 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
           )}
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente — {site?.name})</span>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente)</span>
             <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
           </div>
 
-          <Field label="Réception à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
-          <Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
+          <Field label="Réception globale à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
+          <Field label="Ventes globales à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
           <Field label="Transferts entre sites à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field>
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
@@ -4294,7 +4323,7 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
             <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
           </div>
 
-          <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field>
+          <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge globale" /></Field>
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
           <Field label="Photos justificatives (optionnel)">
             <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
@@ -4318,21 +4347,24 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
 
       <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {site?.name} — {PERIOD_TYPE_LABELS[periodType]}</h3>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — Tous sites — {PERIOD_TYPE_LABELS[periodType]}</h3>
           {history.length > 0 && (
-            <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="somip-btn somip-btn-primary" onClick={doPdf}><Download size={14} /> Export PDF</button>
+              <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint</button>
+            </div>
           )}
         </div>
         <div style={{ overflowX: "auto", marginBottom: 20 }}>
           <table className="somip-table">
             <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
             <tbody>
-              {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré pour ce site." />}
+              {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré." />}
               {history.map((b) => (
                 <tr key={b.id}>
                   <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(b.reception15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{fmt(b.reception15)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.ventes15)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockTheorique)} L</td>
@@ -4372,7 +4404,7 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
           </div>
         )}
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts. Toutes les valeurs sont à saisir déjà corrigées à 15°C.
+          Stock théorique = Stock début (= Stock fin de la période précédente) + Réception − Ventes ± Transferts. Toutes les valeurs sont à saisir déjà corrigées à 15°C.
         </p>
       </div>
     </div>
