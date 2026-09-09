@@ -284,25 +284,49 @@ function exportToExcel(filename, sheets) {
 
 // Génère un PDF téléchargeable avec l'en-tête SOMIP (bandeau bleu/orange) et un tableau —
 // pour un envoi direct par mail, sans passer par la boîte de dialogue d'impression.
-function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
+function hexToRgb(hex) {
+  const h = hex.replace("#", "");
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+async function loadImageDataUrl(url) {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+async function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
+  const [pR, pG, pB] = hexToRgb(C.blue), [aR, aG, aB] = hexToRgb(C.orange);
   // Bandeau bicolore SOMIP.
-  doc.setFillColor(0, 113, 189); // C.blue
+  doc.setFillColor(pR, pG, pB);
   doc.rect(0, 0, pageWidth * 0.6, 6, "F");
-  doc.setFillColor(241, 107, 22); // C.orange
+  doc.setFillColor(aR, aG, aB);
   doc.rect(pageWidth * 0.6, 0, pageWidth * 0.4, 6, "F");
+  let textX = 30;
+  if (CURRENT_LOGO_URL) {
+    try {
+      const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
+      const fmt = dataUrl.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrl, fmt, 30, 14, 26, 26);
+      textX = 64;
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
   doc.setFontSize(15);
-  doc.setTextColor(0, 113, 189);
+  doc.setTextColor(pR, pG, pB);
   doc.setFont(undefined, "bold");
-  doc.text("SOMIP — Stock Gasoil", 30, 28);
+  doc.text("SOMIP — Stock Gasoil", textX, 28);
   doc.setFontSize(9);
   doc.setTextColor(90, 100, 110);
   doc.setFont(undefined, "normal");
-  doc.text("Zone Sud-Est · Gabon", 30, 42);
+  doc.text("Zone Sud-Est · Gabon", textX, 42);
   doc.setFontSize(9);
   doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, pageWidth - 30, 28, { align: "right" });
-  doc.setDrawColor(0, 113, 189);
+  doc.setDrawColor(pR, pG, pB);
   doc.setLineWidth(1);
   doc.line(30, 50, pageWidth - 30, 50);
   doc.setFontSize(13);
@@ -311,7 +335,7 @@ function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
   doc.text(title, 30, 68);
   if (period) {
     doc.setFontSize(10);
-    doc.setTextColor(241, 107, 22);
+    doc.setTextColor(aR, aG, aB);
     doc.setFont(undefined, "bold");
     doc.text(period, 30, 82);
   }
@@ -321,8 +345,8 @@ function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
     body: rows,
     foot: totalsRow ? [totalsRow] : undefined,
     theme: "grid",
-    headStyles: { fillColor: [0, 113, 189], textColor: 255, fontStyle: "bold" },
-    footStyles: { fillColor: [241, 107, 22, 0.15], textColor: [20, 30, 40], fontStyle: "bold" },
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold" },
+    footStyles: { fillColor: [aR, aG, aB, 0.15], textColor: [20, 30, 40], fontStyle: "bold" },
     styles: { fontSize: 9, cellPadding: 5 },
     margin: { left: 30, right: 30 },
   });
@@ -762,6 +786,13 @@ function AuthScreen() {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
+  const [logoUrl, setLogoUrl] = useState(null);
+
+  useEffect(() => {
+    supabase.from("settings").select("logo_url").eq("id", 1).maybeSingle()
+      .then(({ data }) => { if (data?.logo_url) setLogoUrl(data.logo_url); })
+      .catch(() => {});
+  }, []);
 
   const submit = async () => {
     setError(""); setInfo("");
@@ -784,9 +815,13 @@ function AuthScreen() {
     <div style={{ minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: C.bg, padding: 24, fontFamily: "'Inter', -apple-system, sans-serif" }}>
       <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: 30, width: "100%", maxWidth: 380 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 22 }}>
-          <div style={{ width: 34, height: 34, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Fuel size={18} color="#fff" />
-          </div>
+          {logoUrl ? (
+            <img src={logoUrl} alt="Logo" style={{ width: 34, height: 34, borderRadius: 8, objectFit: "cover" }} />
+          ) : (
+            <div style={{ width: 34, height: 34, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Fuel size={18} color="#fff" />
+            </div>
+          )}
           <div>
             <div style={{ fontWeight: 700, fontSize: 15 }}>SOMIP</div>
             <div style={{ color: C.sub, fontSize: 11 }}>Stock Gasoil</div>
@@ -2790,6 +2825,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     { id: "synthese_mensuelle_lub", label: "Synthèse journalière du mois — Lubrifiants" },
     { id: "synthese_station_jour", label: "Synthèse journalière — Station (site + camion)" },
     { id: "exposition", label: "Exposition", superviseurOnly: true },
+    { id: "exposition_comilog", label: "Exposition Comilog", superviseurOnly: true },
     { id: "bons", label: "Bons de livraison", superviseurOnly: true },
     { id: "bilan", label: "Bilan Matières", superviseurOnly: true },
   ].filter((t) => !t.superviseurOnly || canManage);
@@ -2806,6 +2842,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
       {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
       {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
       {tab === "bilan" && canManage && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
     </div>
@@ -3583,6 +3620,92 @@ function ExposureReport({ sites, movements, inventaires }) {
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Ventes cumulées = somme des ventes (et sorties vers camion) de la décade sélectionnée. Jauge à date = dernière mesure physique connue à la fin de la décade. Demande d'approvisionnement = Capacité − Jauge à date, arrondie à l'inférieur au multiple de 5000 L (livraisons par camions de 5000/15000/20000/35000 L).
+        </p>
+      </div>
+    </div>
+  );
+}
+
+const COMILOG_SITE_CODES = ["PRH", "OKM", "CIM", "CMM", "GTR"];
+
+/* ---- Exposition Comilog — envoi quotidien : ventes & réception de la veille, creux à date ---- */
+function ExpositionComilogReport({ sites, movements, inventaires }) {
+  const [date, setDate] = useState(todayStr());
+  const prevDate = (() => { const d = new Date(date); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  const comilogSites = sites.filter((s) => COMILOG_SITE_CODES.includes(s.code));
+
+  const rows = comilogSites.map((s) => {
+    const dayMovsVeille = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === prevDate);
+    const ventesVeille = sumQty(dayMovsVeille, ["sortie", "sortie_camion"]);
+    const receptionVeille = sumQty(dayMovsVeille, ["reception"]);
+    const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= date));
+    const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : stockThroughDate(s, movements, date, inventaires);
+    const creux = Math.max(0, s.capacity - jaugeADate);
+    return { site: s, ventesVeille, receptionVeille, jaugeADate, creux };
+  });
+  const totalVentes = rows.reduce((a, r) => a + r.ventesVeille, 0);
+  const totalReception = rows.reduce((a, r) => a + r.receptionVeille, 0);
+  const totalCreux = rows.reduce((a, r) => a + r.creux, 0);
+
+  const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${date}.xlsx`, [{
+    name: "Exposition Comilog", rows: rows.map((r) => ({
+      Site: r.site.name, [`Ventes du ${prevDate} (L)`]: Math.round(r.ventesVeille), [`Réception du ${prevDate} (L)`]: Math.round(r.receptionVeille),
+      [`Creux au ${date} (L)`]: Math.round(r.creux),
+    })),
+  }]);
+
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Exposition_Comilog_${date}.pdf`,
+    title: "Exposition Comilog",
+    period: `Ventes & réception du ${prevDate} — Creux au ${date}`,
+    columns: ["Site", "Ventes (veille)", "Réception (veille)", "Creux à date"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventesVeille)} L`, `+${fmt(r.receptionVeille)} L`, `${fmt(r.creux)} L`]),
+    totalsRow: ["Total", `${fmt(totalVentes)} L`, `+${fmt(totalReception)} L`, `${fmt(totalCreux)} L`],
+  });
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Date d'envoi"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Exposition Comilog" period={`Ventes & réception du ${prevDate} — Creux au ${date}`} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
+
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+          <StatCard label={`Ventes cumulées (${prevDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
+          <StatCard label={`Réception cumulée (${prevDate})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
+          <StatCard label={`Creux cumulé (${date})`} value={fmt(totalCreux)} unit="L" accent={C.orange} icon={Truck} />
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({prevDate})</th>
+                <th style={{ textAlign: "right" }}>Réception ({prevDate})</th><th style={{ textAlign: "right" }}>Creux ({date})</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventesVeille)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.receptionVeille)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.creux)} L</td>
+                </tr>
+              ))}
+              <tr>
+                <td style={{ fontWeight: 700 }}>Total</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(totalReception)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalCreux)} L</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Sites Comilog : Prehomo, Okouma, CIM, CMM, Gare Traction. Ventes et Réception = celles de la veille (jour précédant la date d'envoi). Creux = Capacité − Stock à la date d'envoi (jauge mesurée si disponible, sinon théorique).
         </p>
       </div>
     </div>
