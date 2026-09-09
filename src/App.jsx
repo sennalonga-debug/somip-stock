@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Factory, ArrowDownCircle, ArrowUpCircle, ClipboardList,
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
-  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus,
+  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus, Palette,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -30,6 +30,17 @@ const C = {
   danger: "#C63C3C",
   warning: "#D98B12",
 };
+// Applique les 2 couleurs principales personnalisées (Superviseur, page Réglages) à toute
+// l'application — C est un objet muté volontairement, pas remplacé, pour que chaque usage
+// existant de C.blue/C.orange dans tout le fichier reflète automatiquement le nouveau thème.
+function applyTheme(primary, accent) {
+  if (primary && /^#[0-9A-Fa-f]{6}$/.test(primary)) C.blue = primary;
+  if (accent && /^#[0-9A-Fa-f]{6}$/.test(accent)) C.orange = accent;
+}
+// Logo personnalisé (Superviseur, page Réglages) — lu directement par ReportHeader et les
+// exports PDF/PowerPoint, sans avoir à faire transiter les réglages dans tous les rapports.
+let CURRENT_LOGO_URL = null;
+function setCurrentLogoUrl(url) { CURRENT_LOGO_URL = url || null; }
 
 /* ------------------------------------------------------------------ */
 /* Seed / reference data                                               */
@@ -82,7 +93,11 @@ const MOVEMENTS_SEED = [
   { id: "m5", siteId: "traction", type: "sortie", date: "2026-09-02", quantity: 1800, delta: -1800, destinataire: "Locomotive 12", commentaire: "", isDemo: true },
 ];
 
-const SETTINGS_SEED = { objectifFreinte: 3 };
+const SETTINGS_SEED = { objectifFreinte: 3, logoUrl: null, colorPrimary: "#0071BD", colorAccent: "#F16B16" };
+const rowToSettings = (r) => r ? {
+  objectifFreinte: Number(r.objectif_freinte), logoUrl: r.logo_url || null,
+  colorPrimary: r.color_primary || "#0071BD", colorAccent: r.color_accent || "#F16B16",
+} : SETTINGS_SEED;
 
 const TYPE_META = {
   reception: { label: "Réception", color: C.success, sign: "+" },
@@ -367,7 +382,7 @@ async function exportBilanToPptx(history, periodType, siteName) {
   const pptx = new pptxgen();
   pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
   pptx.layout = "SOMIP";
-  const BLUE = "0071BD", ORANGE = "F16B16", INK = "1A2733", SUB = "5A6470";
+  const BLUE = C.blue.replace("#", ""), ORANGE = C.orange.replace("#", ""), INK = "1A2733", SUB = "5A6470";
   const PERIOD_LABEL = { mensuel: "Synthèse mensuelle", trimestriel: "Synthèse trimestrielle", decadaire: "Synthèse décadaire" };
 
   // Diapositive de titre.
@@ -375,6 +390,9 @@ async function exportBilanToPptx(history, periodType, siteName) {
   s1.background = { color: "FFFFFF" };
   s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
   s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
+  if (CURRENT_LOGO_URL) {
+    try { s1.addImage({ path: CURRENT_LOGO_URL, x: 0.5, y: 0.5, w: 1, h: 1, sizing: { type: "contain", w: 1, h: 1 } }); } catch (e) { /* logo indisponible : on continue sans */ }
+  }
   s1.addText(`SOMIP — Bilan Matières${siteName ? ` — ${siteName}` : ""}`, { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 26, bold: true, color: BLUE });
   s1.addText(PERIOD_LABEL[periodType] || "Synthèse", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
   s1.addText(`Édité le ${new Date().toLocaleDateString("fr-FR")}`, { x: 0.5, y: 3.2, w: 9, h: 0.4, fontSize: 11, color: SUB });
@@ -435,9 +453,12 @@ function ReportHeader({ title, period }) {
     <div className="somip-print-only" style={{ marginBottom: 16 }}>
       <div style={{ height: 5, background: `linear-gradient(90deg, ${C.blue} 0%, ${C.blue} 60%, ${C.orange} 60%, ${C.orange} 100%)`, borderRadius: 3, marginBottom: 12 }} />
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `2px solid ${C.blue}`, paddingBottom: 10, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontWeight: 800, fontSize: 17, color: C.blue, letterSpacing: 0.3 }}>SOMIP <span style={{ color: C.orange }}>—</span> Stock Gasoil</div>
-          <div style={{ fontSize: 11, color: C.sub }}>Zone Sud-Est · Gabon</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {CURRENT_LOGO_URL && <img src={CURRENT_LOGO_URL} alt="" style={{ height: 34, width: 34, objectFit: "cover", borderRadius: 6 }} />}
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 17, color: C.blue, letterSpacing: 0.3 }}>SOMIP <span style={{ color: C.orange }}>—</span> Stock Gasoil</div>
+            <div style={{ fontSize: 11, color: C.sub }}>Zone Sud-Est · Gabon</div>
+          </div>
         </div>
         <div style={{ textAlign: "right", fontSize: 11, color: C.sub }}>
           Édité le {new Date().toLocaleDateString("fr-FR")} à {new Date().toLocaleTimeString("fr-FR")}
@@ -923,7 +944,7 @@ export default function App() {
         setTruckAssignments(result.assignmentsData);
         setSiteMeters(result.siteMetersData);
         setBilans(result.bilansData);
-        setSettings(result.settingsRow ? { objectifFreinte: Number(result.settingsRow.objectif_freinte) } : SETTINGS_SEED);
+        setSettings(rowToSettings(result.settingsRow));
         setLastSync(new Date());
         setLoadError(null);
         setLoading(false);
@@ -954,7 +975,7 @@ export default function App() {
       ]);
       setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl);
       const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
-      if (se) setSettings({ objectifFreinte: Number(se.objectif_freinte) });
+      if (se) setSettings(rowToSettings(se));
       setLastSync(new Date());
       // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
       const now = Date.now();
@@ -1187,12 +1208,30 @@ export default function App() {
   });
   const updateSettings = (patch) => withSync(async () => {
     const next = { ...settings, ...patch };
-    const { error } = await supabase.from("settings").update({ objectif_freinte: next.objectifFreinte }).eq("id", 1);
+    const { error } = await supabase.from("settings").update({
+      objectif_freinte: next.objectifFreinte, logo_url: next.logoUrl, color_primary: next.colorPrimary, color_accent: next.colorAccent,
+    }).eq("id", 1);
     if (error) throw error;
     setSettings(next);
-    appendAudit("Modification objectif de freinte", `Nouvel objectif : ${next.objectifFreinte} ‰`);
-    flash("Objectif mis à jour.");
+    appendAudit("Modification des réglages", patch.objectifFreinte !== undefined ? `Nouvel objectif : ${next.objectifFreinte} ‰` : "Personnalisation (logo/couleurs)");
+    flash("Réglages mis à jour.");
   });
+  const updateTheme = ({ logoFile, colorPrimary, colorAccent }) => withSync(async () => {
+    let logoUrl = settings.logoUrl;
+    if (logoFile) {
+      const urls = await uploadPhotos([logoFile], "branding");
+      logoUrl = urls[0];
+    }
+    const next = { ...settings, logoUrl, colorPrimary: colorPrimary || settings.colorPrimary, colorAccent: colorAccent || settings.colorAccent };
+    const { error } = await supabase.from("settings").update({
+      logo_url: next.logoUrl, color_primary: next.colorPrimary, color_accent: next.colorAccent,
+    }).eq("id", 1);
+    if (error) throw error;
+    setSettings(next);
+    appendAudit("Personnalisation", "Logo et/ou couleurs mis à jour");
+    flash("Personnalisation enregistrée.");
+  });
+  useEffect(() => { applyTheme(settings.colorPrimary, settings.colorAccent); setCurrentLogoUrl(settings.logoUrl); }, [settings.colorPrimary, settings.colorAccent, settings.logoUrl]);
 
   /* ---- mutations : rôle d'un utilisateur (Superviseur uniquement) ---- */
   const updateUserRole = (userId, role) => withSync(async () => {
@@ -1220,6 +1259,7 @@ export default function App() {
     { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: true },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: true },
     { id: "utilisateurs", label: "Utilisateurs", icon: Users, show: perms.canManage },
+    { id: "personnalisation", label: "Personnalisation", icon: Palette, show: perms.canManage },
     { id: "historique", label: "Historique", icon: History, show: perms.canManage },
   ].filter((n) => n.show);
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
@@ -1333,9 +1373,13 @@ export default function App() {
       {/* Sidebar */}
       <aside className={`somip-sidebar ${mobileNavOpen ? "open" : ""}`} style={{ width: 226, background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 6px 22px" }}>
-          <div style={{ width: 32, height: 32, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <Fuel size={17} color="#fff" />
-          </div>
+          {settings.logoUrl ? (
+            <img src={settings.logoUrl} alt="Logo" style={{ width: 32, height: 32, borderRadius: 8, objectFit: "cover" }} />
+          ) : (
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Fuel size={17} color="#fff" />
+            </div>
+          )}
           <div>
             <div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5, letterSpacing: 0.2 }}>SOMIP</div>
             <div style={{ color: "#8CA0B4", fontSize: 10.5, fontWeight: 500 }}>Stock Gasoil</div>
@@ -1404,6 +1448,7 @@ export default function App() {
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSite={updateUserSite} sites={sites} session={session} />}
+          {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
       </div>
@@ -4475,6 +4520,75 @@ function LossGainReport({ sites, inventaires }) {
 /* ------------------------------------------------------------------ */
 /* Utilisateurs                                                          */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Personnalisation — logo & couleurs (Superviseur uniquement)         */
+/* ------------------------------------------------------------------ */
+function BrandingView({ settings, updateTheme }) {
+  const [logoFile, setLogoFile] = useState(null);
+  const [colorPrimary, setColorPrimary] = useState(settings.colorPrimary || "#0071BD");
+  const [colorAccent, setColorAccent] = useState(settings.colorAccent || "#F16B16");
+  const [saving, setSaving] = useState(false);
+
+  const previewLogo = logoFile ? URL.createObjectURL(logoFile) : settings.logoUrl;
+  const dirty = !!logoFile || colorPrimary !== (settings.colorPrimary || "#0071BD") || colorAccent !== (settings.colorAccent || "#F16B16");
+
+  const submit = async () => {
+    setSaving(true);
+    await updateTheme({ logoFile, colorPrimary, colorAccent });
+    setSaving(false);
+    setLogoFile(null);
+    window.location.reload();
+  };
+
+  return (
+    <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Personnalisation</h3>
+        <p style={{ margin: "0 0 18px", fontSize: 12.5, color: C.sub }}>Logo et couleurs principales, appliqués à toute l'application et aux rapports (PDF/PowerPoint).</p>
+
+        <Field label="Logo">
+          <label className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", cursor: "pointer", display: "inline-flex" }}>
+            <ImagePlus size={14} /> {settings.logoUrl || logoFile ? "Changer le logo" : "Ajouter un logo"}
+            <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => setLogoFile(e.target.files?.[0] || null)} />
+          </label>
+        </Field>
+        {previewLogo && (
+          <div style={{ margin: "8px 0 16px", padding: 14, background: C.bg, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <img src={previewLogo} alt="Logo" style={{ maxHeight: 70, maxWidth: "100%" }} />
+          </div>
+        )}
+
+        <Field label="Couleur primaire">
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="color" value={colorPrimary} onChange={(e) => setColorPrimary(e.target.value)} style={{ width: 44, height: 36, border: `1px solid ${C.border}`, borderRadius: 6, padding: 2, cursor: "pointer" }} />
+            <input className="somip-input" value={colorPrimary} onChange={(e) => setColorPrimary(e.target.value)} style={{ flex: 1 }} />
+          </div>
+        </Field>
+        <Field label="Couleur d'accent">
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="color" value={colorAccent} onChange={(e) => setColorAccent(e.target.value)} style={{ width: 44, height: 36, border: `1px solid ${C.border}`, borderRadius: 6, padding: 2, cursor: "pointer" }} />
+            <input className="somip-input" value={colorAccent} onChange={(e) => setColorAccent(e.target.value)} style={{ flex: 1 }} />
+          </div>
+        </Field>
+
+        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center", marginTop: 8 }} onClick={submit} disabled={!dirty || saving}>
+          <Check size={15} /> {saving ? "Enregistrement..." : "Enregistrer"}
+        </button>
+      </div>
+
+      <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
+        <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Aperçu</h4>
+        <div style={{ height: 5, background: `linear-gradient(90deg, ${colorPrimary} 0%, ${colorPrimary} 60%, ${colorAccent} 60%, ${colorAccent} 100%)`, borderRadius: 3, marginBottom: 14 }} />
+        <button className="somip-btn" style={{ background: colorPrimary, color: "#fff", border: "none", marginBottom: 10 }}>Bouton principal</button>
+        <br />
+        <span style={{ display: "inline-block", padding: "4px 10px", borderRadius: 6, background: colorAccent, color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Badge d'accent</span>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>La page se recharge automatiquement après l'enregistrement pour appliquer les couleurs partout.</p>
+      </div>
+    </div>
+  );
+}
+
+
 function UsersView({ profiles, updateUserRole, updateUserSite, sites, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
