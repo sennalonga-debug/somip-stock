@@ -3630,82 +3630,83 @@ const COMILOG_SITE_CODES = ["PRH", "OKM", "CIM", "CMM", "GTR"];
 
 /* ---- Exposition Comilog — envoi quotidien : ventes & réception de la veille, creux à date ---- */
 function ExpositionComilogReport({ sites, movements, inventaires }) {
-  const [date, setDate] = useState(todayStr());
-  const prevDate = (() => { const d = new Date(date); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  const [mvtDate, setMvtDate] = useState(todayStr());
+  const [stockDate, setStockDate] = useState(todayStr());
   const comilogSites = sites.filter((s) => COMILOG_SITE_CODES.includes(s.code));
 
   const rows = comilogSites.map((s) => {
-    const dayMovsVeille = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === prevDate);
-    const ventesVeille = sumQty(dayMovsVeille, ["sortie", "sortie_camion"]);
-    const receptionVeille = sumQty(dayMovsVeille, ["reception"]);
-    const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= date));
-    const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : stockThroughDate(s, movements, date, inventaires);
+    const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
+    const ventes = sumQty(dayMovs, ["sortie", "sortie_camion"]);
+    const reception = sumQty(dayMovs, ["reception"]);
+    const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= stockDate));
+    const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : stockThroughDate(s, movements, stockDate, inventaires);
     const creux = Math.max(0, s.capacity - jaugeADate);
-    return { site: s, ventesVeille, receptionVeille, jaugeADate, creux };
+    return { site: s, ventes, reception, jaugeADate, creux };
   });
-  const totalVentes = rows.reduce((a, r) => a + r.ventesVeille, 0);
-  const totalReception = rows.reduce((a, r) => a + r.receptionVeille, 0);
+  const totalVentes = rows.reduce((a, r) => a + r.ventes, 0);
+  const totalReception = rows.reduce((a, r) => a + r.reception, 0);
   const totalCreux = rows.reduce((a, r) => a + r.creux, 0);
 
-  const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${date}.xlsx`, [{
+  const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [{
     name: "Exposition Comilog", rows: rows.map((r) => ({
-      Site: r.site.name, [`Ventes du ${prevDate} (L)`]: Math.round(r.ventesVeille), [`Réception du ${prevDate} (L)`]: Math.round(r.receptionVeille),
-      [`Creux au ${date} (L)`]: Math.round(r.creux),
+      Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes), [`Réception du ${mvtDate} (L)`]: Math.round(r.reception),
+      [`Creux au ${stockDate} (L)`]: Math.round(r.creux),
     })),
   }]);
 
   const doPdf = () => exportToPdf({
-    filename: `SOMIP_Exposition_Comilog_${date}.pdf`,
+    filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
     title: "Exposition Comilog",
-    period: `Ventes & réception du ${prevDate} — Creux au ${date}`,
-    columns: ["Site", "Ventes (veille)", "Réception (veille)", "Creux à date"],
-    rows: rows.map((r) => [r.site.name, `${fmt(r.ventesVeille)} L`, `+${fmt(r.receptionVeille)} L`, `${fmt(r.creux)} L`]),
-    totalsRow: ["Total", `${fmt(totalVentes)} L`, `+${fmt(totalReception)} L`, `${fmt(totalCreux)} L`],
+    period: `Ventes & réception du ${mvtDate} — Creux au ${stockDate}`,
+    columns: ["Site", "Ventes", "Réception", "Creux"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.reception)} L`, `${fmt(r.creux)} L`]),
+    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalReception)} L`, `${fmt(totalCreux)} L`],
   });
 
   return (
     <div>
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <Field label="Date d'envoi"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Date des ventes / réception"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={mvtDate} onChange={(e) => setMvtDate(e.target.value)} /></Field>
+        <Field label="Date du stock / creux"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={stockDate} onChange={(e) => setStockDate(e.target.value)} /></Field>
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="Exposition Comilog" period={`Ventes & réception du ${prevDate} — Creux au ${date}`} />
+        <ReportHeader title="Exposition Comilog" period={`Ventes & réception du ${mvtDate} — Creux au ${stockDate}`} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-          <StatCard label={`Ventes cumulées (${prevDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
-          <StatCard label={`Réception cumulée (${prevDate})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
-          <StatCard label={`Creux cumulé (${date})`} value={fmt(totalCreux)} unit="L" accent={C.orange} icon={Truck} />
+          <StatCard label={`Ventes cumulées (${mvtDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
+          <StatCard label={`Réception cumulée (${mvtDate})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
+          <StatCard label={`Creux cumulé (${stockDate})`} value={fmt(totalCreux)} unit="L" accent={C.orange} icon={Truck} />
         </div>
 
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
             <thead>
               <tr>
-                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({prevDate})</th>
-                <th style={{ textAlign: "right" }}>Réception ({prevDate})</th><th style={{ textAlign: "right" }}>Creux ({date})</th>
+                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
+                <th style={{ textAlign: "right" }}>Réception ({mvtDate})</th><th style={{ textAlign: "right" }}>Creux ({stockDate})</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r) => (
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventesVeille)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.receptionVeille)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{fmt(r.reception)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.creux)} L</td>
                 </tr>
               ))}
               <tr>
                 <td style={{ fontWeight: 700 }}>Total</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(totalReception)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>{fmt(totalReception)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalCreux)} L</td>
               </tr>
             </tbody>
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Sites Comilog : Prehomo, Okouma, CIM, CMM, Gare Traction. Ventes et Réception = celles de la veille (jour précédant la date d'envoi). Creux = Capacité − Stock à la date d'envoi (jauge mesurée si disponible, sinon théorique).
+          Sites Comilog : Prehomo, Okouma, CIM, CMM, Gare Traction. Ventes/Réception = celles du jour choisi ci-dessus (indépendant de la date du stock). Creux = Capacité − Stock à la date choisie (jauge mesurée si disponible, sinon théorique).
         </p>
       </div>
     </div>
