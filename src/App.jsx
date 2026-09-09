@@ -472,6 +472,89 @@ async function exportBilanToPptx(history, periodType, siteName) {
   await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_${siteName ? siteName.replace(/\s+/g, "") + "_" : ""}${periodType}_${new Date().toISOString().slice(0, 10)}.pptx` });
 }
 
+// Export combiné "Tous les sites" pour une période donnée : un seul document (PDF ou
+// PowerPoint) rassemblant la ligne de chaque site, plutôt que par site séparément.
+async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
+  const pptx = new pptxgen();
+  pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
+  pptx.layout = "SOMIP";
+  const BLUE = C.blue.replace("#", ""), ORANGE = C.orange.replace("#", ""), INK = "1A2733", SUB = "5A6470";
+
+  const s1 = pptx.addSlide();
+  s1.background = { color: "FFFFFF" };
+  s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
+  s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
+  if (CURRENT_LOGO_URL) {
+    try { s1.addImage({ path: CURRENT_LOGO_URL, x: 0.5, y: 0.5, w: 1, h: 1, sizing: { type: "contain", w: 1, h: 1 } }); } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+  s1.addText("SOMIP — Bilan Matières — Tous les sites", { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 24, bold: true, color: BLUE });
+  s1.addText(`${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`, { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
+  s1.addText(`Édité le ${new Date().toLocaleDateString("fr-FR")}`, { x: 0.5, y: 3.2, w: 9, h: 0.4, fontSize: 11, color: SUB });
+
+  const s2 = pptx.addSlide();
+  s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
+  s2.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
+  s2.addText(`Détail par site — ${periodKey}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
+  const header = ["Site", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"].map((t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: BLUE }, fontSize: 9 } }));
+  const dataRows = rows.map((r) => [
+    { text: r.site?.name || "?", options: { fontSize: 9, color: INK } },
+    { text: `${fmt(r.stockDebut)} L`, options: { fontSize: 9, color: INK } },
+    { text: `+${fmt(r.reception15)} L`, options: { fontSize: 9, color: INK } },
+    { text: `${fmt(r.ventes15)} L`, options: { fontSize: 9, color: INK } },
+    { text: `${r.transferts15 >= 0 ? "+" : ""}${fmt(r.transferts15)} L`, options: { fontSize: 9, color: INK } },
+    { text: `${fmt(r.stockTheorique)} L`, options: { fontSize: 9, color: INK } },
+    { text: `${fmt(r.stockFin15)} L`, options: { fontSize: 9, color: INK } },
+    { text: `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L`, options: { fontSize: 9, bold: true, color: r.ecart < 0 ? "D64545" : r.ecart > 0 ? "2E9B5C" : INK } },
+  ]);
+  const totalStockDebut = rows.reduce((a, r) => a + r.stockDebut, 0), totalReception = rows.reduce((a, r) => a + r.reception15, 0);
+  const totalVentes = rows.reduce((a, r) => a + r.ventes15, 0), totalTransferts = rows.reduce((a, r) => a + r.transferts15, 0);
+  const totalTheorique = rows.reduce((a, r) => a + r.stockTheorique, 0), totalStockFin = rows.reduce((a, r) => a + r.stockFin15, 0);
+  const totalEcart = rows.reduce((a, r) => a + r.ecart, 0);
+  const totalRow = [
+    { text: "TOTAL", options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `${fmt(totalStockDebut)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `+${fmt(totalReception)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `${fmt(totalVentes)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `${totalTransferts >= 0 ? "+" : ""}${fmt(totalTransferts)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `${fmt(totalTheorique)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `${fmt(totalStockFin)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+    { text: `${totalEcart >= 0 ? "+" : ""}${fmt(totalEcart)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
+  ];
+  const tableRows = [header, ...dataRows, totalRow];
+  s2.addTable(tableRows, { x: 0.3, y: 0.8, w: 9.4, autoPage: true, border: { type: "solid", color: "E2E6E9", pt: 0.5 }, fontFace: "Arial" });
+
+  const s3 = pptx.addSlide();
+  s3.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
+  s3.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
+  s3.addText("Comparaison par site", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
+  const labels = rows.map((r) => r.site?.name || "?");
+  const chartData = [
+    { name: "Réception", labels, values: rows.map((r) => r.reception15) },
+    { name: "Ventes", labels, values: rows.map((r) => r.ventes15) },
+    { name: "Stock fin", labels, values: rows.map((r) => r.stockFin15) },
+  ];
+  s3.addChart(pptx.ChartType.bar, chartData, {
+    x: 0.4, y: 0.9, w: 9.2, h: 4.3, barDir: "col",
+    chartColors: [BLUE, ORANGE, "2E9B5C"], showLegend: true, legendPos: "b",
+    showValue: false, catAxisLabelFontSize: 9, valAxisLabelFontSize: 9,
+  });
+
+  for (const r of rows) {
+    if (!r.photoUrls || r.photoUrls.length === 0) continue;
+    const s = pptx.addSlide();
+    s.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
+    s.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
+    s.addText(`Photos justificatives — ${r.site?.name || "?"}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 16, bold: true, color: INK });
+    if (r.commentaire) s.addText(r.commentaire, { x: 0.4, y: 0.65, w: 9.2, h: 0.35, fontSize: 10, color: SUB, italic: true });
+    const positions = [{ x: 0.4, y: 1.1 }, { x: 3.55, y: 1.1 }, { x: 6.7, y: 1.1 }, { x: 0.4, y: 3.4 }, { x: 3.55, y: 3.4 }, { x: 6.7, y: 3.4 }];
+    for (let i = 0; i < Math.min(r.photoUrls.length, 6); i++) {
+      try { s.addImage({ path: r.photoUrls[i], x: positions[i].x, y: positions[i].y, w: 3, h: 2.1, sizing: { type: "cover", w: 3, h: 2.1 } }); } catch (e) { /* ignore */ }
+    }
+  }
+
+  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_TousSites_${periodType}_${periodKey}.pptx` });
+}
+
 function ReportHeader({ title, period }) {
   return (
     <div className="somip-print-only" style={{ marginBottom: 16 }}>
@@ -1100,19 +1183,19 @@ export default function App() {
   });
 
   /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
-  const saveBilan = ({ periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
-    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/global/${periodType}`) : [];
+  const saveBilan = ({ siteId, periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
+    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${siteId}/${periodType}`) : [];
     const photoUrls = [...existingPhotoUrls, ...newUrls];
-    const row = bilanToRow({ siteId: null, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
-    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "period_type,period_key" }).select().maybeSingle();
+    const row = bilanToRow({ siteId, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
+    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "site_id,period_type,period_key" }).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
     const saved = rowToBilan(data);
     setBilans((prev) => {
-      const exists = prev.some((b) => !b.siteId && b.periodType === periodType && b.periodKey === periodKey);
-      return exists ? prev.map((b) => (!b.siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
+      const exists = prev.some((b) => b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey);
+      return exists ? prev.map((b) => (b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
     });
-    appendAudit("Bilan Matières", `${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
+    appendAudit("Bilan Matières", `${sites.find((s) => s.id === siteId)?.name || siteId} — ${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
     flash("Bilan Matières enregistré.");
   });
   const deleteBilan = (bilan) => withSync(async () => {
@@ -4200,6 +4283,8 @@ function MiniStat({ label, value, color, bold }) {
 /* ---- Registre des bons de livraison ---- */
 /* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
 function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage }) {
+  const fixedSites = sites.filter((s) => !s.isMobile);
+  const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [periodType, setPeriodType] = useState("mensuel");
   const [monthKey, setMonthKey] = useState(currentMonth());
   const [year, setYear] = useState(new Date().getFullYear());
@@ -4207,14 +4292,14 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
   const [decadeMonth, setDecadeMonth] = useState(currentMonth());
   const [decadeNum, setDecadeNum] = useState(1);
   const periodKey = periodType === "mensuel" ? monthKey : periodType === "trimestriel" ? `${year}-Q${quarter}` : `${decadeMonth}-D${decadeNum}`;
+  const site = sites.find((s) => s.id === siteId);
 
   const emptyForm = { reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" };
   const [form, setForm] = useState(emptyForm);
   const [photoFiles, setPhotoFiles] = useState([]);
   const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
 
-  // Saisie globale (tous sites confondus) : on ne retient que les entrées sans site_id.
-  const sorted = [...bilans].filter((b) => !b.siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
+  const sorted = [...bilans].filter((b) => b.siteId === siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
   const existing = sorted.find((b) => b.periodKey === periodKey);
   const idx = sorted.findIndex((b) => b.periodKey === periodKey);
   const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
@@ -4230,8 +4315,8 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
   const resetForm = () => { setForm(emptyForm); setPhotoFiles([]); setExistingPhotoUrls([]); };
 
   const submit = () => {
-    if (form.stockFin15 === "") return;
-    saveBilan({ periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
+    if (form.stockFin15 === "" || !siteId) return;
+    saveBilan({ siteId, periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
     resetForm();
   };
 
@@ -4241,7 +4326,7 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
     setPhotoFiles([]);
   };
 
-  // Historique enrichi pour le tableau + le diagramme.
+  // Historique enrichi pour le tableau + le diagramme (ce site uniquement).
   const history = sorted.map((b, i) => {
     const prev = i > 0 ? sorted[i - 1] : null;
     const debut = prev ? prev.stockFin15 : 0;
@@ -4250,161 +4335,264 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
     return { ...b, stockDebut: debut, stockTheorique: theorique, ecart: ec };
   });
 
-  const doPptx = () => exportBilanToPptx(history, periodType, null);
-  const doPdf = () => exportToPdf({
-    filename: `SOMIP_Bilan_Matieres_${periodType}_${new Date().toISOString().slice(0, 10)}.pdf`,
-    title: "Bilan Matières — Tous sites",
-    period: PERIOD_TYPE_LABELS[periodType],
-    columns: ["Période", "Stock début", "Réception", "Ventes", "Transferts", "Stock théorique", "Stock fin", "Gain/Perte"],
-    rows: history.map((b) => [
-      b.periodKey, `${fmt(b.stockDebut)} L`, `${fmt(b.reception15)} L`, `${fmt(b.ventes15)} L`,
-      `${b.transferts15 >= 0 ? "+" : ""}${fmt(b.transferts15)} L`, `${fmt(b.stockTheorique)} L`, `${fmt(b.stockFin15)} L`,
-      `${b.ecart >= 0 ? "+" : ""}${fmt(b.ecart)} L`,
+  const doPptx = () => exportBilanToPptx(history, periodType, site?.name);
+
+  // ---- Vue combinée "Tous les sites", pour une période choisie séparément ----
+  const [allPeriodType, setAllPeriodType] = useState("mensuel");
+  const [allMonthKey, setAllMonthKey] = useState(currentMonth());
+  const [allYear, setAllYear] = useState(new Date().getFullYear());
+  const [allQuarter, setAllQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
+  const [allDecadeMonth, setAllDecadeMonth] = useState(currentMonth());
+  const [allDecadeNum, setAllDecadeNum] = useState(1);
+  const allPeriodKey = allPeriodType === "mensuel" ? allMonthKey : allPeriodType === "trimestriel" ? `${allYear}-Q${allQuarter}` : `${allDecadeMonth}-D${allDecadeNum}`;
+
+  const allSitesRows = fixedSites.map((s) => {
+    const siteSorted = [...bilans].filter((b) => b.siteId === s.id && b.periodType === allPeriodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
+    const entry = siteSorted.find((b) => b.periodKey === allPeriodKey);
+    if (!entry) return null;
+    const i = siteSorted.findIndex((b) => b.periodKey === allPeriodKey);
+    const prev = i > 0 ? siteSorted[i - 1] : null;
+    const debut = prev ? prev.stockFin15 : 0;
+    const theorique = debut + entry.reception15 - entry.ventes15 + entry.transferts15;
+    return { site: s, ...entry, stockDebut: debut, stockTheorique: theorique, ecart: entry.stockFin15 - theorique, photoUrls: entry.photoUrls };
+  }).filter(Boolean);
+
+  const doAllSitesPdf = () => exportToPdf({
+    filename: `SOMIP_Bilan_Matieres_TousSites_${allPeriodType}_${allPeriodKey}.pdf`,
+    title: "Bilan Matières — Tous les sites",
+    period: `${PERIOD_TYPE_LABELS[allPeriodType]} — ${allPeriodKey}`,
+    columns: ["Site", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"],
+    rows: allSitesRows.map((r) => [
+      r.site.name, `${fmt(r.stockDebut)} L`, `+${fmt(r.reception15)} L`, `${fmt(r.ventes15)} L`,
+      `${r.transferts15 >= 0 ? "+" : ""}${fmt(r.transferts15)} L`, `${fmt(r.stockTheorique)} L`, `${fmt(r.stockFin15)} L`,
+      `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L`,
     ]),
+    totalsRow: ["TOTAL",
+      `${fmt(allSitesRows.reduce((a, r) => a + r.stockDebut, 0))} L`, `+${fmt(allSitesRows.reduce((a, r) => a + r.reception15, 0))} L`,
+      `${fmt(allSitesRows.reduce((a, r) => a + r.ventes15, 0))} L`, `${fmt(allSitesRows.reduce((a, r) => a + r.transferts15, 0))} L`,
+      `${fmt(allSitesRows.reduce((a, r) => a + r.stockTheorique, 0))} L`, `${fmt(allSitesRows.reduce((a, r) => a + r.stockFin15, 0))} L`,
+      `${fmt(allSitesRows.reduce((a, r) => a + r.ecart, 0))} L`,
+    ],
   });
+  const doAllSitesPptx = () => exportBilanAllSitesToPptx(allSitesRows, allPeriodType, allPeriodKey);
 
   return (
-    <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-      {canManage && (
-        <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
-          <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Saisie globale — tous sites confondus.</p>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
-            <button className={`somip-tab ${periodType === "decadaire" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("decadaire")}>Décadaire</button>
-            <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
-          </div>
-          {periodType === "mensuel" && (
-            <Field label="Mois"><input type="month" className="somip-input" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} /></Field>
-          )}
-          {periodType === "decadaire" && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Mois"><input type="month" className="somip-input" value={decadeMonth} onChange={(e) => setDecadeMonth(e.target.value)} /></Field></div>
-              <div style={{ flex: 1 }}>
-                <Field label="Décade">
-                  <select className="somip-select" value={decadeNum} onChange={(e) => setDecadeNum(Number(e.target.value))}>
-                    <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
-                  </select>
-                </Field>
+    <div className="somip-fade">
+      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 24 }}>
+        {canManage && (
+          <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
+            <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
+            <Field label="Site">
+              <select className="somip-select" value={siteId} onChange={(e) => { setSiteId(e.target.value); resetForm(); }}>
+                {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            </Field>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
+              <button className={`somip-tab ${periodType === "decadaire" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("decadaire")}>Décadaire</button>
+              <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
+            </div>
+            {periodType === "mensuel" && (
+              <Field label="Mois"><input type="month" className="somip-input" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} /></Field>
+            )}
+            {periodType === "decadaire" && (
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Mois"><input type="month" className="somip-input" value={decadeMonth} onChange={(e) => setDecadeMonth(e.target.value)} /></Field></div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Décade">
+                    <select className="somip-select" value={decadeNum} onChange={(e) => setDecadeNum(Number(e.target.value))}>
+                      <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
+                    </select>
+                  </Field>
+                </div>
               </div>
-            </div>
-          )}
-          {periodType === "trimestriel" && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Année"><input type="number" className="somip-input" value={year} onChange={(e) => setYear(Number(e.target.value))} /></Field></div>
-              <div style={{ flex: 1 }}>
-                <Field label="Trimestre">
-                  <select className="somip-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
-                    <option value={1}>T1 (Jan-Mars)</option><option value={2}>T2 (Avr-Juin)</option>
-                    <option value={3}>T3 (Juil-Sept)</option><option value={4}>T4 (Oct-Déc)</option>
-                  </select>
-                </Field>
+            )}
+            {periodType === "trimestriel" && (
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}><Field label="Année"><input type="number" className="somip-input" value={year} onChange={(e) => setYear(Number(e.target.value))} /></Field></div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Trimestre">
+                    <select className="somip-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
+                      <option value={1}>T1 (Jan-Mars)</option><option value={2}>T2 (Avr-Juin)</option>
+                      <option value={3}>T3 (Juil-Sept)</option><option value={4}>T4 (Oct-Déc)</option>
+                    </select>
+                  </Field>
+                </div>
               </div>
+            )}
+
+            {existing && (
+              <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.warning }}>
+                Une saisie existe déjà pour cette période — enregistrer à nouveau la remplace. <button onClick={() => loadForEdit(existing)} style={{ border: "none", background: "none", color: C.blue, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Charger pour modifier</button>
+              </p>
+            )}
+
+            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente — {site?.name})</span>
+              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
             </div>
-          )}
 
-          {existing && (
-            <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.warning }}>
-              Une saisie existe déjà pour cette période — enregistrer à nouveau la remplace. <button onClick={() => loadForEdit(existing)} style={{ border: "none", background: "none", color: C.blue, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Charger pour modifier</button>
-            </p>
-          )}
+            <Field label="Réception à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
+            <Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
+            <Field label="Transferts entre sites à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field>
 
-          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente)</span>
-            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
-          </div>
-
-          <Field label="Réception globale à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
-          <Field label="Ventes globales à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
-          <Field label="Transferts entre sites à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field>
-
-          <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
-            <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
-          </div>
-
-          <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge globale" /></Field>
-          <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
-          <Field label="Photos justificatives (optionnel)">
-            <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
-          </Field>
-
-          {ecart !== null && (
-            <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5, display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte</span>
-              <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
+              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
             </div>
-          )}
 
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === ""}>
-              <Plus size={15} /> Enregistrer
-            </button>
-            <button className="somip-btn somip-btn-secondary" onClick={resetForm}><X size={15} /> Annuler</button>
+            <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field>
+            <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
+            <Field label="Photos justificatives (optionnel)">
+              <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
+            </Field>
+
+            {ecart !== null && (
+              <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5, display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === ""}>
+                <Plus size={15} /> Enregistrer
+              </button>
+              <button className="somip-btn somip-btn-secondary" onClick={resetForm}><X size={15} /> Annuler</button>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — Tous sites — {PERIOD_TYPE_LABELS[periodType]}</h3>
+        <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+            <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {site?.name} — {PERIOD_TYPE_LABELS[periodType]}</h3>
+            {history.length > 0 && (
+              <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint (ce site)</button>
+            )}
+          </div>
+          <div style={{ overflowX: "auto", marginBottom: 20 }}>
+            <table className="somip-table">
+              <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
+              <tbody>
+                {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré pour ce site." />}
+                {history.map((b) => (
+                  <tr key={b.id}>
+                    <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
+                    <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.stockDebut)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(b.reception15)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.ventes15)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockTheorique)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockFin15)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub }}>{b.ecart >= 0 ? "+" : ""}{fmt(b.ecart)} L</td>
+                    <td>
+                      {b.photoUrls?.length > 0 ? (
+                        <div style={{ display: "flex", gap: 3 }}>
+                          {b.photoUrls.slice(0, 3).map((url, i) => (
+                            <a key={i} href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt="" style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} /></a>
+                          ))}
+                          {b.photoUrls.length > 3 && <span style={{ fontSize: 11, color: C.sub }}>+{b.photoUrls.length - 3}</span>}
+                        </div>
+                      ) : <span style={{ color: C.sub, fontSize: 11 }}>—</span>}
+                    </td>
+                    {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteBilan(b)} /></td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
           {history.length > 0 && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="somip-btn somip-btn-primary" onClick={doPdf}><Download size={14} /> Export PDF</button>
-              <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint</button>
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={history.map((b) => ({ periode: b.periodKey, Réception: b.reception15, Ventes: b.ventes15, "Stock fin": b.stockFin15 }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
+                  <XAxis dataKey="periode" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
+                  <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
+                  <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="Réception" fill={C.success} radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="Ventes" fill={C.orange} radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="Stock fin" fill={C.blue} radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
             </div>
           )}
         </div>
-        <div style={{ overflowX: "auto", marginBottom: 20 }}>
+      </div>
+
+      <div className="somip-panel" style={{ padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Tous les sites — export combiné</h3>
+          {allSitesRows.length > 0 && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="somip-btn somip-btn-primary" onClick={doAllSitesPdf}><Download size={14} /> Export PDF</button>
+              <button className="somip-btn somip-btn-primary" onClick={doAllSitesPptx}><Download size={14} /> Export PowerPoint</button>
+            </div>
+          )}
+        </div>
+        <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className={`somip-tab ${allPeriodType === "mensuel" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("mensuel")}>Mensuel</button>
+            <button className={`somip-tab ${allPeriodType === "decadaire" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("decadaire")}>Décadaire</button>
+            <button className={`somip-tab ${allPeriodType === "trimestriel" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("trimestriel")}>Trimestriel</button>
+          </div>
+          {allPeriodType === "mensuel" && <Field label="Mois"><input type="month" className="somip-input" value={allMonthKey} onChange={(e) => setAllMonthKey(e.target.value)} /></Field>}
+          {allPeriodType === "decadaire" && (
+            <>
+              <Field label="Mois"><input type="month" className="somip-input" value={allDecadeMonth} onChange={(e) => setAllDecadeMonth(e.target.value)} /></Field>
+              <Field label="Décade">
+                <select className="somip-select" value={allDecadeNum} onChange={(e) => setAllDecadeNum(Number(e.target.value))}>
+                  <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
+                </select>
+              </Field>
+            </>
+          )}
+          {allPeriodType === "trimestriel" && (
+            <>
+              <Field label="Année"><input type="number" className="somip-input" style={{ maxWidth: 110 }} value={allYear} onChange={(e) => setAllYear(Number(e.target.value))} /></Field>
+              <Field label="Trimestre">
+                <select className="somip-select" value={allQuarter} onChange={(e) => setAllQuarter(Number(e.target.value))}>
+                  <option value={1}>T1</option><option value={2}>T2</option><option value={3}>T3</option><option value={4}>T4</option>
+                </select>
+              </Field>
+            </>
+          )}
+        </div>
+        <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
+            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th></tr></thead>
             <tbody>
-              {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré." />}
-              {history.map((b) => (
-                <tr key={b.id}>
-                  <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{fmt(b.reception15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.ventes15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockFin15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub }}>{b.ecart >= 0 ? "+" : ""}{fmt(b.ecart)} L</td>
-                  <td>
-                    {b.photoUrls?.length > 0 ? (
-                      <div style={{ display: "flex", gap: 3 }}>
-                        {b.photoUrls.slice(0, 3).map((url, i) => (
-                          <a key={i} href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt="" style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} /></a>
-                        ))}
-                        {b.photoUrls.length > 3 && <span style={{ fontSize: 11, color: C.sub }}>+{b.photoUrls.length - 3}</span>}
-                      </div>
-                    ) : <span style={{ color: C.sub, fontSize: 11 }}>—</span>}
-                  </td>
-                  {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteBilan(b)} /></td>}
+              {allSitesRows.length === 0 && <EmptyRow colSpan={8} text="Aucun site n'a de Bilan Matières saisi pour cette période." />}
+              {allSitesRows.map((r) => (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.reception15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.ventes15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.transferts15 >= 0 ? "+" : ""}{fmt(r.transferts15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockFin15)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>{r.ecart >= 0 ? "+" : ""}{fmt(r.ecart)} L</td>
                 </tr>
               ))}
+              {allSitesRows.length > 0 && (
+                <tr>
+                  <td style={{ fontWeight: 700 }}>TOTAL</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockDebut, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(allSitesRows.reduce((a, r) => a + r.reception15, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.ventes15, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.transferts15, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockTheorique, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockFin15, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.ecart, 0))} L</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
-
-        {history.length > 0 && (
-          <div style={{ height: 280 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={history.map((b) => ({ periode: b.periodKey, Réception: b.reception15, Ventes: b.ventes15, "Stock fin": b.stockFin15 }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
-                <XAxis dataKey="periode" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
-                <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="Réception" fill={C.success} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Ventes" fill={C.orange} radius={[4, 4, 0, 0]} />
-                <Bar dataKey="Stock fin" fill={C.blue} radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Stock théorique = Stock début (= Stock fin de la période précédente) + Réception − Ventes ± Transferts. Toutes les valeurs sont à saisir déjà corrigées à 15°C.
+          Rassemble la saisie de chaque site pour la période choisie ci-dessus (indépendante de celle du panneau de saisie). Un site sans saisie pour cette période n'apparaît pas dans le tableau. Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts.
         </p>
       </div>
     </div>
