@@ -363,19 +363,20 @@ function PhotoPicker({ files, setFiles, existingUrls, onRemoveExisting }) {
 
 // Export PowerPoint du Bilan Matières : titre, tableau, diagramme natif (modifiable dans
 // PowerPoint), et une diapositive photos pour chaque période qui en possède.
-async function exportBilanToPptx(history, periodType) {
+async function exportBilanToPptx(history, periodType, siteName) {
   const pptx = new pptxgen();
   pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
   pptx.layout = "SOMIP";
   const BLUE = "0071BD", ORANGE = "F16B16", INK = "1A2733", SUB = "5A6470";
+  const PERIOD_LABEL = { mensuel: "Synthèse mensuelle", trimestriel: "Synthèse trimestrielle", decadaire: "Synthèse décadaire" };
 
   // Diapositive de titre.
   const s1 = pptx.addSlide();
   s1.background = { color: "FFFFFF" };
   s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
   s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
-  s1.addText("SOMIP — Bilan Matières", { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 28, bold: true, color: BLUE });
-  s1.addText(periodType === "mensuel" ? "Synthèse mensuelle" : "Synthèse trimestrielle", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
+  s1.addText(`SOMIP — Bilan Matières${siteName ? ` — ${siteName}` : ""}`, { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 26, bold: true, color: BLUE });
+  s1.addText(PERIOD_LABEL[periodType] || "Synthèse", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
   s1.addText(`Édité le ${new Date().toLocaleDateString("fr-FR")}`, { x: 0.5, y: 3.2, w: 9, h: 0.4, fontSize: 11, color: SUB });
 
   // Diapositive tableau.
@@ -426,7 +427,7 @@ async function exportBilanToPptx(history, periodType) {
     }
   }
 
-  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_${periodType}_${new Date().toISOString().slice(0, 10)}.pptx` });
+  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_${siteName ? siteName.replace(/\s+/g, "") + "_" : ""}${periodType}_${new Date().toISOString().slice(0, 10)}.pptx` });
 }
 
 function ReportHeader({ title, period }) {
@@ -465,6 +466,7 @@ function ReportToolbar({ onExcel, onPrint, onPdf }) {
 /* ------------------------------------------------------------------ */
 const ROLE_VALUES = ["superviseur", "operateur", "chauffeur", "lecture"];
 const ROLE_LABELS = { superviseur: "Superviseur", operateur: "Opérateur", chauffeur: "Chauffeur", lecture: "Lecture" };
+const PERIOD_TYPE_LABELS = { mensuel: "Mensuel", trimestriel: "Trimestriel", decadaire: "Décadaire" };
 // canManage : sites, utilisateurs, réglages, modification/suppression, historique.
 // canWrite  : peut ajouter des réceptions/sorties/inventaires (saisie).
 function permsFor(role) {
@@ -530,12 +532,12 @@ const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
 
 const rowToBilan = (r) => ({
-  id: r.id, periodType: r.period_type, periodKey: r.period_key,
+  id: r.id, siteId: r.site_id, periodType: r.period_type, periodKey: r.period_key,
   reception15: Number(r.reception15), ventes15: Number(r.ventes15), transferts15: Number(r.transferts15), stockFin15: Number(r.stock_fin15),
   commentaire: r.commentaire || "", photoUrls: r.photo_urls || [], createdBy: r.created_by, createdAt: r.created_at,
 });
 const bilanToRow = (b) => ({
-  period_type: b.periodType, period_key: b.periodKey,
+  site_id: b.siteId, period_type: b.periodType, period_key: b.periodKey,
   reception15: b.reception15, ventes15: b.ventes15, transferts15: b.transferts15, stock_fin15: b.stockFin15,
   commentaire: b.commentaire ?? null, photo_urls: b.photoUrls || [], created_by: b.createdBy ?? null,
 });
@@ -1042,19 +1044,19 @@ export default function App() {
   });
 
   /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
-  const saveBilan = ({ periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
-    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${periodType}`) : [];
+  const saveBilan = ({ siteId, periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
+    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${siteId}/${periodType}`) : [];
     const photoUrls = [...existingPhotoUrls, ...newUrls];
-    const row = bilanToRow({ periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
-    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "period_type,period_key" }).select().maybeSingle();
+    const row = bilanToRow({ siteId, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
+    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "site_id,period_type,period_key" }).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
     const saved = rowToBilan(data);
     setBilans((prev) => {
-      const exists = prev.some((b) => b.periodType === periodType && b.periodKey === periodKey);
-      return exists ? prev.map((b) => (b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
+      const exists = prev.some((b) => b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey);
+      return exists ? prev.map((b) => (b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
     });
-    appendAudit("Bilan Matières", `${periodType === "mensuel" ? "Mensuel" : "Trimestriel"} ${periodKey}`);
+    appendAudit("Bilan Matières", `${sites.find((s) => s.id === siteId)?.name || siteId} — ${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
     flash("Bilan Matières enregistré.");
   });
   const deleteBilan = (bilan) => withSync(async () => {
@@ -2742,10 +2744,11 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     { id: "synthese_mensuelle_site_15", label: "Synthèse journalière du mois — 15°C" },
     { id: "synthese_mensuelle_lub", label: "Synthèse journalière du mois — Lubrifiants" },
     { id: "synthese_station_jour", label: "Synthèse journalière — Station (site + camion)" },
-    { id: "exposition", label: "Exposition" },
-    { id: "bons", label: "Bons de livraison" },
-    { id: "bilan", label: "Bilan Matières" },
-  ];
+    { id: "exposition", label: "Exposition", superviseurOnly: true },
+    { id: "bons", label: "Bons de livraison", superviseurOnly: true },
+    { id: "bilan", label: "Bilan Matières", superviseurOnly: true },
+  ].filter((t) => !t.superviseurOnly || canManage);
+  useEffect(() => { if (!TABS.some((t) => t.id === tab)) setTab(TABS[0]?.id || "synthese_mensuelle_site"); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="somip-fade">
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
@@ -2757,9 +2760,9 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
       {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
-      {tab === "exposition" && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} />}
-      {tab === "bons" && <DeliveryNotesReport sites={sites} movements={movements} />}
-      {tab === "bilan" && <BilanMatieresView bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
+      {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
+      {tab === "bilan" && canManage && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
     </div>
   );
 }
@@ -4003,18 +4006,24 @@ function MiniStat({ label, value, color, bold }) {
 
 /* ---- Registre des bons de livraison ---- */
 /* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
-function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
+function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage }) {
+  const fixedSites = sites.filter((s) => !s.isMobile);
+  const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [periodType, setPeriodType] = useState("mensuel");
   const [monthKey, setMonthKey] = useState(currentMonth());
   const [year, setYear] = useState(new Date().getFullYear());
   const [quarter, setQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
-  const periodKey = periodType === "mensuel" ? monthKey : `${year}-Q${quarter}`;
+  const [decadeMonth, setDecadeMonth] = useState(currentMonth());
+  const [decadeNum, setDecadeNum] = useState(1);
+  const periodKey = periodType === "mensuel" ? monthKey : periodType === "trimestriel" ? `${year}-Q${quarter}` : `${decadeMonth}-D${decadeNum}`;
+  const site = sites.find((s) => s.id === siteId);
 
-  const [form, setForm] = useState({ reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" });
+  const emptyForm = { reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" };
+  const [form, setForm] = useState(emptyForm);
   const [photoFiles, setPhotoFiles] = useState([]);
   const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
 
-  const sorted = [...bilans].filter((b) => b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
+  const sorted = [...bilans].filter((b) => b.siteId === siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
   const existing = sorted.find((b) => b.periodKey === periodKey);
   const idx = sorted.findIndex((b) => b.periodKey === periodKey);
   const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
@@ -4027,11 +4036,12 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
   const stockTheorique = stockDebut + receptionN - ventesN + transfertsN;
   const ecart = form.stockFin15 !== "" ? stockFinN - stockTheorique : null;
 
+  const resetForm = () => { setForm(emptyForm); setPhotoFiles([]); setExistingPhotoUrls([]); };
+
   const submit = () => {
-    if (form.stockFin15 === "") return;
-    saveBilan({ periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
-    setForm({ reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" });
-    setPhotoFiles([]); setExistingPhotoUrls([]);
+    if (form.stockFin15 === "" || !siteId) return;
+    saveBilan({ siteId, periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
+    resetForm();
   };
 
   const loadForEdit = (b) => {
@@ -4049,20 +4059,39 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
     return { ...b, stockDebut: debut, stockTheorique: theorique, ecart: ec };
   });
 
-  const doPptx = () => exportBilanToPptx(history, periodType);
+  const doPptx = () => exportBilanToPptx(history, periodType, site?.name);
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canManage && (
         <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
           <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
+          <Field label="Site">
+            <select className="somip-select" value={siteId} onChange={(e) => { setSiteId(e.target.value); resetForm(); }}>
+              {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </Field>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
-            <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
+            <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
+            <button className={`somip-tab ${periodType === "decadaire" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("decadaire")}>Décadaire</button>
+            <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
           </div>
-          {periodType === "mensuel" ? (
+          {periodType === "mensuel" && (
             <Field label="Mois"><input type="month" className="somip-input" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} /></Field>
-          ) : (
+          )}
+          {periodType === "decadaire" && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><Field label="Mois"><input type="month" className="somip-input" value={decadeMonth} onChange={(e) => setDecadeMonth(e.target.value)} /></Field></div>
+              <div style={{ flex: 1 }}>
+                <Field label="Décade">
+                  <select className="somip-select" value={decadeNum} onChange={(e) => setDecadeNum(Number(e.target.value))}>
+                    <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
+                  </select>
+                </Field>
+              </div>
+            </div>
+          )}
+          {periodType === "trimestriel" && (
             <div style={{ display: "flex", gap: 8 }}>
               <div style={{ flex: 1 }}><Field label="Année"><input type="number" className="somip-input" value={year} onChange={(e) => setYear(Number(e.target.value))} /></Field></div>
               <div style={{ flex: 1 }}>
@@ -4083,12 +4112,12 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
           )}
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente)</span>
+            <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente — {site?.name})</span>
             <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
           </div>
 
-          <Field label="Réception globale à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
-          <Field label="Ventes globales à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
+          <Field label="Réception à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
+          <Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
           <Field label="Transferts entre sites à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field>
 
           <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
@@ -4096,7 +4125,7 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
             <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
           </div>
 
-          <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge globale" /></Field>
+          <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field>
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
           <Field label="Photos justificatives (optionnel)">
             <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
@@ -4109,15 +4138,18 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
             </div>
           )}
 
-          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === ""}>
-            <Plus size={15} /> Enregistrer le Bilan
-          </button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === ""}>
+              <Plus size={15} /> Enregistrer
+            </button>
+            <button className="somip-btn somip-btn-secondary" onClick={resetForm}><X size={15} /> Annuler</button>
+          </div>
         </div>
       )}
 
       <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {periodType === "mensuel" ? "Mensuel" : "Trimestriel"}</h3>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {site?.name} — {PERIOD_TYPE_LABELS[periodType]}</h3>
           {history.length > 0 && (
             <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint</button>
           )}
@@ -4126,7 +4158,7 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
           <table className="somip-table">
             <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
             <tbody>
-              {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré." />}
+              {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré pour ce site." />}
               {history.map((b) => (
                 <tr key={b.id}>
                   <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
@@ -4171,7 +4203,7 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
           </div>
         )}
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Stock théorique = Stock début (= Stock fin de la période précédente) + Réception − Ventes ± Transferts. Toutes les valeurs sont à saisir déjà corrigées à 15°C.
+          Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts. Toutes les valeurs sont à saisir déjà corrigées à 15°C.
         </p>
       </div>
     </div>
