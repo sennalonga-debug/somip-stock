@@ -3,11 +3,12 @@ import {
   LayoutDashboard, Factory, ArrowDownCircle, ArrowUpCircle, ClipboardList,
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
-  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu,
+  FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import pptxgen from "pptxgenjs";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine, Legend,
 } from "recharts";
@@ -313,6 +314,121 @@ function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
   doc.save(filename);
 }
 
+// Envoie une ou plusieurs photos vers Supabase Storage (bucket "somip-photos") et renvoie
+// leurs URLs publiques. Utilisé pour justifier une perte (Stock fin) ou illustrer un Bilan Matières.
+async function uploadPhotos(files, folder) {
+  const urls = [];
+  for (const file of files) {
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+    const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error } = await supabase.storage.from("somip-photos").upload(path, file, { cacheControl: "3600", upsert: false });
+    if (error) throw new Error(`Échec de l'envoi de la photo "${file.name}" : ${error.message}`);
+    const { data } = supabase.storage.from("somip-photos").getPublicUrl(path);
+    urls.push(data.publicUrl);
+  }
+  return urls;
+}
+
+// Petit sélecteur de photos réutilisable : aperçus en miniature + bouton de suppression avant envoi.
+function PhotoPicker({ files, setFiles, existingUrls, onRemoveExisting }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <label className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", cursor: "pointer", display: "inline-flex" }}>
+        <ImagePlus size={14} /> Ajouter des photos
+        <input type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => setFiles((prev) => [...prev, ...Array.from(e.target.files || [])])} />
+      </label>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+        {(existingUrls || []).map((url, i) => (
+          <div key={`existing-${i}`} style={{ position: "relative" }}>
+            <img src={url} alt="" style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 6, border: `1px solid ${C.border}` }} />
+            {onRemoveExisting && (
+              <button onClick={() => onRemoveExisting(i)} style={{ position: "absolute", top: -6, right: -6, background: C.danger, border: "none", borderRadius: "50%", width: 18, height: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <X size={11} color="#fff" />
+              </button>
+            )}
+          </div>
+        ))}
+        {files.map((f, i) => (
+          <div key={`new-${i}`} style={{ position: "relative" }}>
+            <img src={URL.createObjectURL(f)} alt="" style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 6, border: `1px solid ${C.blue}` }} />
+            <button onClick={() => setFiles((prev) => prev.filter((_, idx) => idx !== i))} style={{ position: "absolute", top: -6, right: -6, background: C.danger, border: "none", borderRadius: "50%", width: 18, height: 18, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <X size={11} color="#fff" />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Export PowerPoint du Bilan Matières : titre, tableau, diagramme natif (modifiable dans
+// PowerPoint), et une diapositive photos pour chaque période qui en possède.
+async function exportBilanToPptx(history, periodType) {
+  const pptx = new pptxgen();
+  pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
+  pptx.layout = "SOMIP";
+  const BLUE = "0071BD", ORANGE = "F16B16", INK = "1A2733", SUB = "5A6470";
+
+  // Diapositive de titre.
+  const s1 = pptx.addSlide();
+  s1.background = { color: "FFFFFF" };
+  s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
+  s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
+  s1.addText("SOMIP — Bilan Matières", { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 28, bold: true, color: BLUE });
+  s1.addText(periodType === "mensuel" ? "Synthèse mensuelle" : "Synthèse trimestrielle", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
+  s1.addText(`Édité le ${new Date().toLocaleDateString("fr-FR")}`, { x: 0.5, y: 3.2, w: 9, h: 0.4, fontSize: 11, color: SUB });
+
+  // Diapositive tableau.
+  const s2 = pptx.addSlide();
+  s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
+  s2.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
+  s2.addText("Historique des périodes", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
+  const header = ["Période", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"].map((t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: BLUE }, fontSize: 9 } }));
+  const rows = [header, ...history.map((b) => [
+    String(b.periodKey), `${fmt(b.stockDebut)} L`, `+${fmt(b.reception15)} L`, `${fmt(b.ventes15)} L`,
+    `${b.transferts15 >= 0 ? "+" : ""}${fmt(b.transferts15)} L`, `${fmt(b.stockTheorique)} L`, `${fmt(b.stockFin15)} L`,
+    { text: `${b.ecart >= 0 ? "+" : ""}${fmt(b.ecart)} L`, options: { color: b.ecart < 0 ? "D64545" : b.ecart > 0 ? "2E9B5C" : INK, bold: true } },
+  ].map((c) => (typeof c === "string" ? { text: c, options: { fontSize: 9, color: INK } } : c)))];
+  s2.addTable(rows, { x: 0.4, y: 0.8, w: 9.2, autoPage: true, border: { type: "solid", color: "E2E6E9", pt: 0.5 }, fontFace: "Arial" });
+
+  // Diapositive diagramme (natif PowerPoint, modifiable).
+  if (history.length > 0) {
+    const s3 = pptx.addSlide();
+    s3.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
+    s3.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
+    s3.addText("Évolution des volumes", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
+    const labels = history.map((b) => String(b.periodKey));
+    const chartData = [
+      { name: "Réception", labels, values: history.map((b) => b.reception15) },
+      { name: "Ventes", labels, values: history.map((b) => b.ventes15) },
+      { name: "Stock fin", labels, values: history.map((b) => b.stockFin15) },
+    ];
+    s3.addChart(pptx.ChartType.bar, chartData, {
+      x: 0.4, y: 0.9, w: 9.2, h: 4.3, barDir: "col",
+      chartColors: [BLUE, ORANGE, "2E9B5C"], showLegend: true, legendPos: "b",
+      showValue: false, catAxisLabelFontSize: 9, valAxisLabelFontSize: 9,
+    });
+  }
+
+  // Diapositives photos, pour chaque période qui en possède.
+  for (const b of history) {
+    if (!b.photoUrls || b.photoUrls.length === 0) continue;
+    const s = pptx.addSlide();
+    s.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
+    s.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
+    s.addText(`Photos justificatives — ${b.periodKey}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 16, bold: true, color: INK });
+    if (b.commentaire) s.addText(b.commentaire, { x: 0.4, y: 0.65, w: 9.2, h: 0.35, fontSize: 10, color: SUB, italic: true });
+    const positions = [{ x: 0.4, y: 1.1 }, { x: 3.55, y: 1.1 }, { x: 6.7, y: 1.1 }, { x: 0.4, y: 3.4 }, { x: 3.55, y: 3.4 }, { x: 6.7, y: 3.4 }];
+    for (let i = 0; i < Math.min(b.photoUrls.length, 6); i++) {
+      try {
+        s.addImage({ path: b.photoUrls[i], x: positions[i].x, y: positions[i].y, w: 3, h: 2.1, sizing: { type: "cover", w: 3, h: 2.1 } });
+      } catch (e) { /* une image indisponible ne doit pas bloquer tout l'export */ }
+    }
+  }
+
+  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_${periodType}_${new Date().toISOString().slice(0, 10)}.pptx` });
+}
+
 function ReportHeader({ title, period }) {
   return (
     <div className="somip-print-only" style={{ marginBottom: 16 }}>
@@ -395,7 +511,7 @@ const rowToInventaire = (r) => ({
   ecart: Number(r.ecart), ecartPermille: Number(r.ecart_permille), nature: r.nature, tauxFreinte: Number(r.taux_freinte),
   objectifUtilise: numOrUndef(r.objectif_utilise), conformite: r.conformite, adjustmentId: r.adjustment_id,
   temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee), densite15: numOrUndef(r.densite15),
-  vcf: numOrUndef(r.vcf), stockPhysique15: numOrUndef(r.stock_physique15), createdBy: r.created_by, createdAt: r.created_at,
+  vcf: numOrUndef(r.vcf), stockPhysique15: numOrUndef(r.stock_physique15), photoUrls: r.photo_urls || [], createdBy: r.created_by, createdAt: r.created_at,
 });
 const inventaireToRow = (i) => ({
   site_id: i.siteId, date: i.date, stock_physique: i.stockPhysique, commentaire: i.commentaire ?? null,
@@ -404,7 +520,7 @@ const inventaireToRow = (i) => ({
   stock_theorique: i.stockTheorique ?? null, stock_physique_used: i.stockPhysiqueUsed ?? null, ecart: i.ecart, ecart_permille: i.ecartPermille,
   nature: i.nature, taux_freinte: i.tauxFreinte, objectif_utilise: i.objectifUtilise ?? null, conformite: i.conformite,
   adjustment_id: i.adjustmentId ?? null, temperature_c: i.temperatureC ?? null, densite_observee: i.densiteObservee ?? null,
-  densite15: i.densite15 ?? null, vcf: i.vcf ?? null, stock_physique15: i.stockPhysique15 ?? null, created_by: i.createdBy ?? null,
+  densite15: i.densite15 ?? null, vcf: i.vcf ?? null, stock_physique15: i.stockPhysique15 ?? null, photo_urls: i.photoUrls || [], created_by: i.createdBy ?? null,
 });
 
 const rowToProductStock = (r) => ({ id: r.id, siteId: r.site_id, product: r.product, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial) });
@@ -416,12 +532,12 @@ const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
 const rowToBilan = (r) => ({
   id: r.id, periodType: r.period_type, periodKey: r.period_key,
   reception15: Number(r.reception15), ventes15: Number(r.ventes15), transferts15: Number(r.transferts15), stockFin15: Number(r.stock_fin15),
-  commentaire: r.commentaire || "", createdBy: r.created_by, createdAt: r.created_at,
+  commentaire: r.commentaire || "", photoUrls: r.photo_urls || [], createdBy: r.created_by, createdAt: r.created_at,
 });
 const bilanToRow = (b) => ({
   period_type: b.periodType, period_key: b.periodKey,
   reception15: b.reception15, ventes15: b.ventes15, transferts15: b.transferts15, stock_fin15: b.stockFin15,
-  commentaire: b.commentaire ?? null, created_by: b.createdBy ?? null,
+  commentaire: b.commentaire ?? null, photo_urls: b.photoUrls || [], created_by: b.createdBy ?? null,
 });
 
 const rowToAssignment = (r) => ({ id: r.id, truckId: r.truck_id, stationId: r.station_id, startDate: r.start_date, endDate: r.end_date || null });
@@ -926,8 +1042,10 @@ export default function App() {
   });
 
   /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
-  const saveBilan = ({ periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire }) => withSync(async () => {
-    const row = bilanToRow({ periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, createdBy: currentUserName });
+  const saveBilan = ({ periodType, periodKey, reception15, ventes15, transferts15, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
+    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${periodType}`) : [];
+    const photoUrls = [...existingPhotoUrls, ...newUrls];
+    const row = bilanToRow({ periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
     const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "period_type,period_key" }).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
@@ -1025,7 +1143,7 @@ export default function App() {
   });
 
   /* ---- mutations : inventaires ---- */
-  const addInventaire = ({ siteId, product = "gasoil", date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15 }) => withSync(async () => {
+  const addInventaire = ({ siteId, product = "gasoil", date, stockPhysique, commentaire, temperatureC, densiteObservee, densite15, vcf, stockPhysique15, photoFiles = [] }) => withSync(async () => {
     // Le Stock théorique reste toujours un calcul PUR (Réceptions + Retours − Ventes), jamais
     // recalé automatiquement par l'écart mesuré : aucun mouvement "Ajustement" n'est créé ici.
     // Le Gain/Perte (physique − théorique) est uniquement enregistré et affiché, sans jamais
@@ -1039,13 +1157,14 @@ export default function App() {
     const cls = classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
     const has15 = stockPhysique15 !== undefined;
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
+    const photoUrls = photoFiles.length ? await uploadPhotos(photoFiles, `inventaires/${siteId}`) : [];
     const invDraft = {
       siteId, product, date, stockPhysique, commentaire, basisEcart,
       stockTheoriqueAmbiant: theoriqueAmbiant, stockTheorique15: theorique15,
       stockTheorique: theoriqueUsed, stockPhysiqueUsed: physiqueUsed,
       ecart: cls.ecartL, ecartPermille: cls.ecartPermille, nature: cls.nature,
       tauxFreinte: cls.tauxFreinte, objectifUtilise: cls.objectif, conformite: cls.conformite,
-      adjustmentId: null, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
+      adjustmentId: null, photoUrls, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
     };
     const { data: dataI, error: e2 } = await supabase.from("inventaires").insert(inventaireToRow(invDraft)).select().maybeSingle();
     if (e2) throw e2;
@@ -1628,6 +1747,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [densite, setDensite] = useState("");
   const [stockFinMesure, setStockFinMesure] = useState("");
   const [commentaireInv, setCommentaireInv] = useState("");
+  const [stockFinPhotos, setStockFinPhotos] = useState([]);
   const [stockDebutConfirm, setStockDebutConfirm] = useState("");
 
   const truckSites = sites.filter((s) => s.isMobile);
@@ -1713,7 +1833,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
     setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]);
     setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
-    setStockFinMesure(""); setCommentaireInv("");
+    setStockFinMesure(""); setCommentaireInv(""); setStockFinPhotos([]);
   };
 
   const [submitting, setSubmitting] = useState(false);
@@ -1781,7 +1901,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         const invExtra = vcfFin
           ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
           : {};
-        const okInv = await addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, ...invExtra });
+        const okInv = await addInventaire({ siteId, product, date, stockPhysique: stockFinN, commentaire: commentaireInv, photoFiles: stockFinPhotos, ...invExtra });
         if (!okInv) return;
       }
       resetDayFields();
@@ -2059,6 +2179,9 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           <Field label={`Stock fin mesuré (L, obligatoire)`}><input type="number" className="somip-input" value={stockFinMesure} onChange={(e) => setStockFinMesure(e.target.value)} placeholder="Lecture directe de la jauge" /></Field>
           {isLub && stockFinMesure !== "" && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(stockFinN * lubDensite)} kg</p>}
           <Field label="Commentaire inventaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaireInv} onChange={(e) => setCommentaireInv(e.target.value)} /></Field>
+          <Field label="Photos justificatives (perte, déversement, éclatement de filtre...)">
+            <PhotoPicker files={stockFinPhotos} setFiles={setStockFinPhotos} />
+          </Field>
 
           {preview && (
             <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
@@ -2113,7 +2236,16 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             {existingInv && (
               <tr>
                 <td><Badge color={C.blue}>Stock fin</Badge></td>
-                <td style={{ color: C.sub }}>Jauge mesurée{existingInv.commentaire ? ` — ${existingInv.commentaire}` : ""}</td>
+                <td style={{ color: C.sub }}>
+                  Jauge mesurée{existingInv.commentaire ? ` — ${existingInv.commentaire}` : ""}
+                  {existingInv.photoUrls?.length > 0 && (
+                    <div style={{ display: "flex", gap: 4, marginTop: 4 }}>
+                      {existingInv.photoUrls.map((url, i) => (
+                        <a key={i} href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt="" style={{ width: 32, height: 32, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} /></a>
+                      ))}
+                    </div>
+                  )}
+                </td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(existingInv.stockPhysique)} L</td>
                 {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaire(existingInv)} /></td>}
               </tr>
@@ -3879,6 +4011,8 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
   const periodKey = periodType === "mensuel" ? monthKey : `${year}-Q${quarter}`;
 
   const [form, setForm] = useState({ reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" });
+  const [photoFiles, setPhotoFiles] = useState([]);
+  const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
 
   const sorted = [...bilans].filter((b) => b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
   const existing = sorted.find((b) => b.periodKey === periodKey);
@@ -3895,12 +4029,15 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
 
   const submit = () => {
     if (form.stockFin15 === "") return;
-    saveBilan({ periodType, periodKey, ...form });
+    saveBilan({ periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
     setForm({ reception15: "", ventes15: "", transferts15: "", stockFin15: "", commentaire: "" });
+    setPhotoFiles([]); setExistingPhotoUrls([]);
   };
 
   const loadForEdit = (b) => {
     setForm({ reception15: String(b.reception15), ventes15: String(b.ventes15), transferts15: String(b.transferts15), stockFin15: String(b.stockFin15), commentaire: b.commentaire || "" });
+    setExistingPhotoUrls(b.photoUrls || []);
+    setPhotoFiles([]);
   };
 
   // Historique enrichi pour le tableau + le diagramme.
@@ -3911,6 +4048,8 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
     const ec = b.stockFin15 - theorique;
     return { ...b, stockDebut: debut, stockTheorique: theorique, ecart: ec };
   });
+
+  const doPptx = () => exportBilanToPptx(history, periodType);
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -3959,6 +4098,9 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
 
           <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge globale" /></Field>
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
+          <Field label="Photos justificatives (optionnel)">
+            <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
+          </Field>
 
           {ecart !== null && (
             <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5, display: "flex", justifyContent: "space-between" }}>
@@ -3974,12 +4116,17 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
       )}
 
       <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Historique — {periodType === "mensuel" ? "Mensuel" : "Trimestriel"}</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {periodType === "mensuel" ? "Mensuel" : "Trimestriel"}</h3>
+          {history.length > 0 && (
+            <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint</button>
+          )}
+        </div>
         <div style={{ overflowX: "auto", marginBottom: 20 }}>
           <table className="somip-table">
-            <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th>{canManage && <th></th>}</tr></thead>
+            <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
             <tbody>
-              {history.length === 0 && <EmptyRow colSpan={canManage ? 9 : 8} text="Aucun Bilan Matières enregistré." />}
+              {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré." />}
               {history.map((b) => (
                 <tr key={b.id}>
                   <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
@@ -3990,6 +4137,16 @@ function BilanMatieresView({ bilans, saveBilan, deleteBilan, canManage }) {
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockTheorique)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockFin15)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub }}>{b.ecart >= 0 ? "+" : ""}{fmt(b.ecart)} L</td>
+                  <td>
+                    {b.photoUrls?.length > 0 ? (
+                      <div style={{ display: "flex", gap: 3 }}>
+                        {b.photoUrls.slice(0, 3).map((url, i) => (
+                          <a key={i} href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt="" style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} /></a>
+                        ))}
+                        {b.photoUrls.length > 3 && <span style={{ fontSize: 11, color: C.sub }}>+{b.photoUrls.length - 3}</span>}
+                      </div>
+                    ) : <span style={{ color: C.sub, fontSize: 11 }}>—</span>}
+                  </td>
                   {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteBilan(b)} /></td>}
                 </tr>
               ))}
@@ -4471,3 +4628,4 @@ function HistoryView({ audit }) {
     </div>
   );
 }
+
