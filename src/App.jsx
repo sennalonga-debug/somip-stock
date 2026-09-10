@@ -1986,7 +1986,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   // Sur un camion, le retour cuve passe par le même compteur que les ventes : l'index mesure le
   // flux total (vente terrain + retour cuve confondus), le retour cuve doit donc être déduit de
   // la vente réelle plutôt que soustrait une seconde fois du stock.
-  const retourCuveValid = !isMobileSite || retourCuveTruckN <= sortieQty;
+  // Le retour cuve peut être saisi séparément de l'index (un compteur à la fois) : pas de
+  // comparaison avec sortieQty de cette session précise, qui pourrait être vide ce jour-là.
   const venteTruck = isMobileSite ? Math.max(0, sortieQty - retourCuveTruckN) : sortieQty;
   const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty;
   const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date, inventaires) : 0;
@@ -2017,7 +2018,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
 
   const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
   const stockFinConflict = stockFinMesure !== "" && !!existingInv;
-  const canSubmit = sortieValid && chargementsValid && retourCuveValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
+  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
     setReceptions([{ quantite: "", ref: "" }]);
@@ -2055,7 +2056,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
       if (sortieQty > 0) {
         const compteurField = meters.length > 1 ? compteur : undefined;
         if (isLub || isMobileSite) {
-          const qty = isMobileSite ? venteTruck : sortieQty;
+          // La "Sortie" enregistre toujours le flux COMPLET du compteur (jamais réduit par le
+          // retour cuve) : Sortie et Retour cuve peuvent être saisis à des moments différents,
+          // donc on ne peut pas se fier à ce qui est rempli "en même temps". Le retour cuve est
+          // neutre pour le stock (delta 0, voir plus bas) — c'est lui qui s'ajuste, jamais la Sortie.
+          const qty = sortieQty;
           if (qty > 0) {
             const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: qty, delta: -qty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
             if (!ok) return;
@@ -2103,7 +2108,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         }
       }
       if (retourCuveTruckN > 0) {
-        const ok = await addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: -retourCuveTruckN, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
+        // Delta = 0 volontairement : le retour cuve passe par le même compteur que la Sortie,
+        // qui a déjà enregistré la totalité du flux (retour inclus). Ce mouvement sert seulement
+        // à distinguer, pour l'affichage et les rapports, quelle part de cette Sortie était un
+        // retour cuve plutôt qu'une vente terrain — sans jamais soustraire le stock une 2e fois.
+        const ok = await addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: 0, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
         if (!ok) return;
       }
       if (stockFinMesure !== "") {
@@ -2408,19 +2417,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                   Ce retour ({fmt(retourCuveTruckN)} L) concerne {stationSites.find((s) => s.id === retourCuveTruckNote)?.name}.
                 </p>
               )}
-              {!retourCuveValid && (
-                <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>
-                  Le retour cuve ({fmt(retourCuveTruckN)} L) dépasse le flux du compteur ({fmt(sortieQty)} L) — le retour passe par le même compteur que les ventes, il ne peut pas être plus grand.
-                </p>
-              )}
-              {sortieQty > 0 && retourCuveTruckN > 0 && retourCuveValid && (
+              {sortieQty > 0 && retourCuveTruckN > 0 && (
                 <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Sortie Fiche Terrain (calculée)</span>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>Vente terrain nette (indicatif — rapports)</span>
                     <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(venteTruck)} L</span>
                   </div>
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Retour cuve (inclus dans le compteur)</span>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>dont retour cuve (inclus dans le compteur)</span>
                     <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(retourCuveTruckN)} L</span>
                   </div>
                 </div>
@@ -3050,11 +3054,12 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
       const stockDebut = stockBeforeDate(site, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]);
+      const ventesRaw = sumQty(dayMovs, ["sortie"]); // flux total mesuré au compteur (camion : vente + retour cuve confondus)
       const chargementLaitiers = isTruck ? 0 : sumQty(dayMovs, ["sortie_camion"]);
       const retourCamions = isTruck ? 0 : sumQty(dayMovs, ["retour_camion"]);
       const retourCuve = isTruck ? sumQty(dayMovs, ["retour_cuve_camion"]) : 0;
-      const stockTheorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers - retourCuve;
+      const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw; // affichage : vente terrain nette
+      const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
       const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
@@ -3206,11 +3211,12 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
       const stockDebut = stockBeforeDate15(site, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty15(dayMovs, ["reception"]);
-      const ventes = sumQty15(dayMovs, ["sortie"]);
+      const ventesRaw = sumQty15(dayMovs, ["sortie"]);
       const chargementLaitiers = isTruck ? 0 : sumQty15(dayMovs, ["sortie_camion"]);
       const retourCamions = isTruck ? 0 : sumQty15(dayMovs, ["retour_camion"]);
       const retourCuve = isTruck ? sumQty15(dayMovs, ["retour_cuve_camion"]) : 0;
-      const stockTheorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers - retourCuve;
+      const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw;
+      const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
       const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
       const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
       const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
@@ -3733,7 +3739,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
       const truckIds = trucksAssignedAt(truckAssignments, s.id, d);
       for (const truckId of truckIds) {
         const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
-        ventesTrucks += sumQty(dayMovsTruck, ["sortie"]);
+        ventesTrucks += sumQty(dayMovsTruck, ["sortie"]) - sumQty(dayMovsTruck, ["retour_cuve_camion"]);
       }
       cur.setDate(cur.getDate() + 1);
     }
@@ -3846,7 +3852,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
     let ventesTrucks = 0;
     for (const truckId of trucksAssignedAt(truckAssignments, s.id, mvtDate)) {
       const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
-      ventesTrucks += sumQty(dayMovsTruck, ["sortie"]);
+      ventesTrucks += sumQty(dayMovsTruck, ["sortie"]) - sumQty(dayMovsTruck, ["retour_cuve_camion"]);
     }
     const ventes = ventesSite + ventesTrucks;
     // Dernier stock (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
@@ -4149,9 +4155,10 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
         const tStockDebut = stockBeforeDate(truck, movements, d, inventaires);
         const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
         const tChargement = sumQty(dayMovsTruck, ["reception"]);
-        const tSortieTerrain = sumQty(dayMovsTruck, ["sortie"]);
+        const tSortieTerrainRaw = sumQty(dayMovsTruck, ["sortie"]); // flux total mesuré (vente + retour cuve confondus)
         const tRetourCuve = sumQty(dayMovsTruck, ["retour_cuve_camion"]);
-        const tTheorique = tStockDebut + tChargement - tSortieTerrain - tRetourCuve;
+        const tSortieTerrain = Math.max(0, tSortieTerrainRaw - tRetourCuve); // affichage : vente terrain nette
+        const tTheorique = tStockDebut + tChargement - tSortieTerrainRaw;
         const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === d));
         trucksStockDebut += tStockDebut;
         trucksTheorique += tTheorique;
