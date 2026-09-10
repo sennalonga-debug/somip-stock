@@ -1598,12 +1598,33 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   [...inventaires].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((i) => { latestInventaireBySite[i.siteId] = i; });
   const horsObjectif = Object.values(latestInventaireBySite).filter((i) => i.conformite === "non_conforme").length;
 
+  // Alerte saisie manquante : à partir de 6h00, signale les sites fixes sans Stock fin saisi
+  // pour la veille (laisse la nuit/le petit matin pour rattraper la saisie sans fausse alerte).
+  const now = new Date();
+  const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = `${yesterday.getFullYear()}-${pad2(yesterday.getMonth() + 1)}-${pad2(yesterday.getDate())}`;
+  const missingSites = now.getHours() >= 6
+    ? sites.filter((s) => !s.isMobile).filter((s) => !inventaires.some((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === yesterdayStr))
+    : [];
+
   return (
     <div className="somip-fade">
       <p style={{ marginTop: -8, marginBottom: 14, fontSize: 13, color: C.sub }}>
         Vos données sont sauvegardées automatiquement et restent disponibles après fermeture ou actualisation de la page.
         Les capacités et stocks initiaux des sites restent des valeurs à vérifier/ajuster depuis la page Sites.
       </p>
+
+      {missingSites.length > 0 && (
+        <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, borderLeft: `3px solid ${C.danger}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <AlertTriangle size={16} color={C.danger} />
+            <strong style={{ fontSize: 13, color: C.ink }}>Saisie du {yesterdayStr} manquante</strong>
+          </div>
+          <p style={{ margin: 0, fontSize: 12.5, color: C.sub }}>
+            Stock fin non saisi pour : <strong style={{ color: C.ink }}>{missingSites.map((s) => s.name).join(", ")}</strong>.
+          </p>
+        </div>
+      )}
 
       {demoCount > 0 && canManage && (
         <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between", borderLeft: `3px solid ${C.warning}`, flexWrap: "wrap", gap: 10 }}>
@@ -3638,11 +3659,15 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
       cur.setDate(cur.getDate() + 1);
     }
     const ventesCumulees = ventesSite + ventesTrucks;
-    const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= bounds.end));
-    const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : null;
+    // Dernier stock (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
+    const jaugeADate = combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, bounds.end);
+    // Le Creux (demande d'approvisionnement) ne tient compte QUE de la capacité et du dernier
+    // stock du site lui-même — jamais des camions (ni leur stock, ni leur capacité).
+    const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= bounds.end));
+    const siteStockOnly = siteInv ? siteInv.stockPhysique : stockThroughDate(s, movements, bounds.end, inventaires);
     // Les camions ne livrent que par multiples de 5000 L (5000/15000/20000/35000) :
     // la demande d'approvisionnement est toujours arrondie à l'inférieur, au multiple de 5000 le plus proche.
-    const demandeAppro = jaugeADate !== null ? Math.floor(Math.max(0, s.capacity - jaugeADate) / 5000) * 5000 : null;
+    const demandeAppro = Math.floor(Math.max(0, s.capacity - siteStockOnly) / 5000) * 5000;
     return { site: s, ventesCumulees, jaugeADate, demandeAppro };
   });
   const totalVentes = rows.reduce((a, r) => a + r.ventesCumulees, 0);
@@ -3651,7 +3676,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
   const doExcel = () => exportToExcel(`SOMIP_Exposition_${month}_D${decadeNum}.xlsx`, [{
     name: "Exposition", rows: rows.map((r) => ({
       Site: r.site.name, "Ventes cumulées décade (L)": Math.round(r.ventesCumulees),
-      "Jauge à date (L)": r.jaugeADate !== null ? Math.round(r.jaugeADate) : "",
+      "Dernier stock (L)": r.jaugeADate !== null ? Math.round(r.jaugeADate) : "",
       "Demande d'approvisionnement (L)": r.demandeAppro !== null ? Math.round(r.demandeAppro) : "",
     })),
   }]);
@@ -3660,7 +3685,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
     filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
     title: "Exposition — Ventes cumulées & demande d'approvisionnement",
     period: `${bounds.label} — ${bounds.start} au ${bounds.end}`,
-    columns: ["Site", "Ventes cumulées (décade)", "Jauge à date", "Demande d'approvisionnement"],
+    columns: ["Site", "Ventes cumulées (décade)", "Dernier stock", "Demande d'approvisionnement"],
     rows: rows.map((r) => [
       `${r.site.name} (${r.site.code})`,
       `${fmt(r.ventesCumulees)} L`,
@@ -3696,7 +3721,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
             <thead>
               <tr>
                 <th>Site</th><th style={{ textAlign: "right" }}>Ventes cumulées (décade)</th>
-                <th style={{ textAlign: "right" }}>Jauge à date</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                <th style={{ textAlign: "right" }}>Dernier stock</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
             <tbody>
@@ -3718,7 +3743,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Ventes cumulées = somme des ventes (et sorties vers camion) de la décade sélectionnée. Jauge à date = dernière mesure physique connue à la fin de la décade. Demande d'approvisionnement = Capacité − Jauge à date, arrondie à l'inférieur au multiple de 5000 L (livraisons par camions de 5000/15000/20000/35000 L).
+          Ventes cumulées = ventes propres du site (hors chargements laitiers) + ventes du camion rattaché chaque jour de la décade (sur Prehomo/Okouma). Dernier stock = jauge mesurée à la fin de la décade (site + camion rattaché, pour Prehomo/Okouma). Demande d'approvisionnement = Capacité du site − dernier stock du site seul (jamais le camion), arrondie à l'inférieur au multiple de 5000 L (livraisons par camions de 5000/15000/20000/35000 L).
         </p>
       </div>
     </div>
@@ -3731,9 +3756,9 @@ const COMILOG_SITE_CODES = ["PRH", "OKM", "CIM", "CMM", "GTR"];
 function ExpositionComilogReport({ sites, movements, inventaires, truckAssignments }) {
   const [mvtDate, setMvtDate] = useState(todayStr());
   const [stockDate, setStockDate] = useState(todayStr());
-  const comilogSites = sites.filter((s) => COMILOG_SITE_CODES.includes(s.code));
+  const allFixedSites = sites.filter((s) => !s.isMobile);
 
-  const rows = comilogSites.map((s) => {
+  const rows = allFixedSites.map((s) => {
     // Ventes = ventes propres du site (hors chargements laitiers, transfert interne, pas une
     // vente) + les ventes du/des camion(s) rattaché(s) ce jour-là (Sortie Fiche Terrain).
     const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
@@ -3745,9 +3770,13 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
       ventesTrucks += sumQty(dayMovsTruck, ["sortie"]);
     }
     const ventes = ventesSite + ventesTrucks;
-    const jaugeInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= stockDate));
-    const jaugeADate = jaugeInv ? jaugeInv.stockPhysique : stockThroughDate(s, movements, stockDate, inventaires);
-    const creux = Math.max(0, s.capacity - jaugeADate);
+    // Dernier stock (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
+    const jaugeADate = combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, stockDate);
+    // Le Creux ne tient compte QUE de la capacité et du dernier stock du site lui-même —
+    // jamais des camions (ni leur stock, ni leur capacité).
+    const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= stockDate));
+    const siteStockOnly = siteInv ? siteInv.stockPhysique : stockThroughDate(s, movements, stockDate, inventaires);
+    const creux = Math.max(0, s.capacity - siteStockOnly);
     return { site: s, ventes, reception, jaugeADate, creux };
   });
   const totalVentes = rows.reduce((a, r) => a + r.ventes, 0);
@@ -3757,7 +3786,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
   const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [{
     name: "Exposition Comilog", rows: rows.map((r) => ({
       Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes), [`Réception du ${mvtDate} (L)`]: Math.round(r.reception),
-      [`Creux au ${stockDate} (L)`]: Math.round(r.creux),
+      [`Dernier stock au ${stockDate} (L)`]: Math.round(r.jaugeADate), [`Creux au ${stockDate} (L)`]: Math.round(r.creux),
     })),
   }]);
 
@@ -3765,9 +3794,9 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
     filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
     title: "Exposition Comilog",
     period: `Ventes & réception du ${mvtDate} — Creux au ${stockDate}`,
-    columns: ["Site", "Ventes", "Réception", "Creux"],
-    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.reception)} L`, `${fmt(r.creux)} L`]),
-    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalReception)} L`, `${fmt(totalCreux)} L`],
+    columns: ["Site", "Ventes", "Réception", "Dernier stock", "Creux"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.reception)} L`, `${fmt(r.jaugeADate)} L`, `${fmt(r.creux)} L`]),
+    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalReception)} L`, "", `${fmt(totalCreux)} L`],
   });
 
   return (
@@ -3791,7 +3820,8 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
             <thead>
               <tr>
                 <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
-                <th style={{ textAlign: "right" }}>Réception ({mvtDate})</th><th style={{ textAlign: "right" }}>Creux ({stockDate})</th>
+                <th style={{ textAlign: "right" }}>Réception ({mvtDate})</th><th style={{ textAlign: "right" }}>Dernier stock ({stockDate})</th>
+                <th style={{ textAlign: "right" }}>Creux ({stockDate})</th>
               </tr>
             </thead>
             <tbody>
@@ -3800,6 +3830,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{fmt(r.reception)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.jaugeADate)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.creux)} L</td>
                 </tr>
               ))}
@@ -3807,13 +3838,14 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
                 <td style={{ fontWeight: 700 }}>Total</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>{fmt(totalReception)} L</td>
+                <td></td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalCreux)} L</td>
               </tr>
             </tbody>
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Sites Comilog : Prehomo, Okouma, CIM, CMM, Gare Traction. Ventes/Réception = celles du jour choisi ci-dessus (indépendant de la date du stock). Creux = Capacité − Stock à la date choisie (jauge mesurée si disponible, sinon théorique).
+          Tous les sites (8). Ventes/Réception = celles du jour choisi ci-dessus (indépendant de la date du stock) ; sur Prehomo/Okouma, les ventes incluent celles du camion rattaché ce jour-là. Dernier stock = jauge mesurée à la date choisie (site + camion rattaché, pour Prehomo/Okouma). Creux = Capacité du site − dernier stock du site seul (jamais le camion).
         </p>
       </div>
     </div>
@@ -3978,6 +4010,21 @@ function TruckSynthesisReport({ sites, movements, inventaires }) {
 /* ---- Synthèse Station (site fixe + camions rattachés, ex : Prehomo/Okouma) ---- */
 function trucksAssignedAt(assignments, stationId, dateStr) {
   return assignments.filter((a) => a.stationId === stationId && a.startDate <= dateStr && (!a.endDate || a.endDate >= dateStr)).map((a) => a.truckId);
+}
+// Dernier stock d'un site à une date donnée. Pour Prehomo/Okouma, additionne la jauge du site
+// à celle du (des) camion(s) qui lui sont rattachés à cette date (camion = sous-site de la station).
+function combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, dateStr) {
+  const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= dateStr));
+  let stock = siteInv ? siteInv.stockPhysique : stockThroughDate(s, movements, dateStr, inventaires);
+  if (LUBRICANT_SITE_IDS.includes(s.id)) {
+    for (const truckId of trucksAssignedAt(truckAssignments, s.id, dateStr)) {
+      const truck = sites.find((x) => x.id === truckId);
+      if (!truck) continue;
+      const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date <= dateStr));
+      stock += tInv ? tInv.stockPhysique : stockThroughDate(truck, movements, dateStr, inventaires);
+    }
+  }
+  return stock;
 }
 function truckIntervalsForStation(assignments, stationId, boundsStart, boundsEnd) {
   return assignments
