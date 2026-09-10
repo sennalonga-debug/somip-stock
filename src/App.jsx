@@ -1916,13 +1916,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [siteId, setSiteId] = useState(assignedSiteId || sites[0]?.id || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
-  const [receptionQty, setReceptionQty] = useState("");
-  const [receptionRef, setReceptionRef] = useState("");
+  const [receptions, setReceptions] = useState([{ quantite: "", ref: "" }]);
   const [indexAvant, setIndexAvant] = useState("");
   const [indexApres, setIndexApres] = useState("");
   const [compteur, setCompteur] = useState("");
   const [compteurReadings, setCompteurReadings] = useState([{ compteur: "", indexAvant: "", indexApres: "" }]);
   const [chargements, setChargements] = useState([{ camion: "", quantite: "" }]);
+  const [retoursCuve, setRetoursCuve] = useState([{ camion: "", quantite: "" }]);
   const [destinataire, setDestinataire] = useState("");
   const [retourQty, setRetourQty] = useState("");
   const [retourNote, setRetourNote] = useState("");
@@ -1967,8 +1967,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [siteId, product, date]);
   const stockDebutEffective = isFirstOfMonth && stockDebutConfirm !== "" ? Number(stockDebutConfirm) : stockDebut;
-  const receptionN = Number(receptionQty) || 0;
-  const retourN = (isLub || isMobileSite) ? 0 : (Number(retourQty) || 0);
+  const receptionN = receptions.reduce((a, r) => a + (Number(r.quantite) || 0), 0);
+  const retourN = (isLub || isMobileSite) ? 0 : (isLubSite ? retoursCuve.reduce((a, r) => a + (Number(r.quantite) || 0), 0) : (Number(retourQty) || 0));
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
   const isMultiCompteurEntry = isLubSite && !isLub && !isMobileSite;
   const readingFlows = compteurReadings.map((r) => ({
@@ -2020,10 +2020,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const canSubmit = sortieValid && chargementsValid && retourCuveValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
-    setReceptionQty(""); setReceptionRef("");
+    setReceptions([{ quantite: "", ref: "" }]);
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
     setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]);
-    setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
+    setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetoursCuve([{ camion: "", quantite: "" }]); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
     setStockFinMesure(""); setCommentaireInv(""); setStockFinPhotos([]);
   };
 
@@ -2044,8 +2044,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         }
       }
       if (receptionN > 0) {
-        const ok = await addMovement({ siteId, product, type: "reception", date, quantity: receptionN, delta: receptionN, ref: receptionRef, ...vcfExtra(receptionN) });
-        if (!ok) return;
+        for (const r of receptions) {
+          const qty = Number(r.quantite) || 0;
+          if (qty > 0) {
+            const ok = await addMovement({ siteId, product, type: "reception", date, quantity: qty, delta: qty, ref: r.ref, ...vcfExtra(qty) });
+            if (!ok) return;
+          }
+        }
       }
       if (sortieQty > 0) {
         const compteurField = meters.length > 1 ? compteur : undefined;
@@ -2084,8 +2089,18 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         }
       }
       if (retourN > 0) {
-        const ok = await addMovement({ siteId, product, type: "retour_camion", date, quantity: retourN, delta: retourN, camion: retourCamionTruckId || undefined, destination: retourNote, ...vcfExtra(retourN) });
-        if (!ok) return;
+        if (isLubSite) {
+          for (const r of retoursCuve) {
+            const qty = Number(r.quantite) || 0;
+            if (qty > 0) {
+              const ok = await addMovement({ siteId, product, type: "retour_camion", date, quantity: qty, delta: qty, camion: r.camion || undefined, ...vcfExtra(qty) });
+              if (!ok) return;
+            }
+          }
+        } else {
+          const ok = await addMovement({ siteId, product, type: "retour_camion", date, quantity: retourN, delta: retourN, camion: retourCamionTruckId || undefined, destination: retourNote, ...vcfExtra(retourN) });
+          if (!ok) return;
+        }
       }
       if (retourCuveTruckN > 0) {
         const ok = await addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: -retourCuveTruckN, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
@@ -2173,10 +2188,35 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           )}
 
           <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Chargement" : "Réception"}</p>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}><Field label="Quantité reçue (L)"><input type="number" className="somip-input" value={receptionQty} onChange={(e) => setReceptionQty(e.target.value)} placeholder="0" /></Field></div>
-            {!isMobileSite && <div style={{ flex: 1 }}><Field label="N° Bon de livraison"><input className="somip-input" value={receptionRef} onChange={(e) => setReceptionRef(e.target.value)} placeholder="BL-XXXX" /></Field></div>}
-          </div>
+          {receptions.map((r, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <Field label="Quantité reçue (L)">
+                  <input type="number" className="somip-input" value={r.quantite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, quantite: e.target.value } : row)))} placeholder="0" />
+                </Field>
+              </div>
+              {!isMobileSite && (
+                <div style={{ flex: 1 }}>
+                  <Field label="N° Bon de livraison">
+                    <input className="somip-input" value={r.ref} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, ref: e.target.value } : row)))} placeholder="BL-XXXX" />
+                  </Field>
+                </div>
+              )}
+              {receptions.length > 1 && (
+                <button onClick={() => setReceptions((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                  <X size={16} color={C.danger} />
+                </button>
+              )}
+            </div>
+          ))}
+          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setReceptions((prev) => [...prev, { quantite: "", ref: "" }])}>
+            <Plus size={13} /> Ajouter une réception
+          </button>
+          {receptions.filter((r) => Number(r.quantite) > 0).length > 1 && (
+            <p style={{ margin: "-4px 0 10px", fontSize: 11, color: C.sub }}>
+              Total reçu : {fmt(receptionN)} L, sur {receptions.filter((r) => Number(r.quantite) > 0).length} réceptions.
+            </p>
+          )}
           {isMobileSite && (
             <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.warning }}>
               Pense à saisir aussi ce chargement côté Prehomo/Okouma (Chargement laitiers) — les deux côtés sont indépendants. Pas de N° de bon pour un chargement interne.
@@ -2313,20 +2353,34 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           {isLubSite && !isLub && !isMobileSite && (
             <>
               <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Retour cuve (camion)</p>
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Quantité retournée (L)"><input type="number" className="somip-input" value={retourQty} onChange={(e) => setRetourQty(e.target.value)} placeholder="0" /></Field></div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Camion">
-                    <select className="somip-select" value={retourCamionTruckId} onChange={(e) => setRetourCamionTruckId(e.target.value)}>
-                      <option value="">— non précisé —</option>
-                      {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                    </select>
-                  </Field>
+              {retoursCuve.map((r, idx) => (
+                <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Camion">
+                      <select className="somip-select" value={r.camion} onChange={(e) => setRetoursCuve((prev) => prev.map((row, i) => (i === idx ? { ...row, camion: e.target.value } : row)))}>
+                        <option value="">— choisir —</option>
+                        {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <Field label="Quantité retournée (L)">
+                      <input type="number" className="somip-input" value={r.quantite} onChange={(e) => setRetoursCuve((prev) => prev.map((row, i) => (i === idx ? { ...row, quantite: e.target.value } : row)))} placeholder="0" />
+                    </Field>
+                  </div>
+                  {retoursCuve.length > 1 && (
+                    <button onClick={() => setRetoursCuve((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                      <X size={16} color={C.danger} />
+                    </button>
+                  )}
                 </div>
-              </div>
-              {retourCamionTruckId && (
-                <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>
-                  Ce retour ({fmt(Number(retourQty) || 0)} L) concerne {truckSites.find((t) => t.id === retourCamionTruckId)?.name}.
+              ))}
+              <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setRetoursCuve((prev) => [...prev, { camion: "", quantite: "" }])}>
+                <Plus size={13} /> Ajouter un camion
+              </button>
+              {retourN > 0 && (
+                <p style={{ margin: "-4px 0 10px", fontSize: 11, color: C.sub }}>
+                  Total retourné : {fmt(retourN)} L, sur {retoursCuve.filter((r) => Number(r.quantite) > 0).length} camion(s).
                 </p>
               )}
               <p style={{ margin: "-4px 0 12px", fontSize: 11, color: C.warning }}>
