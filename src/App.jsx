@@ -1983,7 +1983,12 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const totalChargements = isLubSite && !isLub ? chargements.reduce((a, c) => a + (Number(c.quantite) || 0), 0) : 0;
   const chargementsValid = totalChargements <= sortieQty;
   const venteStation = isLubSite && !isLub ? Math.max(0, sortieQty - totalChargements) : sortieQty;
-  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty - retourCuveTruckN;
+  // Sur un camion, le retour cuve passe par le même compteur que les ventes : l'index mesure le
+  // flux total (vente terrain + retour cuve confondus), le retour cuve doit donc être déduit de
+  // la vente réelle plutôt que soustrait une seconde fois du stock.
+  const retourCuveValid = !isMobileSite || retourCuveTruckN <= sortieQty;
+  const venteTruck = isMobileSite ? Math.max(0, sortieQty - retourCuveTruckN) : sortieQty;
+  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty;
   const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date, inventaires) : 0;
 
   // Chaque produit (gasoil, chaque lubrifiant) et chaque camion a son propre compteur de sortie.
@@ -2012,7 +2017,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
 
   const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
   const stockFinConflict = stockFinMesure !== "" && !!existingInv;
-  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
+  const canSubmit = sortieValid && chargementsValid && retourCuveValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
     setReceptionQty(""); setReceptionRef("");
@@ -2045,8 +2050,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
       if (sortieQty > 0) {
         const compteurField = meters.length > 1 ? compteur : undefined;
         if (isLub || isMobileSite) {
-          const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
-          if (!ok) return;
+          const qty = isMobileSite ? venteTruck : sortieQty;
+          if (qty > 0) {
+            const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: qty, delta: -qty, indexAvant: Number(indexAvant), indexApres: Number(indexApres), destinataire, compteur: compteurField });
+            if (!ok) return;
+          }
         } else if (isMultiCompteurEntry) {
           // Le(s) compteur(s) mesurent le flux total (vente + chargements camions confondus) :
           // on répartit les chargements sur les compteurs saisis (dans l'ordre), puis on
@@ -2342,9 +2350,26 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </div>
               </div>
               {retourCuveTruckQty && retourCuveTruckNote && (
-                <p style={{ margin: "-6px 0 12px", fontSize: 11, color: C.sub }}>
+                <p style={{ margin: "-6px 0 8px", fontSize: 11, color: C.sub }}>
                   Ce retour ({fmt(retourCuveTruckN)} L) concerne {stationSites.find((s) => s.id === retourCuveTruckNote)?.name}.
                 </p>
+              )}
+              {!retourCuveValid && (
+                <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>
+                  Le retour cuve ({fmt(retourCuveTruckN)} L) dépasse le flux du compteur ({fmt(sortieQty)} L) — le retour passe par le même compteur que les ventes, il ne peut pas être plus grand.
+                </p>
+              )}
+              {sortieQty > 0 && retourCuveTruckN > 0 && retourCuveValid && (
+                <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>Sortie Fiche Terrain (calculée)</span>
+                    <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(venteTruck)} L</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>Retour cuve (inclus dans le compteur)</span>
+                    <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(retourCuveTruckN)} L</span>
+                  </div>
+                </div>
               )}
             </>
           )}
