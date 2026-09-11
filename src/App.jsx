@@ -2292,6 +2292,12 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </button>
               )}
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant, pour chaque compteur.</p>}
+              {sortieQty > 0 && compteurReadings.filter((r) => r.indexAvant !== "" && r.indexApres !== "").length > 1 && (
+                <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5, display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: C.sub, fontWeight: 600 }}>Total sortie (tous compteurs)</span>
+                  <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(sortieQty)} L</span>
+                </div>
+              )}
 
               {isLubSite && (
                 <>
