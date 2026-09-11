@@ -1970,7 +1970,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const receptionN = receptions.reduce((a, r) => a + (Number(r.quantite) || 0), 0);
   const retourN = (isLub || isMobileSite) ? 0 : (isLubSite ? retoursCuve.reduce((a, r) => a + (Number(r.quantite) || 0), 0) : (Number(retourQty) || 0));
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
-  const isMultiCompteurEntry = isLubSite && !isLub && !isMobileSite;
+  const isMultiCompteurEntry = meters.length > 1 && !isLub && !isMobileSite;
   const readingFlows = compteurReadings.map((r) => ({
     ...r,
     flow: r.indexAvant !== "" && r.indexApres !== "" ? Number(r.indexApres) - Number(r.indexAvant) : 0,
@@ -2248,9 +2248,9 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant.</p>}
               {isLub && sortieQty > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(sortieQty * lubDensite)} kg</p>}
             </>
-          ) : isLubSite ? (
+          ) : isMultiCompteurEntry ? (
             <>
-              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (compteurs — flux total : vente + chargements camions)</p>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isLubSite ? "Sortie (compteurs — flux total : vente + chargements camions)" : "Sortie (compteurs)"}</p>
               {compteurReadings.map((r, idx) => {
                 const lastIdx = r.compteur ? lastIndexForMeter(r.compteur) : undefined;
                 const mismatch = lastIdx !== undefined && r.indexAvant !== "" && Number(r.indexAvant) !== lastIdx;
@@ -2293,47 +2293,51 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               )}
               {!sortieValid && <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger }}>L'index après doit être supérieur à l'index avant, pour chaque compteur.</p>}
 
-              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur ce flux)</p>
-              <p style={{ margin: "0 0 8px", fontSize: 11, color: C.warning }}>Pense à saisir aussi ce chargement côté camion (Chargement) — les deux côtés sont indépendants.</p>
-              {chargements.map((c, idx) => (
-                <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
-                  <div style={{ flex: 1 }}>
-                    <Field label="Camion">
-                      <select className="somip-select" value={c.camion} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, camion: e.target.value } : r)))}>
-                        <option value="">— choisir —</option>
-                        {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-                      </select>
-                    </Field>
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <Field label="Quantité chargée (L)">
-                      <input type="number" className="somip-input" value={c.quantite} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, quantite: e.target.value } : r)))} placeholder="0" />
-                    </Field>
-                  </div>
-                  {chargements.length > 1 && (
-                    <button onClick={() => setChargements((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
-                      <X size={16} color={C.danger} />
-                    </button>
-                  )}
-                </div>
-              ))}
-              <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
-                <Plus size={13} /> Ajouter un camion
-              </button>
-              {!chargementsValid && <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>Le total chargé ({fmt(totalChargements)} L) dépasse le flux total des compteurs ({fmt(sortieQty)} L).</p>}
-              {sortieQty > 0 && (
-                <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: totalChargements > 0 ? 4 : 0 }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Vente station (calculée)</span>
-                    <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(venteStation)} L</span>
-                  </div>
-                  {totalChargements > 0 && (
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ color: C.sub, fontWeight: 600 }}>Chargements laitiers (total)</span>
-                      <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(totalChargements)} L</span>
+              {isLubSite && (
+                <>
+                  <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur ce flux)</p>
+                  <p style={{ margin: "0 0 8px", fontSize: 11, color: C.warning }}>Pense à saisir aussi ce chargement côté camion (Chargement) — les deux côtés sont indépendants.</p>
+                  {chargements.map((c, idx) => (
+                    <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Camion">
+                          <select className="somip-select" value={c.camion} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, camion: e.target.value } : r)))}>
+                            <option value="">— choisir —</option>
+                            {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                          </select>
+                        </Field>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Quantité chargée (L)">
+                          <input type="number" className="somip-input" value={c.quantite} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, quantite: e.target.value } : r)))} placeholder="0" />
+                        </Field>
+                      </div>
+                      {chargements.length > 1 && (
+                        <button onClick={() => setChargements((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                          <X size={16} color={C.danger} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
+                    <Plus size={13} /> Ajouter un camion
+                  </button>
+                  {!chargementsValid && <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>Le total chargé ({fmt(totalChargements)} L) dépasse le flux total des compteurs ({fmt(sortieQty)} L).</p>}
+                  {sortieQty > 0 && (
+                    <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: totalChargements > 0 ? 4 : 0 }}>
+                        <span style={{ color: C.sub, fontWeight: 600 }}>Vente station (calculée)</span>
+                        <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(venteStation)} L</span>
+                      </div>
+                      {totalChargements > 0 && (
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ color: C.sub, fontWeight: 600 }}>Chargements laitiers (total)</span>
+                          <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(totalChargements)} L</span>
+                        </div>
+                      )}
                     </div>
                   )}
-                </div>
+                </>
               )}
             </>
           ) : (
