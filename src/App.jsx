@@ -675,7 +675,7 @@ const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, 
 
 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
-const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null });
+const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [] });
 
 async function fetchTable(table, mapper, orderCol, ascending) {
   if (!SUPABASE_CONFIGURED) return [];
@@ -1360,13 +1360,14 @@ export default function App() {
     appendAudit("Modification rôle utilisateur", `${target?.name || ""} → ${ROLE_LABELS[role]}`);
     flash("Rôle mis à jour.");
   });
-  const updateUserSite = (userId, assignedSiteId) => withSync(async () => {
-    const { error } = await supabase.from("profiles").update({ assigned_site_id: assignedSiteId || null }).eq("id", userId);
+  const updateUserSites = (userId, assignedSiteIds) => withSync(async () => {
+    const { error } = await supabase.from("profiles").update({ assigned_site_ids: assignedSiteIds || [] }).eq("id", userId);
     if (error) throw error;
     const target = profiles.find((u) => u.id === userId);
-    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, assignedSiteId: assignedSiteId || null } : u)));
-    appendAudit("Modification site assigné", `${target?.name || ""} → ${sites.find((s) => s.id === assignedSiteId)?.name || "Tous les sites"}`);
-    flash("Site assigné mis à jour.");
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, assignedSiteIds: assignedSiteIds || [] } : u)));
+    const label = !assignedSiteIds || assignedSiteIds.length === 0 ? "Tous les sites" : assignedSiteIds.map((id) => sites.find((s) => s.id === id)?.name || id).join(", ");
+    appendAudit("Modification sites assignés", `${target?.name || ""} → ${label}`);
+    flash("Sites assignés mis à jour.");
   });
 
   const NAV = [
@@ -1561,11 +1562,11 @@ export default function App() {
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteId={profile?.assignedSiteId} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
-          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSite={updateUserSite} sites={sites} session={session} />}
+          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
@@ -1597,6 +1598,30 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   const latestInventaireBySite = {};
   [...inventaires].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((i) => { latestInventaireBySite[i.siteId] = i; });
   const horsObjectif = Object.values(latestInventaireBySite).filter((i) => i.conformite === "non_conforme").length;
+
+  // Gain/Perte cumulé du mois en cours, par site fixe (calcul pur, indépendant des camions).
+  const monthStartD = `${month}-01`;
+  const todayD = todayStr();
+  const ecartRows = sites.filter((s) => !s.isMobile).map((s) => {
+    let cur = new Date(monthStartD);
+    const end = new Date(todayD);
+    let ecartCumule = 0, daysWithJauge = 0;
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
+      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty(dayMovs, ["reception"]);
+      const ventes = sumQty(dayMovs, ["sortie"]);
+      const chargementLaitiers = sumQty(dayMovs, ["sortie_camion"]);
+      const retourCamions = sumQty(dayMovs, ["retour_camion"]);
+      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
+      cur.setDate(cur.getDate() + 1);
+    }
+    return { site: s, ecartCumule, daysWithJauge };
+  }).sort((a, b) => a.ecartCumule - b.ecartCumule);
+  const ecartReseauTotal = ecartRows.reduce((a, r) => a + r.ecartCumule, 0);
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites fixes sans Stock fin saisi
   // pour la veille (laisse la nuit/le petit matin pour rattraper la saisie sans fausse alerte).
@@ -1642,6 +1667,28 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Sorties (mois)" value={fmt(sortiesMonth)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
         <StatCard label="Sites en alerte" value={alerts.length} unit={`/ ${rows.length}`} accent={C.danger} icon={AlertTriangle} />
         <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
+        <StatCard label="Gain/Perte réseau (mois)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
+      </div>
+
+      <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Gain/Perte du mois par site</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>Cumul du 1er du mois à aujourd'hui, calcul propre à chaque site (hors camions).</p>
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
+            <tbody>
+              {ecartRows.map((r) => (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: r.ecartCumule < 0 ? C.danger : r.ecartCumule > 0 ? C.success : C.sub }}>
+                    {r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—"}
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.daysWithJauge}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -1911,9 +1958,10 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage, assignedSiteId }) {
-  const availableSites = assignedSiteId ? sites.filter((s) => s.id === assignedSiteId) : sites;
-  const [siteId, setSiteId] = useState(assignedSiteId || sites[0]?.id || "");
+function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage, assignedSiteIds }) {
+  const hasSiteRestriction = assignedSiteIds && assignedSiteIds.length > 0;
+  const availableSites = hasSiteRestriction ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+  const [siteId, setSiteId] = useState((hasSiteRestriction ? assignedSiteIds[0] : sites[0]?.id) || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
   const [receptions, setReceptions] = useState([{ quantite: "", ref: "" }]);
@@ -2138,13 +2186,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}>
               <Field label="Site">
-                {assignedSiteId ? (
+                {hasSiteRestriction && availableSites.length === 1 ? (
                   <div className="somip-input" style={{ background: C.bg, color: C.ink, fontWeight: 600, display: "flex", alignItems: "center" }}>
-                    {sites.find((s) => s.id === assignedSiteId)?.name || "Site assigné"}
+                    {availableSites[0].name}
                   </div>
                 ) : (
                   <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-                    {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                    {availableSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </select>
                 )}
               </Field>
@@ -5076,12 +5124,12 @@ function BrandingView({ settings, updateTheme }) {
 }
 
 
-function UsersView({ profiles, updateUserRole, updateUserSite, sites, session }) {
+function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
-  const [siteDraft, setSiteDraft] = useState("");
+  const [siteDraft, setSiteDraft] = useState([]);
   const [deletingErr, setDeletingErr] = useState(null);
-  const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture", assignedSiteId: "" });
+  const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture", assignedSiteIds: [] });
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
   const [createMsg, setCreateMsg] = useState(null);
@@ -5101,11 +5149,14 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
     }
   };
 
-  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); setSiteDraft(u.assignedSiteId || ""); };
+  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); setSiteDraft(u.assignedSiteIds && u.assignedSiteIds.length ? u.assignedSiteIds : (u.assignedSiteId ? [u.assignedSiteId] : [])); };
   const saveEdit = () => {
     updateUserRole(editingId, roleDraft);
-    updateUserSite(editingId, siteDraft || null);
+    updateUserSites(editingId, siteDraft);
     setEditingId(null);
+  };
+  const toggleSite = (list, setList, siteId) => {
+    setList(list.includes(siteId) ? list.filter((id) => id !== siteId) : [...list, siteId]);
   };
 
   const isOnline = (u) => {
@@ -5121,6 +5172,11 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
     if (diffH < 24) return `Il y a ${diffH} h`;
     return `Il y a ${Math.round(diffH / 24)} j`;
   };
+  const sitesLabel = (u) => {
+    const ids = u.assignedSiteIds && u.assignedSiteIds.length ? u.assignedSiteIds : (u.assignedSiteId ? [u.assignedSiteId] : []);
+    if (ids.length === 0) return "Tous les sites";
+    return ids.map((id) => sites.find((s) => s.id === id)?.name || id).join(", ");
+  };
 
   const createAccount = async () => {
     setCreateErr(null); setCreateMsg(null);
@@ -5131,12 +5187,12 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
       const res = await fetch("/api/create-user", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
-        body: JSON.stringify({ username: form.username.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role, assignedSiteId: form.assignedSiteId || null }),
+        body: JSON.stringify({ username: form.username.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role, assignedSiteIds: form.assignedSiteIds }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erreur lors de la création du compte.");
       setCreateMsg(`Compte créé pour ${form.fullName.trim()} (${ROLE_LABELS[form.role]}). Identifiant de connexion : "${data.loginEmail}" — communique-le avec le mot de passe.`);
-      setForm({ fullName: "", username: "", password: "", role: "lecture", assignedSiteId: "" });
+      setForm({ fullName: "", username: "", password: "", role: "lecture", assignedSiteIds: [] });
     } catch (e) {
       setCreateErr(e.message || "Erreur lors de la création du compte.");
     } finally {
@@ -5169,10 +5225,15 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
                         </select>
                       </td>
                       <td>
-                        <select className="somip-select" value={siteDraft} onChange={(e) => setSiteDraft(e.target.value)}>
-                          <option value="">Tous les sites</option>
-                          {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                        </select>
+                        <div style={{ maxHeight: 110, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 6, padding: 6, minWidth: 160 }}>
+                          {sites.map((s) => (
+                            <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "2px 0", cursor: "pointer" }}>
+                              <input type="checkbox" checked={siteDraft.includes(s.id)} onChange={() => toggleSite(siteDraft, setSiteDraft, s.id)} />
+                              {s.name}
+                            </label>
+                          ))}
+                        </div>
+                        {siteDraft.length === 0 && <p style={{ margin: "4px 0 0", fontSize: 11, color: C.sub }}>Aucun coché = tous les sites</p>}
                       </td>
                       <td></td>
                       <td style={{ whiteSpace: "nowrap" }}>
@@ -5184,7 +5245,7 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
                     <>
                       <td style={{ fontWeight: 600 }}>{u.name}</td>
                       <td><Badge color={C.blue}>{ROLE_LABELS[u.role] || u.role}</Badge></td>
-                      <td style={{ color: C.sub, fontSize: 12.5 }}>{u.assignedSiteId ? (sites.find((s) => s.id === u.assignedSiteId)?.name || u.assignedSiteId) : "Tous les sites"}</td>
+                      <td style={{ color: C.sub, fontSize: 12.5, maxWidth: 220 }}>{sitesLabel(u)}</td>
                       <td>
                         {isOnline(u) ? (
                           <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, color: C.success, fontWeight: 600 }}>
@@ -5217,11 +5278,16 @@ function UsersView({ profiles, updateUserRole, updateUserSite, sites, session })
             {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
           </select>
         </Field>
-        <Field label="Site assigné (optionnel)">
-          <select className="somip-select" value={form.assignedSiteId} onChange={(e) => setForm({ ...form, assignedSiteId: e.target.value })}>
-            <option value="">Tous les sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
+        <Field label="Sites assignés (optionnel)">
+          <div style={{ maxHeight: 130, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 6, padding: 8 }}>
+            {sites.map((s) => (
+              <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, padding: "3px 0", cursor: "pointer" }}>
+                <input type="checkbox" checked={form.assignedSiteIds.includes(s.id)} onChange={() => toggleSite(form.assignedSiteIds, (v) => setForm({ ...form, assignedSiteIds: v }), s.id)} />
+                {s.name}
+              </label>
+            ))}
+          </div>
+          <p style={{ margin: "4px 0 0", fontSize: 11, color: C.sub }}>Aucun coché = accès à tous les sites</p>
         </Field>
         {createErr && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 10px" }}>{createErr}</p>}
         {createMsg && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 10px" }}>{createMsg}</p>}
