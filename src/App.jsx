@@ -1599,10 +1599,11 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   [...inventaires].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((i) => { latestInventaireBySite[i.siteId] = i; });
   const horsObjectif = Object.values(latestInventaireBySite).filter((i) => i.conformite === "non_conforme").length;
 
-  // Gain/Perte cumulé du mois en cours, par site fixe (calcul pur, indépendant des camions).
+  // Gain/Perte cumulé du mois en cours, pour chaque site fixe ET chaque camion (calcul propre
+  // à chacun, indépendant — comme demandé, tout dans un même tableau).
   const monthStartD = `${month}-01`;
   const todayD = todayStr();
-  const ecartRows = sites.filter((s) => !s.isMobile).map((s) => {
+  const ecartRows = sites.map((s) => {
     let cur = new Date(monthStartD);
     const end = new Date(todayD);
     let ecartCumule = 0, daysWithJauge = 0;
@@ -1611,9 +1612,9 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       const stockDebut = stockBeforeDate(s, movements, d, inventaires);
       const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
       const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]);
-      const chargementLaitiers = sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = sumQty(dayMovs, ["retour_camion"]);
+      const ventes = sumQty(dayMovs, ["sortie"]); // camion : flux brut du compteur (retour cuve inclus, cf. théorique)
+      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
+      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
       const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
@@ -1621,7 +1622,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
     }
     return { site: s, ecartCumule, daysWithJauge };
   }).sort((a, b) => a.ecartCumule - b.ecartCumule);
-  const ecartReseauTotal = ecartRows.reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites fixes sans Stock fin saisi
   // pour la veille (laisse la nuit/le petit matin pour rattraper la saisie sans fausse alerte).
@@ -1671,15 +1672,16 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       </div>
 
       <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Gain/Perte du mois par site</h3>
-        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>Cumul du 1er du mois à aujourd'hui, calcul propre à chaque site (hors camions).</p>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Gain/Perte du mois — sites et camions</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>Cumul du 1er du mois à aujourd'hui, calcul propre à chaque site et chaque camion.</p>
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
+            <thead><tr><th>Type</th><th>Nom</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
             <tbody>
               {ecartRows.map((r) => (
                 <tr key={r.site.id}>
-                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
+                  <td><Badge color={r.site.isMobile ? C.orange : C.blue}>{r.site.isMobile ? "Camion" : "Site"}</Badge></td>
+                  <td style={{ fontWeight: 600 }}>{r.site.name} {!r.site.isMobile && <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span>}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: r.ecartCumule < 0 ? C.danger : r.ecartCumule > 0 ? C.success : C.sub }}>
                     {r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—"}
                   </td>
