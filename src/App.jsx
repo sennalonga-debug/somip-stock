@@ -109,6 +109,16 @@ const TYPE_META = {
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
+const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+function formatDateLong(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return `${d} ${FRENCH_MONTHS[m - 1]} ${y}`;
+}
+// Les camions ne livrent/reprennent que par multiples de 5000 L (5000/15000/20000/35000) :
+// toute demande d'approvisionnement est arrondie à l'inférieur, au multiple de 5000 le plus proche.
+function roundDown5000(n) {
+  return Math.floor(Math.max(0, n) / 5000) * 5000;
+}
 const currentMonth = () => new Date().toISOString().slice(0, 7);
 const fmt = (n) => {
   const r = Math.round(n);
@@ -555,7 +565,7 @@ async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
   await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_TousSites_${periodType}_${periodKey}.pptx` });
 }
 
-function ReportHeader({ title, period }) {
+function ReportHeader({ title, period, showEditedDate = true }) {
   return (
     <div className="somip-print-only" style={{ marginBottom: 16 }}>
       <div style={{ height: 5, background: `linear-gradient(90deg, ${C.blue} 0%, ${C.blue} 60%, ${C.orange} 60%, ${C.orange} 100%)`, borderRadius: 3, marginBottom: 12 }} />
@@ -567,9 +577,11 @@ function ReportHeader({ title, period }) {
             <div style={{ fontSize: 11, color: C.sub }}>Zone Sud-Est · Gabon</div>
           </div>
         </div>
-        <div style={{ textAlign: "right", fontSize: 11, color: C.sub }}>
-          Édité le {new Date().toLocaleDateString("fr-FR")} à {new Date().toLocaleTimeString("fr-FR")}
-        </div>
+        {showEditedDate && (
+          <div style={{ textAlign: "right", fontSize: 11, color: C.sub }}>
+            Édité le {new Date().toLocaleDateString("fr-FR")} à {new Date().toLocaleTimeString("fr-FR")}
+          </div>
+        )}
       </div>
       <h2 style={{ margin: "0 0 2px", fontSize: 16, color: C.navy }}>{title}</h2>
       {period && <div style={{ fontSize: 12.5, color: C.orange, fontWeight: 600 }}>{period}</div>}
@@ -2068,7 +2080,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
 
   const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
   const stockFinConflict = stockFinMesure !== "" && !!existingInv;
-  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
+  const photosWithoutStockFin = stockFinPhotos.length > 0 && stockFinMesure === "";
+  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && !photosWithoutStockFin && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
     setReceptions([{ quantite: "", ref: "" }]);
@@ -2511,6 +2524,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           <Field label="Photos justificatives (perte, déversement, éclatement de filtre...)">
             <PhotoPicker files={stockFinPhotos} setFiles={setStockFinPhotos} />
           </Field>
+          {stockFinPhotos.length > 0 && stockFinMesure === "" && (
+            <p style={{ margin: "-6px 0 10px", fontSize: 11.5, color: C.danger, fontWeight: 600 }}>
+              ⚠️ Remplis le Stock fin ci-dessus pour que {stockFinPhotos.length > 1 ? "ces photos soient" : "cette photo soit"} enregistrée(s) — sans Stock fin, {stockFinPhotos.length > 1 ? "elles ne seront pas" : "elle ne sera pas"} sauvegardée(s).
+            </p>
+          )}
 
           {preview && (
             <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
@@ -3088,8 +3106,8 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
       {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
-      {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
-      {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
+      {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
+      {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
       {tab === "bilan" && canManage && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
     </div>
@@ -3779,13 +3797,16 @@ function decadeBoundsExplicit(monthStr, decadeNum) {
   return { start: `${monthStr}-21`, end: `${monthStr}-${pad2(lastDay)}`, label: `3e décade (du 21 au ${lastDay})` };
 }
 
-function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
+function ExposureReport({ sites, movements, inventaires, truckAssignments, productStocks }) {
   const [month, setMonth] = useState(currentMonth());
   const [decadeNum, setDecadeNum] = useState(1);
   const bounds = decadeBoundsExplicit(month, decadeNum);
   const fixedSites = sites.filter((s) => !s.isMobile);
+  const [selectedSiteIds, setSelectedSiteIds] = useState(fixedSites.map((s) => s.id));
+  const toggleSite = (id) => setSelectedSiteIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const activeSites = fixedSites.filter((s) => selectedSiteIds.includes(s.id));
 
-  const rows = fixedSites.map((s) => {
+  const rows = activeSites.map((s) => {
     // Ventes = ventes propres du site (hors chargements laitiers, qui sont un transfert interne,
     // pas une vente) + les ventes des camions qui lui sont rattachés chaque jour de la décade
     // (Sortie Fiche Terrain), en tenant compte des changements d'affectation en cours de période.
@@ -3804,45 +3825,65 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
       cur.setDate(cur.getDate() + 1);
     }
     const ventesCumulees = ventesSite + ventesTrucks;
-    // Dernier stock (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
-    const jaugeADate = combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, bounds.end);
-    // Le Creux (demande d'approvisionnement) ne tient compte QUE de la capacité et du dernier
-    // stock du site lui-même — jamais des camions (ni leur stock, ni leur capacité).
+    // Stock en consignation (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
+    const stockConsignation = combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, bounds.end);
+    // La demande d'approvisionnement ne tient compte QUE de la capacité et du dernier stock du
+    // site lui-même — jamais des camions (ni leur stock, ni leur capacité).
     const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= bounds.end));
     const siteStockOnly = siteInv ? siteInv.stockPhysique : stockThroughDate(s, movements, bounds.end, inventaires);
-    // Les camions ne livrent que par multiples de 5000 L (5000/15000/20000/35000) :
-    // la demande d'approvisionnement est toujours arrondie à l'inférieur, au multiple de 5000 le plus proche.
-    const demandeAppro = Math.floor(Math.max(0, s.capacity - siteStockOnly) / 5000) * 5000;
-    return { site: s, ventesCumulees, jaugeADate, demandeAppro };
+    const demandeAppro = roundDown5000(s.capacity - siteStockOnly);
+    return { site: s, ventesCumulees, stockConsignation, demandeAppro };
   });
   const totalVentes = rows.reduce((a, r) => a + r.ventesCumulees, 0);
+  const totalStock = rows.reduce((a, r) => a + r.stockConsignation, 0);
   const totalDemande = rows.reduce((a, r) => a + (r.demandeAppro || 0), 0);
 
-  const doExcel = () => exportToExcel(`SOMIP_Exposition_${month}_D${decadeNum}.xlsx`, [{
-    name: "Exposition", rows: rows.map((r) => ({
-      Site: r.site.name, "Ventes cumulées décade (L)": Math.round(r.ventesCumulees),
-      "Dernier stock (L)": r.jaugeADate !== null ? Math.round(r.jaugeADate) : "",
-      "Demande d'approvisionnement (L)": r.demandeAppro !== null ? Math.round(r.demandeAppro) : "",
-    })),
-  }]);
+  // Huiles — Prehomo et Okouma uniquement.
+  const huilesRows = [];
+  for (const siteId of LUBRICANT_SITE_IDS) {
+    const s = sites.find((x) => x.id === siteId);
+    if (!s || !selectedSiteIds.includes(siteId)) continue;
+    for (const lub of LUBRICANTS) {
+      const ps = productStocks.find((p) => p.siteId === siteId && p.product === lub.id);
+      if (!ps) continue;
+      const rangeMovs = movementsInRange(movements, siteId, bounds.start, bounds.end, lub.id);
+      const ventes = sumQty(rangeMovs, ["sortie"]);
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === lub.id && i.date <= bounds.end));
+      const stockConsignation = inv ? inv.stockPhysique : anchoredStock(siteId, ps.stockInitial, movements, inventaires, lub.id, bounds.end, true);
+      const demandeAppro = roundDown5000(ps.capacity - stockConsignation);
+      huilesRows.push({ site: s, lub, ventes, stockConsignation, demandeAppro });
+    }
+  }
+  const totalHuilesVentes = huilesRows.reduce((a, r) => a + r.ventes, 0);
+  const totalHuilesStock = huilesRows.reduce((a, r) => a + r.stockConsignation, 0);
+  const totalHuilesDemande = huilesRows.reduce((a, r) => a + r.demandeAppro, 0);
+
+  const titre = `Exposition au ${formatDateLong(todayStr())}`;
+  const venteLabel = `Vente décade (${decadeNum})`;
+
+  const doExcel = () => exportToExcel(`SOMIP_Exposition_${month}_D${decadeNum}.xlsx`, [
+    { name: "Exposition", rows: rows.map((r) => ({
+      Site: r.site.name, [`${venteLabel} (L)`]: Math.round(r.ventesCumulees),
+      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
+    })) },
+    ...(huilesRows.length ? [{ name: "Huiles", rows: huilesRows.map((r) => ({
+      Site: r.site.name, Produit: r.lub.label, [`${venteLabel} (L)`]: Math.round(r.ventes),
+      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
+    })) }] : []),
+  ]);
 
   const doPdf = () => exportToPdf({
     filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
-    title: "Exposition — Ventes cumulées & demande d'approvisionnement",
-    period: `${bounds.label} — ${bounds.start} au ${bounds.end}`,
-    columns: ["Site", "Ventes cumulées (décade)", "Dernier stock", "Demande d'approvisionnement"],
-    rows: rows.map((r) => [
-      `${r.site.name} (${r.site.code})`,
-      `${fmt(r.ventesCumulees)} L`,
-      r.jaugeADate !== null ? `${fmt(r.jaugeADate)} L` : "—",
-      r.demandeAppro !== null ? `${fmt(r.demandeAppro)} L` : "—",
-    ]),
-    totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, "", `${fmt(totalDemande)} L`],
+    title: titre,
+    period: bounds.label,
+    columns: ["Site", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+    totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
   });
 
   return (
     <div>
-      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
         <Field label="Décade">
           <select className="somip-select" style={{ maxWidth: 260 }} value={decadeNum} onChange={(e) => setDecadeNum(Number(e.target.value))}>
@@ -3852,12 +3893,24 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
           </select>
         </Field>
       </div>
+      <div className="somip-no-print somip-panel" style={{ padding: 14, marginBottom: 14 }}>
+        <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sites à inclure</p>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          {fixedSites.map((s) => (
+            <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: "pointer" }}>
+              <input type="checkbox" checked={selectedSiteIds.includes(s.id)} onChange={() => toggleSite(s.id)} />
+              {s.name}
+            </label>
+          ))}
+        </div>
+      </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="Exposition — Ventes cumulées &amp; demande d'approvisionnement" period={`${bounds.label} — ${bounds.start} au ${bounds.end}`} />
+        <ReportHeader title={titre} period={bounds.label} showEditedDate={false} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
           <StatCard label="Ventes cumulées réseau (décade)" value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
+          <StatCard label="Stock en consignation réseau" value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
           <StatCard label="Demande d'approvisionnement réseau" value={fmt(totalDemande)} unit="L" accent={C.orange} icon={Truck} />
         </div>
 
@@ -3865,8 +3918,8 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
           <table className="somip-table">
             <thead>
               <tr>
-                <th>Site</th><th style={{ textAlign: "right" }}>Ventes cumulées (décade)</th>
-                <th style={{ textAlign: "right" }}>Dernier stock</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                <th>Site</th><th style={{ textAlign: "right" }}>{venteLabel}</th>
+                <th style={{ textAlign: "right" }}>Stock en consignation</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
             <tbody>
@@ -3874,21 +3927,55 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventesCumulees)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.jaugeADate !== null ? `${fmt(r.jaugeADate)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{r.demandeAppro !== null ? `${fmt(r.demandeAppro)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
                 </tr>
               ))}
               <tr>
                 <td style={{ fontWeight: 700 }}>Total réseau</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
-                <td></td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalStock)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalDemande)} L</td>
               </tr>
             </tbody>
           </table>
         </div>
+
+        {huilesRows.length > 0 && (
+          <>
+            <h4 style={{ margin: "22px 0 10px", fontSize: 13, color: C.ink }}>Huiles — Prehomo &amp; Okouma</h4>
+            <div style={{ overflowX: "auto" }}>
+              <table className="somip-table">
+                <thead>
+                  <tr>
+                    <th>Site</th><th>Produit</th><th style={{ textAlign: "right" }}>{venteLabel}</th>
+                    <th style={{ textAlign: "right" }}>Stock en consignation</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {huilesRows.map((r, i) => (
+                    <tr key={i}>
+                      <td style={{ fontWeight: 600 }}>{r.site.name}</td>
+                      <td>{r.lub.label}</td>
+                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
+                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
+                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td style={{ fontWeight: 700 }} colSpan={2}>Total huiles</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesVentes)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesStock)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalHuilesDemande)} L</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Ventes cumulées = ventes propres du site (hors chargements laitiers) + ventes du camion rattaché chaque jour de la décade (sur Prehomo/Okouma). Dernier stock = jauge mesurée à la fin de la décade (site + camion rattaché, pour Prehomo/Okouma). Demande d'approvisionnement = Capacité du site − dernier stock du site seul (jamais le camion), arrondie à l'inférieur au multiple de 5000 L (livraisons par camions de 5000/15000/20000/35000 L).
+          {venteLabel} = ventes propres du site (hors chargements laitiers) + ventes du camion rattaché chaque jour de la décade (sur Prehomo/Okouma). Stock en consignation = jauge mesurée à la fin de la décade (site + camion rattaché, pour Prehomo/Okouma). Demande d'approvisionnement = Capacité du site − stock en consignation du site seul (jamais le camion), arrondie à l'inférieur au multiple de 5000 L.
         </p>
       </div>
     </div>
@@ -3898,66 +3985,105 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments }) {
 const COMILOG_SITE_CODES = ["PRH", "OKM", "CIM", "CMM", "GTR"];
 
 /* ---- Exposition Comilog — envoi quotidien : ventes & réception de la veille, creux à date ---- */
-function ExpositionComilogReport({ sites, movements, inventaires, truckAssignments }) {
+function ExpositionComilogReport({ sites, movements, inventaires, truckAssignments, productStocks }) {
   const [mvtDate, setMvtDate] = useState(todayStr());
   const [stockDate, setStockDate] = useState(todayStr());
   const allFixedSites = sites.filter((s) => !s.isMobile);
+  const [selectedSiteIds, setSelectedSiteIds] = useState(allFixedSites.map((s) => s.id));
+  const toggleSite = (id) => setSelectedSiteIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  const activeSites = allFixedSites.filter((s) => selectedSiteIds.includes(s.id));
 
-  const rows = allFixedSites.map((s) => {
+  const rows = activeSites.map((s) => {
     // Ventes = ventes propres du site (hors chargements laitiers, transfert interne, pas une
     // vente) + les ventes du/des camion(s) rattaché(s) ce jour-là (Sortie Fiche Terrain).
     const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
     const ventesSite = sumQty(dayMovs, ["sortie"]);
-    const reception = sumQty(dayMovs, ["reception"]);
     let ventesTrucks = 0;
     for (const truckId of trucksAssignedAt(truckAssignments, s.id, mvtDate)) {
       const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
       ventesTrucks += sumQty(dayMovsTruck, ["sortie"]) - sumQty(dayMovsTruck, ["retour_cuve_camion"]);
     }
     const ventes = ventesSite + ventesTrucks;
-    // Dernier stock (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
-    const jaugeADate = combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, stockDate);
-    // Le Creux ne tient compte QUE de la capacité et du dernier stock du site lui-même —
-    // jamais des camions (ni leur stock, ni leur capacité).
+    // Stock en consignation (affichage) : pour Prehomo/Okouma, site + camion(s) rattaché(s) combinés.
+    const stockConsignation = combinedStockAtDate(s, sites, movements, inventaires, truckAssignments, stockDate);
+    // La demande d'approvisionnement ne tient compte QUE de la capacité et du dernier stock du
+    // site lui-même — jamais des camions (ni leur stock, ni leur capacité).
     const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= stockDate));
     const siteStockOnly = siteInv ? siteInv.stockPhysique : stockThroughDate(s, movements, stockDate, inventaires);
-    const creux = Math.max(0, s.capacity - siteStockOnly);
-    return { site: s, ventes, reception, jaugeADate, creux };
+    const demandeAppro = roundDown5000(s.capacity - siteStockOnly);
+    return { site: s, ventes, stockConsignation, demandeAppro };
   });
   const totalVentes = rows.reduce((a, r) => a + r.ventes, 0);
-  const totalReception = rows.reduce((a, r) => a + r.reception, 0);
-  const totalCreux = rows.reduce((a, r) => a + r.creux, 0);
+  const totalStock = rows.reduce((a, r) => a + r.stockConsignation, 0);
+  const totalDemande = rows.reduce((a, r) => a + r.demandeAppro, 0);
 
-  const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [{
-    name: "Exposition Comilog", rows: rows.map((r) => ({
-      Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes), [`Réception du ${mvtDate} (L)`]: Math.round(r.reception),
-      [`Dernier stock au ${stockDate} (L)`]: Math.round(r.jaugeADate), [`Creux au ${stockDate} (L)`]: Math.round(r.creux),
-    })),
-  }]);
+  // Huiles — Prehomo et Okouma uniquement.
+  const huilesRows = [];
+  for (const siteId of LUBRICANT_SITE_IDS) {
+    const s = sites.find((x) => x.id === siteId);
+    if (!s || !selectedSiteIds.includes(siteId)) continue;
+    for (const lub of LUBRICANTS) {
+      const ps = productStocks.find((p) => p.siteId === siteId && p.product === lub.id);
+      if (!ps) continue;
+      const dayMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === lub.id && m.date === mvtDate);
+      const ventes = sumQty(dayMovs, ["sortie"]);
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === lub.id && i.date <= stockDate));
+      const stockConsignation = inv ? inv.stockPhysique : anchoredStock(siteId, ps.stockInitial, movements, inventaires, lub.id, stockDate, true);
+      const demandeAppro = roundDown5000(ps.capacity - stockConsignation);
+      huilesRows.push({ site: s, lub, ventes, stockConsignation, demandeAppro });
+    }
+  }
+  const totalHuilesVentes = huilesRows.reduce((a, r) => a + r.ventes, 0);
+  const totalHuilesStock = huilesRows.reduce((a, r) => a + r.stockConsignation, 0);
+  const totalHuilesDemande = huilesRows.reduce((a, r) => a + r.demandeAppro, 0);
+
+  const titre = `Exposition au ${formatDateLong(todayStr())}`;
+
+  const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [
+    { name: "Exposition Comilog", rows: rows.map((r) => ({
+      Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes),
+      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
+    })) },
+    ...(huilesRows.length ? [{ name: "Huiles", rows: huilesRows.map((r) => ({
+      Site: r.site.name, Produit: r.lub.label, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes),
+      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
+    })) }] : []),
+  ]);
 
   const doPdf = () => exportToPdf({
     filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
-    title: "Exposition Comilog",
-    period: `Ventes & réception du ${mvtDate} — Creux au ${stockDate}`,
-    columns: ["Site", "Ventes", "Réception", "Dernier stock", "Creux"],
-    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.reception)} L`, `${fmt(r.jaugeADate)} L`, `${fmt(r.creux)} L`]),
-    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalReception)} L`, "", `${fmt(totalCreux)} L`],
+    title: titre,
+    period: `Ventes du ${mvtDate} — Stock au ${stockDate}`,
+    columns: ["Site", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
   });
 
   return (
     <div>
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <Field label="Date des ventes / réception"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={mvtDate} onChange={(e) => setMvtDate(e.target.value)} /></Field>
-        <Field label="Date du stock / creux"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={stockDate} onChange={(e) => setStockDate(e.target.value)} /></Field>
+        <Field label="Date des ventes"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={mvtDate} onChange={(e) => setMvtDate(e.target.value)} /></Field>
+        <Field label="Date du stock"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={stockDate} onChange={(e) => setStockDate(e.target.value)} /></Field>
+      </div>
+      <div className="somip-no-print somip-panel" style={{ padding: 14, marginBottom: 14 }}>
+        <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sites à inclure</p>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          {allFixedSites.map((s) => (
+            <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: "pointer" }}>
+              <input type="checkbox" checked={selectedSiteIds.includes(s.id)} onChange={() => toggleSite(s.id)} />
+              {s.name}
+            </label>
+          ))}
+        </div>
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="Exposition Comilog" period={`Ventes & réception du ${mvtDate} — Creux au ${stockDate}`} />
+        <ReportHeader title={titre} period={`Ventes du ${mvtDate} — Stock au ${stockDate}`} showEditedDate={false} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
           <StatCard label={`Ventes cumulées (${mvtDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
-          <StatCard label={`Réception cumulée (${mvtDate})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
-          <StatCard label={`Creux cumulé (${stockDate})`} value={fmt(totalCreux)} unit="L" accent={C.orange} icon={Truck} />
+          <StatCard label={`Stock en consignation (${stockDate})`} value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
+          <StatCard label={`Demande d'approvisionnement (${stockDate})`} value={fmt(totalDemande)} unit="L" accent={C.orange} icon={Truck} />
         </div>
 
         <div style={{ overflowX: "auto" }}>
@@ -3965,8 +4091,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
             <thead>
               <tr>
                 <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
-                <th style={{ textAlign: "right" }}>Réception ({mvtDate})</th><th style={{ textAlign: "right" }}>Dernier stock ({stockDate})</th>
-                <th style={{ textAlign: "right" }}>Creux ({stockDate})</th>
+                <th style={{ textAlign: "right" }}>Stock en consignation ({stockDate})</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
             <tbody>
@@ -3974,23 +4099,55 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{fmt(r.reception)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.jaugeADate)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.creux)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
                 </tr>
               ))}
               <tr>
                 <td style={{ fontWeight: 700 }}>Total</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>{fmt(totalReception)} L</td>
-                <td></td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalCreux)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalStock)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalDemande)} L</td>
               </tr>
             </tbody>
           </table>
         </div>
+
+        {huilesRows.length > 0 && (
+          <>
+            <h4 style={{ margin: "22px 0 10px", fontSize: 13, color: C.ink }}>Huiles — Prehomo &amp; Okouma</h4>
+            <div style={{ overflowX: "auto" }}>
+              <table className="somip-table">
+                <thead>
+                  <tr>
+                    <th>Site</th><th>Produit</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
+                    <th style={{ textAlign: "right" }}>Stock en consignation ({stockDate})</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {huilesRows.map((r, i) => (
+                    <tr key={i}>
+                      <td style={{ fontWeight: 600 }}>{r.site.name}</td>
+                      <td>{r.lub.label}</td>
+                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
+                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
+                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td style={{ fontWeight: 700 }} colSpan={2}>Total huiles</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesVentes)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesStock)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalHuilesDemande)} L</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Tous les sites (8). Ventes/Réception = celles du jour choisi ci-dessus (indépendant de la date du stock) ; sur Prehomo/Okouma, les ventes incluent celles du camion rattaché ce jour-là. Dernier stock = jauge mesurée à la date choisie (site + camion rattaché, pour Prehomo/Okouma). Creux = Capacité du site − dernier stock du site seul (jamais le camion).
+          Ventes = celles du jour choisi (indépendant de la date du stock) ; sur Prehomo/Okouma, incluent celles du camion rattaché ce jour-là. Stock en consignation = jauge mesurée à la date choisie (site + camion rattaché, pour Prehomo/Okouma). Demande d'approvisionnement = Capacité du site − stock du site seul (jamais le camion), arrondie à l'inférieur au multiple de 5000 L.
         </p>
       </div>
     </div>
