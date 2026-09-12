@@ -308,58 +308,98 @@ async function loadImageDataUrl(url) {
     reader.readAsDataURL(blob);
   });
 }
-async function exportToPdf({ filename, title, period, columns, rows, totalsRow }) {
+async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections }) {
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
   const [pR, pG, pB] = hexToRgb(C.blue), [aR, aG, aB] = hexToRgb(C.orange);
+  const marginX = 32;
+
   // Bandeau bicolore SOMIP.
   doc.setFillColor(pR, pG, pB);
-  doc.rect(0, 0, pageWidth * 0.6, 6, "F");
+  doc.rect(0, 0, pageWidth * 0.6, 7, "F");
   doc.setFillColor(aR, aG, aB);
-  doc.rect(pageWidth * 0.6, 0, pageWidth * 0.4, 6, "F");
-  let textX = 30;
+  doc.rect(pageWidth * 0.6, 0, pageWidth * 0.4, 7, "F");
+
+  let textX = marginX;
   if (CURRENT_LOGO_URL) {
     try {
       const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
       const fmt = dataUrl.includes("image/png") ? "PNG" : "JPEG";
-      doc.addImage(dataUrl, fmt, 30, 14, 26, 26);
-      textX = 64;
+      doc.addImage(dataUrl, fmt, marginX, 18, 30, 30);
+      textX = marginX + 40;
     } catch (e) { /* logo indisponible : on continue sans */ }
   }
-  doc.setFontSize(15);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
   doc.setTextColor(pR, pG, pB);
-  doc.setFont(undefined, "bold");
-  doc.text("SOMIP — Stock Gasoil", textX, 28);
-  doc.setFontSize(9);
-  doc.setTextColor(90, 100, 110);
-  doc.setFont(undefined, "normal");
-  doc.text("Zone Sud-Est · Gabon", textX, 42);
-  doc.setFontSize(9);
-  doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, pageWidth - 30, 28, { align: "right" });
-  doc.setDrawColor(pR, pG, pB);
-  doc.setLineWidth(1);
-  doc.line(30, 50, pageWidth - 30, 50);
-  doc.setFontSize(13);
+  doc.text("SOMIP", textX, 32);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9.5);
+  doc.setTextColor(110, 120, 130);
+  doc.text("Stock Gasoil · Zone Sud-Est · Gabon", textX, 46);
+  doc.setDrawColor(226, 230, 234);
+  doc.setLineWidth(0.75);
+  doc.line(marginX, 62, pageWidth - marginX, 62);
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(17);
   doc.setTextColor(20, 30, 40);
-  doc.setFont(undefined, "bold");
-  doc.text(title, 30, 68);
+  doc.text(title, marginX, 86);
   if (period) {
-    doc.setFontSize(10);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
     doc.setTextColor(aR, aG, aB);
-    doc.setFont(undefined, "bold");
-    doc.text(period, 30, 82);
+    doc.text(period, marginX, 103);
   }
-  autoTable(doc, {
-    startY: 94,
-    head: [columns],
-    body: rows,
-    foot: totalsRow ? [totalsRow] : undefined,
-    theme: "grid",
-    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold" },
-    footStyles: { fillColor: [aR, aG, aB, 0.15], textColor: [20, 30, 40], fontStyle: "bold" },
-    styles: { fontSize: 9, cellPadding: 5 },
-    margin: { left: 30, right: 30 },
+
+  const tableSections = sections && sections.length ? sections : [{ columns, rows, totalsRow }];
+  let startY = period ? 122 : 108;
+  const tableWidth = pageWidth - marginX * 2;
+
+  tableSections.forEach((sec, idx) => {
+    if (sec.heading) {
+      // Bannière de section colorée (pas juste du texte).
+      doc.setFillColor(pR, pG, pB);
+      doc.roundedRect(marginX, startY, tableWidth, 22, 3, 3, "F");
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.setTextColor(255, 255, 255);
+      doc.text(sec.heading.toUpperCase(), marginX + 10, startY + 15);
+      startY += 22 + 8;
+    }
+    autoTable(doc, {
+      startY,
+      head: [sec.columns],
+      body: sec.rows,
+      foot: sec.totalsRow ? [sec.totalsRow] : undefined,
+      theme: "grid",
+      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, halign: "right", cellPadding: 7 },
+      footStyles: { fillColor: [246, 248, 249], textColor: [20, 30, 40], fontStyle: "bold", fontSize: 10, lineWidth: { top: 1.2 }, lineColor: [aR, aG, aB] },
+      bodyStyles: { fontSize: 9.5, cellPadding: 6.5, textColor: [40, 48, 56] },
+      alternateRowStyles: { fillColor: [249, 250, 251] },
+      styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5 },
+      columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+      margin: { left: marginX, right: marginX },
+      didParseCell: (data) => {
+        if (data.column.index === 0) data.cell.styles.halign = "left";
+      },
+    });
+    startY = doc.lastAutoTable.finalY + 26;
   });
+
+  // Pied de page : date d'édition discrète + numéro de page (pas dans l'en-tête, pour ne pas
+  // surcharger le titre — l'utilisateur ne veut pas de date/heure en haut sur certains rapports).
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+    doc.setTextColor(150, 158, 165);
+    doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, marginX, pageHeight - 18);
+    doc.text(`Page ${i} / ${pageCount}`, pageWidth - marginX, pageHeight - 18, { align: "right" });
+  }
+
   doc.save(filename);
 }
 
@@ -3876,9 +3916,20 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
     filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
     title: titre,
     period: bounds.label,
-    columns: ["Site", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
-    rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-    totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
+    sections: [
+      {
+        heading: "Gasoil",
+        columns: ["Site", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
+        rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+        totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
+      },
+      ...(huilesRows.length ? [{
+        heading: "Huiles — Prehomo & Okouma",
+        columns: ["Site", "Produit", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
+        rows: huilesRows.map((r) => [r.site.name, r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+        totalsRow: ["Total huiles", "", `${fmt(totalHuilesVentes)} L`, `${fmt(totalHuilesStock)} L`, `${fmt(totalHuilesDemande)} L`],
+      }] : []),
+    ],
   });
 
   return (
@@ -4054,9 +4105,20 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
     filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
     title: titre,
     period: `Ventes du ${mvtDate} — Stock au ${stockDate}`,
-    columns: ["Site", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
-    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
+    sections: [
+      {
+        heading: "Gasoil",
+        columns: ["Site", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
+        rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+        totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
+      },
+      ...(huilesRows.length ? [{
+        heading: "Huiles — Prehomo & Okouma",
+        columns: ["Site", "Produit", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
+        rows: huilesRows.map((r) => [r.site.name, r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+        totalsRow: ["Total huiles", "", `${fmt(totalHuilesVentes)} L`, `${fmt(totalHuilesStock)} L`, `${fmt(totalHuilesDemande)} L`],
+      }] : []),
+    ],
   });
 
   return (
