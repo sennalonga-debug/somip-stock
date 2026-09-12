@@ -308,7 +308,7 @@ async function loadImageDataUrl(url) {
     reader.readAsDataURL(blob);
   });
 }
-async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections }) {
+async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections, sideBySide = false }) {
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -355,38 +355,54 @@ async function exportToPdf({ filename, title, period, columns, rows, totalsRow, 
 
   const tableSections = sections && sections.length ? sections : [{ columns, rows, totalsRow }];
   let startY = period ? 122 : 108;
-  const tableWidth = pageWidth - marginX * 2;
+  const fullWidth = pageWidth - marginX * 2;
 
-  tableSections.forEach((sec, idx) => {
+  const drawSection = (sec, x, w, y) => {
+    let sy = y;
     if (sec.heading) {
-      // Bannière de section colorée (pas juste du texte).
       doc.setFillColor(pR, pG, pB);
-      doc.roundedRect(marginX, startY, tableWidth, 22, 3, 3, "F");
+      doc.roundedRect(x, sy, w, 22, 3, 3, "F");
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(11);
+      doc.setFontSize(10.5);
       doc.setTextColor(255, 255, 255);
-      doc.text(sec.heading.toUpperCase(), marginX + 10, startY + 15);
-      startY += 22 + 8;
+      doc.text(sec.heading.toUpperCase(), x + 10, sy + 15);
+      sy += 22 + 8;
     }
     autoTable(doc, {
-      startY,
+      startY: sy,
       head: [sec.columns],
       body: sec.rows,
       foot: sec.totalsRow ? [sec.totalsRow] : undefined,
       theme: "grid",
-      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, halign: "right", cellPadding: 7 },
-      footStyles: { fillColor: [246, 248, 249], textColor: [20, 30, 40], fontStyle: "bold", fontSize: 10, lineWidth: { top: 1.2 }, lineColor: [aR, aG, aB] },
-      bodyStyles: { fontSize: 9.5, cellPadding: 6.5, textColor: [40, 48, 56] },
+      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: sideBySide ? 8.5 : 10, halign: "right", cellPadding: sideBySide ? 5 : 7 },
+      footStyles: { fillColor: [246, 248, 249], textColor: [20, 30, 40], fontStyle: "bold", fontSize: sideBySide ? 8.5 : 10, lineWidth: { top: 1.2 }, lineColor: [aR, aG, aB] },
+      bodyStyles: { fontSize: sideBySide ? 8 : 9.5, cellPadding: sideBySide ? 4.5 : 6.5, textColor: [40, 48, 56] },
       alternateRowStyles: { fillColor: [249, 250, 251] },
       styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5 },
       columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
-      margin: { left: marginX, right: marginX },
+      margin: { left: x, right: pageWidth - x - w },
+      tableWidth: w,
       didParseCell: (data) => {
         if (data.column.index === 0) data.cell.styles.halign = "left";
       },
     });
-    startY = doc.lastAutoTable.finalY + 26;
-  });
+    return doc.lastAutoTable.finalY;
+  };
+
+  if (sideBySide && tableSections.length === 2) {
+    // Deux tableaux juxtaposés (au lieu d'empilés) : tient sur une seule page dans la
+    // plupart des cas, plus lisible pour comparer Gasoil et Lubrifiants côte à côte.
+    const gap = 18;
+    const halfWidth = (fullWidth - gap) / 2;
+    const leftX = marginX, rightX = marginX + halfWidth + gap;
+    const yLeft = drawSection(tableSections[0], leftX, halfWidth, startY);
+    const yRight = drawSection(tableSections[1], rightX, halfWidth, startY);
+    startY = Math.max(yLeft, yRight) + 26;
+  } else {
+    tableSections.forEach((sec) => {
+      startY = drawSection(sec, marginX, fullWidth, startY) + 26;
+    });
+  }
 
   // Pied de page : date d'édition discrète + numéro de page (pas dans l'en-tête, pour ne pas
   // surcharger le titre — l'utilisateur ne veut pas de date/heure en haut sur certains rapports).
@@ -3906,7 +3922,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
       Site: r.site.name, [`${venteLabel} (L)`]: Math.round(r.ventesCumulees),
       "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
     })) },
-    ...(huilesRows.length ? [{ name: "Huiles", rows: huilesRows.map((r) => ({
+    ...(huilesRows.length ? [{ name: "Lubrifiants", rows: huilesRows.map((r) => ({
       Site: r.site.name, Produit: r.lub.label, [`${venteLabel} (L)`]: Math.round(r.ventes),
       "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
     })) }] : []),
@@ -3916,19 +3932,20 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
     filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
     title: titre,
     period: bounds.label,
+    sideBySide: true,
     sections: [
       {
+        heading: "Lubrifiant — Prehomo & Okouma",
+        columns: ["Site", "Produit", venteLabel, "Stock en consig.", "Demande approvis."],
+        rows: huilesRows.map((r) => [r.site.name, r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+        totalsRow: ["Total", "", `${fmt(totalHuilesVentes)} L`, `${fmt(totalHuilesStock)} L`, `${fmt(totalHuilesDemande)} L`],
+      },
+      {
         heading: "Gasoil",
-        columns: ["Site", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
+        columns: ["Site", venteLabel, "Stock en consig.", "Demande approvis."],
         rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
         totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
       },
-      ...(huilesRows.length ? [{
-        heading: "Huiles — Prehomo & Okouma",
-        columns: ["Site", "Produit", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
-        rows: huilesRows.map((r) => [r.site.name, r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-        totalsRow: ["Total huiles", "", `${fmt(totalHuilesVentes)} L`, `${fmt(totalHuilesStock)} L`, `${fmt(totalHuilesDemande)} L`],
-      }] : []),
     ],
   });
 
@@ -3994,7 +4011,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
 
         {huilesRows.length > 0 && (
           <>
-            <h4 style={{ margin: "22px 0 10px", fontSize: 13, color: C.ink }}>Huiles — Prehomo &amp; Okouma</h4>
+            <h4 style={{ margin: "22px 0 10px", fontSize: 13, color: C.ink }}>Lubrifiants — Prehomo &amp; Okouma</h4>
             <div style={{ overflowX: "auto" }}>
               <table className="somip-table">
                 <thead>
@@ -4014,7 +4031,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
                     </tr>
                   ))}
                   <tr>
-                    <td style={{ fontWeight: 700 }} colSpan={2}>Total huiles</td>
+                    <td style={{ fontWeight: 700 }} colSpan={2}>Total lubrifiants</td>
                     <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesVentes)} L</td>
                     <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesStock)} L</td>
                     <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalHuilesDemande)} L</td>
@@ -4068,26 +4085,6 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
   const totalStock = rows.reduce((a, r) => a + r.stockConsignation, 0);
   const totalDemande = rows.reduce((a, r) => a + r.demandeAppro, 0);
 
-  // Huiles — Prehomo et Okouma uniquement.
-  const huilesRows = [];
-  for (const siteId of LUBRICANT_SITE_IDS) {
-    const s = sites.find((x) => x.id === siteId);
-    if (!s || !selectedSiteIds.includes(siteId)) continue;
-    for (const lub of LUBRICANTS) {
-      const ps = productStocks.find((p) => p.siteId === siteId && p.product === lub.id);
-      if (!ps) continue;
-      const dayMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === lub.id && m.date === mvtDate);
-      const ventes = sumQty(dayMovs, ["sortie"]);
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === lub.id && i.date <= stockDate));
-      const stockConsignation = inv ? inv.stockPhysique : anchoredStock(siteId, ps.stockInitial, movements, inventaires, lub.id, stockDate, true);
-      const demandeAppro = roundDown5000(ps.capacity - stockConsignation);
-      huilesRows.push({ site: s, lub, ventes, stockConsignation, demandeAppro });
-    }
-  }
-  const totalHuilesVentes = huilesRows.reduce((a, r) => a + r.ventes, 0);
-  const totalHuilesStock = huilesRows.reduce((a, r) => a + r.stockConsignation, 0);
-  const totalHuilesDemande = huilesRows.reduce((a, r) => a + r.demandeAppro, 0);
-
   const titre = `Exposition au ${formatDateLong(todayStr())}`;
 
   const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [
@@ -4095,30 +4092,15 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
       Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes),
       "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
     })) },
-    ...(huilesRows.length ? [{ name: "Huiles", rows: huilesRows.map((r) => ({
-      Site: r.site.name, Produit: r.lub.label, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes),
-      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
-    })) }] : []),
   ]);
 
   const doPdf = () => exportToPdf({
     filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
     title: titre,
     period: `Ventes du ${mvtDate} — Stock au ${stockDate}`,
-    sections: [
-      {
-        heading: "Gasoil",
-        columns: ["Site", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
-        rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-        totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
-      },
-      ...(huilesRows.length ? [{
-        heading: "Huiles — Prehomo & Okouma",
-        columns: ["Site", "Produit", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
-        rows: huilesRows.map((r) => [r.site.name, r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-        totalsRow: ["Total huiles", "", `${fmt(totalHuilesVentes)} L`, `${fmt(totalHuilesStock)} L`, `${fmt(totalHuilesDemande)} L`],
-      }] : []),
-    ],
+    columns: ["Site", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
   });
 
   return (
@@ -4174,39 +4156,6 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
             </tbody>
           </table>
         </div>
-
-        {huilesRows.length > 0 && (
-          <>
-            <h4 style={{ margin: "22px 0 10px", fontSize: 13, color: C.ink }}>Huiles — Prehomo &amp; Okouma</h4>
-            <div style={{ overflowX: "auto" }}>
-              <table className="somip-table">
-                <thead>
-                  <tr>
-                    <th>Site</th><th>Produit</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
-                    <th style={{ textAlign: "right" }}>Stock en consignation ({stockDate})</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {huilesRows.map((r, i) => (
-                    <tr key={i}>
-                      <td style={{ fontWeight: 600 }}>{r.site.name}</td>
-                      <td>{r.lub.label}</td>
-                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
-                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
-                      <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
-                    </tr>
-                  ))}
-                  <tr>
-                    <td style={{ fontWeight: 700 }} colSpan={2}>Total huiles</td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesVentes)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalHuilesStock)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalHuilesDemande)} L</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </>
-        )}
 
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Ventes = celles du jour choisi (indépendant de la date du stock) ; sur Prehomo/Okouma, incluent celles du camion rattaché ce jour-là. Stock en consignation = jauge mesurée à la date choisie (site + camion rattaché, pour Prehomo/Okouma). Demande d'approvisionnement = Capacité du site − stock du site seul (jamais le camion), arrondie à l'inférieur au multiple de 5000 L.
