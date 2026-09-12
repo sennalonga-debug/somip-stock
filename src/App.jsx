@@ -308,7 +308,7 @@ async function loadImageDataUrl(url) {
     reader.readAsDataURL(blob);
   });
 }
-async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections, sideBySide = false }) {
+async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections, sideBySide = false, centerTitle = false, subtitle }) {
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -342,19 +342,30 @@ async function exportToPdf({ filename, title, period, columns, rows, totalsRow, 
   doc.setLineWidth(0.75);
   doc.line(marginX, 62, pageWidth - marginX, 62);
 
+  const titleX = centerTitle ? pageWidth / 2 : marginX;
+  const titleOpts = centerTitle ? { align: "center" } : {};
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(17);
+  doc.setFontSize(18);
   doc.setTextColor(20, 30, 40);
-  doc.text(title, marginX, 86);
+  doc.text(title, titleX, 86, titleOpts);
+  let afterTitleY = 86;
+  if (subtitle) {
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(11);
+    doc.setTextColor(90, 100, 110);
+    doc.text(subtitle, titleX, 102, titleOpts);
+    afterTitleY = 102;
+  }
   if (period) {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(11);
     doc.setTextColor(aR, aG, aB);
-    doc.text(period, marginX, 103);
+    doc.text(period, titleX, afterTitleY + 17, titleOpts);
+    afterTitleY += 17;
   }
 
   const tableSections = sections && sections.length ? sections : [{ columns, rows, totalsRow }];
-  let startY = period ? 122 : 108;
+  let startY = afterTitleY + 20;
   const fullWidth = pageWidth - marginX * 2;
 
   const drawSection = (sec, x, w, y) => {
@@ -389,18 +400,27 @@ async function exportToPdf({ filename, title, period, columns, rows, totalsRow, 
     return doc.lastAutoTable.finalY;
   };
 
+  // Un "groupe" peut être une section unique, ou plusieurs sous-tableaux empilés dans une
+  // même colonne (ex : Lubrifiant — Prehomo puis Lubrifiant — Okouma, l'un sous l'autre).
+  const drawGroup = (group, x, w, y) => {
+    if (!Array.isArray(group)) return drawSection(group, x, w, y);
+    let sy = y;
+    group.forEach((sec) => { sy = drawSection(sec, x, w, sy) + 16; });
+    return sy - 16;
+  };
+
   if (sideBySide && tableSections.length === 2) {
-    // Deux tableaux juxtaposés (au lieu d'empilés) : tient sur une seule page dans la
+    // Deux colonnes juxtaposées (au lieu d'empilées) : tient sur une seule page dans la
     // plupart des cas, plus lisible pour comparer Gasoil et Lubrifiants côte à côte.
     const gap = 18;
     const halfWidth = (fullWidth - gap) / 2;
     const leftX = marginX, rightX = marginX + halfWidth + gap;
-    const yLeft = drawSection(tableSections[0], leftX, halfWidth, startY);
-    const yRight = drawSection(tableSections[1], rightX, halfWidth, startY);
+    const yLeft = drawGroup(tableSections[0], leftX, halfWidth, startY);
+    const yRight = drawGroup(tableSections[1], rightX, halfWidth, startY);
     startY = Math.max(yLeft, yRight) + 26;
   } else {
     tableSections.forEach((sec) => {
-      startY = drawSection(sec, marginX, fullWidth, startY) + 26;
+      startY = drawGroup(sec, marginX, fullWidth, startY) + 26;
     });
   }
 
@@ -3931,21 +3951,26 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
   const doPdf = () => exportToPdf({
     filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
     title: titre,
+    centerTitle: true,
+    subtitle: "Sites externalisés — Zone Sud-Est",
     period: bounds.label,
     sideBySide: true,
     sections: [
-      {
-        heading: "Lubrifiant — Prehomo & Okouma",
-        columns: ["Site", "Produit", venteLabel, "Stock en consig.", "Demande approvis."],
-        rows: huilesRows.map((r) => [r.site.name, r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-        totalsRow: ["Total", "", `${fmt(totalHuilesVentes)} L`, `${fmt(totalHuilesStock)} L`, `${fmt(totalHuilesDemande)} L`],
-      },
       {
         heading: "Gasoil",
         columns: ["Site", venteLabel, "Stock en consig.", "Demande approvis."],
         rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
         totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
       },
+      LUBRICANT_SITE_IDS.map((siteId) => {
+        const siteRows = huilesRows.filter((r) => r.site.id === siteId);
+        return {
+          heading: `Lubrifiant — ${siteRows[0]?.site.name || siteId}`,
+          columns: ["Produit", venteLabel, "Stock en consig."],
+          rows: siteRows.map((r) => [r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`]),
+          totalsRow: ["Total", `${fmt(siteRows.reduce((a, r) => a + r.ventes, 0))} L`, `${fmt(siteRows.reduce((a, r) => a + r.stockConsignation, 0))} L`],
+        };
+      }),
     ],
   });
 
