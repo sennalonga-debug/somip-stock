@@ -2308,6 +2308,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [indexApres, setIndexApres] = useState("");
   const [compteur, setCompteur] = useState("");
   const [compteurReadings, setCompteurReadings] = useState([{ compteur: "", indexAvant: "", indexApres: "" }]);
+  const [indexBloque, setIndexBloque] = useState(false);
+  const [sortieDirecte, setSortieDirecte] = useState("");
   const [chargements, setChargements] = useState([{ camion: "", quantite: "" }]);
   const [retoursCuve, setRetoursCuve] = useState([{ camion: "", quantite: "" }]);
   const [destinataire, setDestinataire] = useState("");
@@ -2365,8 +2367,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   }));
   const sortieQtySingle = indexAvant !== "" && indexApres !== "" ? Number(indexApres) - Number(indexAvant) : 0;
   const sortieValidSingle = indexAvant === "" && indexApres === "" ? true : (indexAvant !== "" && indexApres !== "" && sortieQtySingle > 0);
-  const sortieQty = isMultiCompteurEntry ? readingFlows.reduce((a, r) => a + r.flow, 0) : sortieQtySingle;
-  const sortieValid = isMultiCompteurEntry ? readingFlows.every((r) => r.valid) : sortieValidSingle;
+  // Panne de compteur (Superviseur uniquement) : la vente du jour est saisie directement, sans
+  // passer par l'index — utile quand le compteur est bloqué et ne peut pas être relevé.
+  const sortieQty = indexBloque ? (Number(sortieDirecte) || 0) : (isMultiCompteurEntry ? readingFlows.reduce((a, r) => a + r.flow, 0) : sortieQtySingle);
+  const sortieValid = indexBloque ? true : (isMultiCompteurEntry ? readingFlows.every((r) => r.valid) : sortieValidSingle);
   const totalChargements = isLubSite && !isLub ? chargements.reduce((a, c) => a + (Number(c.quantite) || 0), 0) : 0;
   const chargementsValid = totalChargements <= sortieQty;
   const venteStation = isLubSite && !isLub ? Math.max(0, sortieQty - totalChargements) : sortieQty;
@@ -2411,6 +2415,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const resetDayFields = () => {
     setReceptions([{ quantite: "", ref: "" }]);
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
+    setIndexBloque(false); setSortieDirecte("");
     setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]);
     setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetoursCuve([{ camion: "", quantite: "" }]); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
     setStockFinMesure(""); setCommentaireInv(""); setStockFinPhotos([]);
@@ -2443,7 +2448,20 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
       }
       if (sortieQty > 0) {
         const compteurField = meters.length > 1 ? compteur : undefined;
-        if (isLub || isMobileSite) {
+        if (indexBloque) {
+          // Panne de compteur (Superviseur) : la vente est saisie directement, sans index.
+          const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, commentaire: "Compteur en panne — saisie directe sans index", destinataire, compteur: compteurField, ...vcfExtra(sortieQty) });
+          if (!ok) return;
+          if (isLubSite && !isLub) {
+            for (const c of chargements) {
+              const qty = Number(c.quantite) || 0;
+              if (qty > 0 && c.camion) {
+                const ok2 = await addMovement({ siteId, product, type: "sortie_camion", date, quantity: qty, delta: -qty, camion: c.camion, ...vcfExtra(qty) });
+                if (!ok2) return;
+              }
+            }
+          }
+        } else if (isLub || isMobileSite) {
           // La "Sortie" enregistre toujours le flux COMPLET du compteur (jamais réduit par le
           // retour cuve) : Sortie et Retour cuve peuvent être saisis à des moments différents,
           // donc on ne peut pas se fier à ce qui est rempli "en même temps". Le retour cuve est
@@ -2621,7 +2639,49 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           )}
           {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
 
-          {(isLub || isMobileSite) ? (
+          {canManage && (
+            <label style={{ display: "flex", alignItems: "center", gap: 7, margin: "10px 0 8px", cursor: "pointer", fontSize: 12, color: C.warning, fontWeight: 600 }}>
+              <input type="checkbox" checked={indexBloque} onChange={(e) => setIndexBloque(e.target.checked)} />
+              Compteur en panne — saisir la sortie directement, sans index (Superviseur)
+            </label>
+          )}
+          {indexBloque ? (
+            <>
+              <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Sortie (saisie directe — compteur en panne)</p>
+              <Field label="Quantité sortie (L)"><input type="number" className="somip-input" value={sortieDirecte} onChange={(e) => setSortieDirecte(e.target.value)} placeholder="0" /></Field>
+              <p style={{ margin: "-4px 0 10px", fontSize: 11, color: C.sub }}>Le compteur ne sera pas mis à jour — pense à noter l'index réel dès qu'il redevient lisible.</p>
+              {isLubSite && !isLub && (
+                <>
+                  <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur cette sortie)</p>
+                  {chargements.map((c, idx) => (
+                    <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Camion">
+                          <select className="somip-select" value={c.camion} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, camion: e.target.value } : r)))}>
+                            <option value="">— choisir —</option>
+                            {truckSites.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                          </select>
+                        </Field>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Quantité chargée (L)">
+                          <input type="number" className="somip-input" value={c.quantite} onChange={(e) => setChargements((prev) => prev.map((r, i) => (i === idx ? { ...r, quantite: e.target.value } : r)))} placeholder="0" />
+                        </Field>
+                      </div>
+                      {chargements.length > 1 && (
+                        <button onClick={() => setChargements((prev) => prev.filter((_, i) => i !== idx))} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                          <X size={16} color={C.danger} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
+                    <Plus size={13} /> Ajouter un camion
+                  </button>
+                </>
+              )}
+            </>
+          ) : (isLub || isMobileSite) ? (
             <>
               <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Sortie Fiche Terrain (compteur)" : "Sortie (compteur de livraison)"}</p>
               <div style={{ display: "flex", gap: 8 }}>
