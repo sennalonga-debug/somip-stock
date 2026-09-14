@@ -3342,6 +3342,163 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   );
 }
 
+/* ---- Inventaire officiel (inopiné / mensuel) — cuve par cuve, avec PDF signé ---- */
+function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage }) {
+  const fixedSites = sites.filter((s) => !s.isMobile);
+  const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
+  const [date, setDate] = useState(todayStr());
+  const [type, setType] = useState("mensuel");
+  const [inventoriste, setInventoriste] = useState("");
+  const [operateur, setOperateur] = useState("");
+  const [tempC, setTempC] = useState("");
+  const [densite, setDensite] = useState("");
+  const [commentaire, setCommentaire] = useState("");
+  const [filterSite, setFilterSite] = useState("all");
+
+  const tanksForSite = siteTanks.filter((t) => t.siteId === siteId);
+  const [cuveReadings, setCuveReadings] = useState([]);
+  useEffect(() => {
+    setCuveReadings(tanksForSite.map((t) => ({ cuve: t.name, indexFin: "", stockAmbiant: "" })));
+  }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const stockAmbiantTotal = cuveReadings.reduce((a, c) => a + (Number(c.stockAmbiant) || 0), 0);
+  const vcfResult = correctVolumeTo15({
+    volumeAmbiant: stockAmbiantTotal,
+    tempC: tempC === "" ? NaN : Number(tempC),
+    densiteObservee: Number(densite) || 0,
+  });
+  const has15 = !!vcfResult;
+
+  const updateCuve = (idx, field, value) => setCuveReadings((prev) => prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c)));
+  const addCuveRow = () => setCuveReadings((prev) => [...prev, { cuve: `Cuve ${prev.length + 1}`, indexFin: "", stockAmbiant: "" }]);
+  const removeCuveRow = (idx) => setCuveReadings((prev) => prev.filter((_, i) => i !== idx));
+
+  const canSubmit = siteId && date && cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "");
+
+  const submit = () => {
+    if (!canSubmit) return;
+    addInventaireOfficiel({
+      siteId, date, type, inventoriste, operateur,
+      cuves: cuveReadings.map((c) => ({ cuve: c.cuve, indexFin: c.indexFin === "" ? null : Number(c.indexFin), stockAmbiant: Number(c.stockAmbiant) || 0 })),
+      temperatureC: tempC, densite, commentaire,
+    });
+    setCuveReadings(tanksForSite.map((t) => ({ cuve: t.name, indexFin: "", stockAmbiant: "" })));
+    setInventoriste(""); setOperateur(""); setTempC(""); setDensite(""); setCommentaire("");
+  };
+
+  const list = inventairesOfficiels.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  return (
+    <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+      {canWrite && (
+        <div className="somip-panel" style={{ padding: 18, flex: "1 1 340px" }}>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvel inventaire officiel</h3>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <button className={`somip-tab ${type === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setType("mensuel")}>Mensuel</button>
+            <button className={`somip-tab ${type === "inopine" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setType("inopine")}>Inopiné</button>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Site">
+                <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+                  {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div style={{ flex: 1 }}><Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field></div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}><Field label="Inventoriste"><input className="somip-input" value={inventoriste} onChange={(e) => setInventoriste(e.target.value)} placeholder="Nom" /></Field></div>
+            <div style={{ flex: 1 }}><Field label="Opérateur"><input className="somip-input" value={operateur} onChange={(e) => setOperateur(e.target.value)} placeholder="Nom" /></Field></div>
+          </div>
+
+          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Relevé cuve par cuve</p>
+          {tanksForSite.length === 0 && (
+            <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.warning }}>Aucune cuve configurée pour ce site — ajoute-les depuis la page Sites, ou saisis-les directement ci-dessous.</p>
+          )}
+          {cuveReadings.map((c, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+              <div style={{ flex: 1.2 }}>
+                <Field label="Cuve"><input className="somip-input" value={c.cuve} onChange={(e) => updateCuve(idx, "cuve", e.target.value)} placeholder="Cuve 1" /></Field>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Field label="Index fin"><input type="number" className="somip-input" value={c.indexFin} onChange={(e) => updateCuve(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={c.stockAmbiant} onChange={(e) => updateCuve(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
+              </div>
+              <button onClick={() => removeCuveRow(idx)} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                <X size={16} color={C.danger} />
+              </button>
+            </div>
+          ))}
+          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 12 }} onClick={addCuveRow}>
+            <Plus size={13} /> Ajouter une cuve
+          </button>
+
+          <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
+          <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaire} onChange={(e) => setCommentaire(e.target.value)} /></Field>
+
+          <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+              <span style={{ color: C.sub, fontWeight: 600 }}>Stock total ambiant</span>
+              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockAmbiantTotal)} L</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: C.sub, fontWeight: 600 }}>Stock total à 15°C</span>
+              <span className="somip-mono" style={{ fontWeight: 700, color: has15 ? C.blue : C.sub }}>{has15 ? `${fmt(vcfResult.volume15)} L` : "— (température/densité manquantes)"}</span>
+            </div>
+          </div>
+
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!canSubmit}>
+            <Plus size={15} /> Enregistrer l'inventaire officiel
+          </button>
+        </div>
+      )}
+
+      <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — Inventaires officiels</h3>
+          <select className="somip-select" style={{ width: 200 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
+            <option value="all">Tous les sites</option>
+            {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Date</th><th>Site</th><th>Type</th><th>Inventoriste</th><th>Opérateur</th>
+                <th style={{ textAlign: "right" }}>Stock ambiant</th><th style={{ textAlign: "right" }}>Stock 15°C</th><th></th>{canManage && <th></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {list.length === 0 && <EmptyRow colSpan={canManage ? 9 : 8} text="Aucun inventaire officiel enregistré." />}
+              {list.map((inv) => (
+                <tr key={inv.id}>
+                  <td className="somip-mono">{inv.date}</td>
+                  <td>{sites.find((s) => s.id === inv.siteId)?.name}</td>
+                  <td><Badge color={inv.type === "inopine" ? C.orange : C.blue}>{TYPE_INVENTAIRE_LABELS[inv.type]}</Badge></td>
+                  <td style={{ color: C.sub }}>{inv.inventoriste || "—"}</td>
+                  <td style={{ color: C.sub }}>{inv.operateur || "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(inv.stockAmbiant)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: inv.stock15 !== undefined ? C.blue : C.sub }}>{inv.stock15 !== undefined ? `${fmt(inv.stock15)} L` : "—"}</td>
+                  <td>
+                    <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielToPdf(inv, sites.find((s) => s.id === inv.siteId))}>
+                      <Download size={12} /> PDF
+                    </button>
+                  </td>
+                  {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaireOfficiel(inv)} /></td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Correction 15°C — calculateur autonome                               */
 /* ------------------------------------------------------------------ */
