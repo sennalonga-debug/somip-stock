@@ -116,6 +116,10 @@ function formatDateLong(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   return `${d} ${FRENCH_MONTHS[m - 1]} ${y}`;
 }
+function formatDateShort(dateStr) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return `${pad2(d)}/${pad2(m)}/${y}`;
+}
 // Les camions ne livrent/reprennent que par multiples de 5000 L (5000/15000/20000/35000) :
 // toute demande d'approvisionnement est arrondie à l'inférieur, au multiple de 5000 le plus proche.
 function roundDown5000(n) {
@@ -4738,8 +4742,8 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
   const doPdf = () => exportToPdf({
     filename: `SOMIP_Suivi_Stocks_Comilog_${stockDate}.pdf`,
     title: titre,
-    period: `Ventes du ${mvtDate} — Stock au ${stockDate}`,
-    columns: ["Site", "Ventes", "Réception", `Suivi jauges Comilog au ${stockDate}`, "Demande d'approvisionnement"],
+    period: `Ventes et Réception du ${formatDateShort(mvtDate)} — Stock et Creux du ${formatDateShort(stockDate)}`,
+    columns: ["Site", "Ventes", "Réception", `Suivi jauges Comilog au ${formatDateShort(stockDate)}`, "Demande d'approvisionnement"],
     rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.reception)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
     totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalReception)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
   });
@@ -4762,22 +4766,22 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
         </div>
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title={titre} period={`Ventes du ${mvtDate} — Stock au ${stockDate}`} showEditedDate={false} />
+        <ReportHeader title={titre} period={`Ventes et Réception du ${formatDateShort(mvtDate)} — Stock et Creux du ${formatDateShort(stockDate)}`} showEditedDate={false} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-          <StatCard label={`Ventes cumulées (${mvtDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
-          <StatCard label={`Réceptions cumulées (${mvtDate})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
-          <StatCard label={`Suivi jauges Comilog au ${stockDate}`} value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
-          <StatCard label={`Demande d'approvisionnement (${stockDate})`} value={fmt(totalDemande)} unit="L" accent={C.orange} icon={Truck} />
+          <StatCard label={`Ventes cumulées (${formatDateShort(mvtDate)})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
+          <StatCard label={`Réceptions cumulées (${formatDateShort(mvtDate)})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
+          <StatCard label={`Suivi jauges Comilog au ${formatDateShort(stockDate)}`} value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
+          <StatCard label={`Demande d'approvisionnement (${formatDateShort(stockDate)})`} value={fmt(totalDemande)} unit="L" accent={C.orange} icon={Truck} />
         </div>
 
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
             <thead>
               <tr>
-                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th><th style={{ textAlign: "right" }}>Réception ({mvtDate})</th>
-                <th style={{ textAlign: "right" }}>Suivi jauges Comilog au {stockDate}</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({formatDateShort(mvtDate)})</th><th style={{ textAlign: "right" }}>Réception ({formatDateShort(mvtDate)})</th>
+                <th style={{ textAlign: "right" }}>Suivi jauges Comilog au {formatDateShort(stockDate)}</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
             <tbody>
