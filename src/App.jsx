@@ -41,6 +41,8 @@ function applyTheme(primary, accent) {
 // exports PDF/PowerPoint, sans avoir à faire transiter les réglages dans tous les rapports.
 let CURRENT_LOGO_URL = null;
 function setCurrentLogoUrl(url) { CURRENT_LOGO_URL = url || null; }
+let CURRENT_LOGO_TOTAL_URL = null;
+function setCurrentLogoTotalUrl(url) { CURRENT_LOGO_TOTAL_URL = url || null; }
 
 /* ------------------------------------------------------------------ */
 /* Seed / reference data                                               */
@@ -93,9 +95,9 @@ const MOVEMENTS_SEED = [
   { id: "m5", siteId: "traction", type: "sortie", date: "2026-09-02", quantity: 1800, delta: -1800, destinataire: "Locomotive 12", commentaire: "", isDemo: true },
 ];
 
-const SETTINGS_SEED = { objectifFreinte: 3, logoUrl: null, colorPrimary: "#0071BD", colorAccent: "#F16B16" };
+const SETTINGS_SEED = { objectifFreinte: 3, logoUrl: null, logoTotalUrl: null, colorPrimary: "#0071BD", colorAccent: "#F16B16" };
 const rowToSettings = (r) => r ? {
-  objectifFreinte: Number(r.objectif_freinte), logoUrl: r.logo_url || null,
+  objectifFreinte: Number(r.objectif_freinte), logoUrl: r.logo_url || null, logoTotalUrl: r.logo_total_url || null,
   colorPrimary: r.color_primary || "#0071BD", colorAccent: r.color_accent || "#F16B16",
 } : SETTINGS_SEED;
 
@@ -447,6 +449,7 @@ async function exportInventaireOfficielToPdf(inv, site) {
   const pageHeight = doc.internal.pageSize.getHeight();
   const [pR, pG, pB] = hexToRgb(C.blue), [aR, aG, aB] = hexToRgb(C.orange);
   const marginX = 40;
+  const fullWidth = pageWidth - marginX * 2;
 
   // Bandeau bicolore SOMIP.
   doc.setFillColor(pR, pG, pB);
@@ -471,22 +474,36 @@ async function exportInventaireOfficielToPdf(inv, site) {
   doc.setFontSize(9.5);
   doc.setTextColor(110, 120, 130);
   doc.text("Sites externalisés — Zone Sud-Est · Gabon", textX, 48);
+
+  // Logo TotalEnergies, en haut à droite (document conjoint SOMIP / TotalEnergies).
+  if (CURRENT_LOGO_TOTAL_URL) {
+    try {
+      const dataUrlT = await loadImageDataUrl(CURRENT_LOGO_TOTAL_URL);
+      const fmtT = dataUrlT.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrlT, fmtT, pageWidth - marginX - 60, 18, 60, 34);
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+
   doc.setDrawColor(226, 230, 234);
   doc.setLineWidth(0.75);
   doc.line(marginX, 66, pageWidth - marginX, 66);
 
+  // Titre dynamique : "Inventaire Inopiné" ou "Inventaire fin <mois>" (mensuel).
+  const titre = inv.type === "mensuel"
+    ? `Inventaire fin ${FRENCH_MONTHS[Number(inv.date.slice(5, 7)) - 1]}`
+    : "Inventaire Inopiné";
   doc.setFont("helvetica", "bold");
   doc.setFontSize(17);
   doc.setTextColor(20, 30, 40);
-  doc.text(`Procès-verbal d'inventaire — ${TYPE_INVENTAIRE_LABELS[inv.type] || inv.type}`, pageWidth / 2, 92, { align: "center" });
+  doc.text(titre, pageWidth / 2, 92, { align: "center" });
   doc.setFont("helvetica", "bold");
   doc.setFontSize(11.5);
   doc.setTextColor(aR, aG, aB);
-  doc.text(`${site?.name || inv.siteId} — ${formatDateLong(inv.date)}`, pageWidth / 2, 110, { align: "center" });
+  doc.text(`${site?.name || inv.siteId} — ${PRODUIT_INVENTAIRE_LABELS[inv.produit] || "Gasoil"} — ${formatDateLong(inv.date)}`, pageWidth / 2, 110, { align: "center" });
 
   let y = 138;
   const infoRow = (label1, value1, label2, value2) => {
-    const colW = (pageWidth - marginX * 2) / 2;
+    const colW = fullWidth / 2;
     doc.setFont("helvetica", "normal");
     doc.setFontSize(9);
     doc.setTextColor(110, 120, 130);
@@ -500,25 +517,56 @@ async function exportInventaireOfficielToPdf(inv, site) {
     y += 34;
   };
   infoRow("Inventoriste", inv.inventoriste, "Opérateur", inv.operateur);
-  infoRow("Densité observée (ambiant)", inv.densite !== undefined ? String(inv.densite) : "", "Température relevée (ambiant)", inv.temperatureC !== undefined ? `${inv.temperatureC} °C` : "");
   doc.setDrawColor(226, 230, 234);
   doc.line(marginX, y - 14, pageWidth - marginX, y - 14);
   y += 6;
 
-  // Bannière "Relevé cuve par cuve".
-  const fullWidth = pageWidth - marginX * 2;
-  doc.setFillColor(pR, pG, pB);
-  doc.roundedRect(marginX, y, fullWidth, 22, 3, 3, "F");
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(10.5);
-  doc.setTextColor(255, 255, 255);
-  doc.text("RELEVÉ CUVE PAR CUVE — BASE AMBIANTE", marginX + 10, y + 15);
-  y += 22 + 8;
+  const drawBanner = (text) => {
+    doc.setFillColor(pR, pG, pB);
+    doc.roundedRect(marginX, y, fullWidth, 22, 3, 3, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text(text, marginX + 10, y + 15);
+    y += 22 + 8;
+  };
 
+  // Tableau 1 — Cuves : hauteur, densité, température, présence d'eau, volumes ambiant et 15°C.
+  drawBanner("CUVES — RELEVÉ DÉTAILLÉ");
   autoTable(doc, {
     startY: y,
-    head: [["Cuve", "Index fin", "Stock ambiant (L)"]],
-    body: (inv.cuves || []).map((c) => [c.cuve, c.indexFin !== null && c.indexFin !== undefined ? fmt(c.indexFin) : "—", `${fmt(c.stockAmbiant)} L`]),
+    head: [["Cuve", "Hauteur", "Densité", "Temp. (°C)", "Eau", "Vol. ambiant (L)", "Vol. 15°C (L)"]],
+    body: (inv.cuves || []).map((c) => [
+      c.cuve,
+      c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—",
+      c.densite !== null && c.densite !== undefined ? String(c.densite) : "—",
+      c.temperatureC !== null && c.temperatureC !== undefined ? String(c.temperatureC) : "—",
+      c.eau ? "Oui" : "Non",
+      `${fmt(c.stockAmbiant)} L`,
+      c.volume15 !== null && c.volume15 !== undefined ? `${fmt(c.volume15)} L` : "—",
+    ]),
+    theme: "grid",
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 8.5, cellPadding: 6 },
+    bodyStyles: { fontSize: 9, cellPadding: 6, textColor: [40, 48, 56] },
+    alternateRowStyles: { fillColor: [249, 250, 251] },
+    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
+    columnStyles: { 0: { halign: "left", fontStyle: "bold" }, 4: { halign: "center" } },
+    margin: { left: marginX, right: marginX },
+    didParseCell: (data) => {
+      if (data.column.index === 4 && data.section === "body" && data.cell.raw === "Oui") {
+        data.cell.styles.textColor = [aR, aG, aB];
+        data.cell.styles.fontStyle = "bold";
+      }
+    },
+  });
+  y = doc.lastAutoTable.finalY + 20;
+
+  // Tableau 2 — Index, séparé (comme demandé), lié aux mêmes cuves.
+  drawBanner("INDEX — RELEVÉ COMPTEUR");
+  autoTable(doc, {
+    startY: y,
+    head: [["Cuve", "Index fin"]],
+    body: (inv.cuves || []).map((c) => [c.cuve, c.indexFin !== null && c.indexFin !== undefined ? fmt(c.indexFin) : "—"]),
     theme: "grid",
     headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, cellPadding: 7 },
     bodyStyles: { fontSize: 10, cellPadding: 7, textColor: [40, 48, 56] },
@@ -526,6 +574,7 @@ async function exportInventaireOfficielToPdf(inv, site) {
     styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
     columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
     margin: { left: marginX, right: marginX },
+    tableWidth: fullWidth / 2,
   });
   y = doc.lastAutoTable.finalY + 20;
 
@@ -582,7 +631,7 @@ async function exportInventaireOfficielToPdf(inv, site) {
   doc.setTextColor(150, 158, 165);
   doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, marginX, pageHeight - 18);
 
-  doc.save(`SOMIP_Inventaire_${TYPE_INVENTAIRE_LABELS[inv.type] || inv.type}_${site?.code || inv.siteId}_${inv.date}.pdf`);
+  doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || inv.siteId}_${inv.date}.pdf`);
 }
 
 // Envoie une ou plusieurs photos vers Supabase Storage (bucket "somip-photos") et renvoie
@@ -830,6 +879,7 @@ const ROLE_VALUES = ["superviseur", "operateur", "chauffeur", "lecture"];
 const ROLE_LABELS = { superviseur: "Superviseur", operateur: "Opérateur", chauffeur: "Chauffeur", lecture: "Lecture" };
 const PERIOD_TYPE_LABELS = { mensuel: "Mensuel", trimestriel: "Trimestriel", decadaire: "Décadaire" };
 const TYPE_INVENTAIRE_LABELS = { inopine: "Inopiné", mensuel: "Mensuel" };
+const PRODUIT_INVENTAIRE_LABELS = { gasoil: "Gasoil", lubrifiant_vrac: "Lubrifiant vrac" };
 // canManage : sites, utilisateurs, réglages, modification/suppression, historique.
 // canWrite  : peut ajouter des réceptions/sorties/inventaires (saisie).
 function permsFor(role) {
@@ -844,7 +894,7 @@ function permsFor(role) {
 /* ------------------------------------------------------------------ */
 const numOrUndef = (v) => (v === null || v === undefined ? undefined : Number(v));
 
-const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile });
+const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile, active: r.active !== false });
 const siteToRow = (s) => ({ id: s.id, code: s.code, name: s.name, capacity: s.capacity, stock_initial: s.stockInitial, is_mobile: !!s.isMobile });
 
 const rowToMovement = (r) => ({
@@ -906,15 +956,13 @@ const bilanToRow = (b) => ({
 });
 
 const rowToInventaireOfficiel = (r) => ({
-  id: r.id, siteId: r.site_id, date: r.date, type: r.type, inventoriste: r.inventoriste || "", operateur: r.operateur || "",
-  cuves: r.cuves || [], temperatureC: numOrUndef(r.temperature_c), densite: numOrUndef(r.densite), densite15: numOrUndef(r.densite15),
-  vcf: numOrUndef(r.vcf), stockAmbiant: Number(r.stock_ambiant || 0), stock15: numOrUndef(r.stock15), commentaire: r.commentaire || "",
+  id: r.id, siteId: r.site_id, date: r.date, type: r.type, produit: r.produit || "gasoil", inventoriste: r.inventoriste || "", operateur: r.operateur || "",
+  cuves: r.cuves || [], stockAmbiant: Number(r.stock_ambiant || 0), stock15: numOrUndef(r.stock15), commentaire: r.commentaire || "",
   createdBy: r.created_by, createdAt: r.created_at,
 });
 const inventaireOfficielToRow = (i) => ({
-  site_id: i.siteId, date: i.date, type: i.type, inventoriste: i.inventoriste ?? null, operateur: i.operateur ?? null,
-  cuves: i.cuves || [], temperature_c: i.temperatureC ?? null, densite: i.densite ?? null, densite15: i.densite15 ?? null,
-  vcf: i.vcf ?? null, stock_ambiant: i.stockAmbiant || 0, stock15: i.stock15 ?? null, commentaire: i.commentaire ?? null,
+  site_id: i.siteId, date: i.date, type: i.type, produit: i.produit || "gasoil", inventoriste: i.inventoriste ?? null, operateur: i.operateur ?? null,
+  cuves: i.cuves || [], stock_ambiant: i.stockAmbiant || 0, stock15: i.stock15 ?? null, commentaire: i.commentaire ?? null,
   created_by: i.createdBy ?? null,
 });
 const rowToSiteTank = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
@@ -925,7 +973,7 @@ const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, 
 
 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
-const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [] });
+const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [], active: r.active !== false });
 
 async function fetchTable(table, mapper, orderCol, ascending) {
   if (!SUPABASE_CONFIGURED) return [];
@@ -1262,6 +1310,12 @@ export default function App() {
           setLoading(false);
           return;
         }
+        if (data.active === false) {
+          await supabase.auth.signOut();
+          setLoadError("Ce compte a été désactivé par un Superviseur. Contacte-le si tu penses qu'il s'agit d'une erreur.");
+          setLoading(false);
+          return;
+        }
         setProfile(rowToProfile(data));
       } catch (e) {
         if (cancelled) return;
@@ -1465,14 +1519,22 @@ export default function App() {
   });
 
   /* ---- mutations : Inventaires officiels (inopinés/mensuels), cuve par cuve ---- */
-  const addInventaireOfficiel = ({ siteId, date, type, inventoriste, operateur, cuves, temperatureC, densite, commentaire }) => withSync(async () => {
-    const stockAmbiant = (cuves || []).reduce((a, c) => a + (Number(c.stockAmbiant) || 0), 0);
-    let densite15, vcf, stock15;
-    if (temperatureC !== undefined && temperatureC !== "" && densite !== undefined && densite !== "") {
-      const corr = correctVolumeTo15({ volumeAmbiant: stockAmbiant, tempC: Number(temperatureC), densiteObservee: Number(densite) });
-      if (corr) { densite15 = corr.densite15; vcf = corr.vcf; stock15 = corr.volume15; }
-    }
-    const row = inventaireOfficielToRow({ siteId, date, type, inventoriste, operateur, cuves, temperatureC: temperatureC === "" ? undefined : Number(temperatureC), densite: densite === "" ? undefined : Number(densite), densite15, vcf, stockAmbiant, stock15, commentaire, createdBy: currentUserName });
+  const addInventaireOfficiel = ({ siteId, date, type, produit, inventoriste, operateur, cuves, commentaire }) => withSync(async () => {
+    // Densité et température sont désormais propres à CHAQUE cuve : le volume à 15°C se calcule
+    // cuve par cuve, puis on additionne. Le total à 15°C n'est complet que si toutes les cuves
+    // ont une densité + température renseignées.
+    const cuvesComputed = (cuves || []).map((c) => {
+      const amb = Number(c.stockAmbiant) || 0;
+      let volume15 = null;
+      if (c.temperatureC !== undefined && c.temperatureC !== "" && c.temperatureC !== null && c.densite !== undefined && c.densite !== "" && c.densite !== null) {
+        const corr = correctVolumeTo15({ volumeAmbiant: amb, tempC: Number(c.temperatureC), densiteObservee: Number(c.densite) });
+        if (corr) volume15 = corr.volume15;
+      }
+      return { ...c, stockAmbiant: amb, volume15 };
+    });
+    const stockAmbiant = cuvesComputed.reduce((a, c) => a + c.stockAmbiant, 0);
+    const stock15 = cuvesComputed.every((c) => c.volume15 !== null) ? cuvesComputed.reduce((a, c) => a + c.volume15, 0) : undefined;
+    const row = inventaireOfficielToRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, stockAmbiant, stock15, commentaire, createdBy: currentUserName });
     const { data, error } = await supabase.from("inventaires_officiels").insert(row).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("L'inventaire officiel n'a pas pu être confirmé par le serveur — réessaie.");
@@ -1637,22 +1699,27 @@ export default function App() {
     appendAudit("Modification des réglages", patch.objectifFreinte !== undefined ? `Nouvel objectif : ${next.objectifFreinte} ‰` : "Personnalisation (logo/couleurs)");
     flash("Réglages mis à jour.");
   });
-  const updateTheme = ({ logoFile, colorPrimary, colorAccent }) => withSync(async () => {
+  const updateTheme = ({ logoFile, logoTotalFile, colorPrimary, colorAccent }) => withSync(async () => {
     let logoUrl = settings.logoUrl;
+    let logoTotalUrl = settings.logoTotalUrl;
     if (logoFile) {
       const urls = await uploadPhotos([logoFile], "branding");
       logoUrl = urls[0];
     }
-    const next = { ...settings, logoUrl, colorPrimary: colorPrimary || settings.colorPrimary, colorAccent: colorAccent || settings.colorAccent };
+    if (logoTotalFile) {
+      const urls2 = await uploadPhotos([logoTotalFile], "branding-total");
+      logoTotalUrl = urls2[0];
+    }
+    const next = { ...settings, logoUrl, logoTotalUrl, colorPrimary: colorPrimary || settings.colorPrimary, colorAccent: colorAccent || settings.colorAccent };
     const { error } = await supabase.from("settings").update({
-      logo_url: next.logoUrl, color_primary: next.colorPrimary, color_accent: next.colorAccent,
+      logo_url: next.logoUrl, logo_total_url: next.logoTotalUrl, color_primary: next.colorPrimary, color_accent: next.colorAccent,
     }).eq("id", 1);
     if (error) throw error;
     setSettings(next);
     appendAudit("Personnalisation", "Logo et/ou couleurs mis à jour");
     flash("Personnalisation enregistrée.");
   });
-  useEffect(() => { applyTheme(settings.colorPrimary, settings.colorAccent); setCurrentLogoUrl(settings.logoUrl); }, [settings.colorPrimary, settings.colorAccent, settings.logoUrl]);
+  useEffect(() => { applyTheme(settings.colorPrimary, settings.colorAccent); setCurrentLogoUrl(settings.logoUrl); setCurrentLogoTotalUrl(settings.logoTotalUrl); }, [settings.colorPrimary, settings.colorAccent, settings.logoUrl, settings.logoTotalUrl]);
 
   /* ---- mutations : rôle d'un utilisateur (Superviseur uniquement) ---- */
   const updateUserRole = (userId, role) => withSync(async () => {
@@ -1671,6 +1738,22 @@ export default function App() {
     const label = !assignedSiteIds || assignedSiteIds.length === 0 ? "Tous les sites" : assignedSiteIds.map((id) => sites.find((s) => s.id === id)?.name || id).join(", ");
     appendAudit("Modification sites assignés", `${target?.name || ""} → ${label}`);
     flash("Sites assignés mis à jour.");
+  });
+  const toggleUserActive = (userId, active) => withSync(async () => {
+    const { error } = await supabase.from("profiles").update({ active }).eq("id", userId);
+    if (error) throw error;
+    const target = profiles.find((u) => u.id === userId);
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, active } : u)));
+    appendAudit(active ? "Réactivation compte" : "Désactivation compte", target?.name || "");
+    flash(active ? "Compte réactivé." : "Compte désactivé.");
+  });
+  const toggleSiteActive = (siteId, active) => withSync(async () => {
+    const { error } = await supabase.from("sites").update({ active }).eq("id", siteId);
+    if (error) throw error;
+    const target = sites.find((s) => s.id === siteId);
+    setSites((prev) => prev.map((s) => (s.id === siteId ? { ...s, active } : s)));
+    appendAudit(active ? "Réactivation site" : "Désactivation site", target?.name || "");
+    flash(active ? "Site réactivé." : "Site désactivé.");
   });
 
   const NAV = [
@@ -1864,12 +1947,12 @@ export default function App() {
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
-          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} sites={sites} session={session} />}
+          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
         </div>
@@ -2056,7 +2139,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank }) {
+function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank }) {
   const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -2116,7 +2199,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Sites externalisés ({sites.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Capacités et stocks initiaux : à vérifier et ajuster selon vos valeurs réelles.</p>
         <table className="somip-table">
-          <thead><tr><th>Code</th><th>Site</th><th style={{ textAlign: "right" }}>Capacité (L)</th><th style={{ textAlign: "right" }}>Stock actuel (L)</th><th></th></tr></thead>
+          <thead><tr><th>Code</th><th>Site</th><th style={{ textAlign: "right" }}>Capacité (L)</th><th style={{ textAlign: "right" }}>Stock actuel (L)</th><th>Statut</th><th></th></tr></thead>
           <tbody>
             {sites.map((s) => {
               const stock = stockOf(s.id);
@@ -2129,6 +2212,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
                       <td><input className="somip-input" value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} /></td>
                       <td><input type="number" className="somip-input" style={{ textAlign: "right" }} value={editForm.capacity} onChange={(e) => setEditForm({ ...editForm, capacity: e.target.value })} /></td>
                       <td style={{ textAlign: "right", color: C.sub, fontSize: 12 }}>calculé</td>
+                      <td></td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         <button className="somip-btn somip-btn-primary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={saveEdit}>OK</button>
                         <button onClick={() => setEditingId(null)} style={{ border: "none", background: "none", cursor: "pointer", marginLeft: 4 }}><X size={16} color={C.sub} /></button>
@@ -2140,8 +2224,12 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
                       <td>{s.name}{s.isMobile && <span style={{ marginLeft: 6 }}><Badge color={C.orange}>Camion</Badge></span>}</td>
                       <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(s.capacity)}</td>
                       <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(stock)}</td>
+                      <td>{s.active === false ? <Badge color={C.danger}>Désactivé</Badge> : <Badge color={C.success}>Actif</Badge>}</td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
                         <button onClick={() => startEdit(s)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
+                        <button onClick={() => toggleSiteActive(s.id, s.active === false)} title={s.active === false ? "Réactiver" : "Désactiver"} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
+                          {s.active === false ? <CheckCircle2 size={14} color={C.success} /> : <CloudOff size={14} color={C.warning} />}
+                        </button>
                         <ConfirmIconButton onConfirm={() => removeSite(s)} title="Supprimer le site" />
                       </td>
                     </>
@@ -2299,7 +2387,8 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, p
 /* ------------------------------------------------------------------ */
 function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage, assignedSiteIds }) {
   const hasSiteRestriction = assignedSiteIds && assignedSiteIds.length > 0;
-  const availableSites = hasSiteRestriction ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+  const activeSites = sites.filter((s) => s.active !== false);
+  const availableSites = hasSiteRestriction ? activeSites.filter((s) => assignedSiteIds.includes(s.id)) : activeSites;
   const [siteId, setSiteId] = useState((hasSiteRestriction ? assignedSiteIds[0] : sites[0]?.id) || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
@@ -3408,29 +3497,35 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [type, setType] = useState("mensuel");
+  const [produit, setProduit] = useState("gasoil");
   const [inventoriste, setInventoriste] = useState("");
   const [operateur, setOperateur] = useState("");
-  const [tempC, setTempC] = useState("");
-  const [densite, setDensite] = useState("");
   const [commentaire, setCommentaire] = useState("");
   const [filterSite, setFilterSite] = useState("all");
 
+  const emptyCuve = (name) => ({ cuve: name, hauteur: "", densite: "", temperatureC: "", eau: false, indexFin: "", stockAmbiant: "" });
   const tanksForSite = siteTanks.filter((t) => t.siteId === siteId);
   const [cuveReadings, setCuveReadings] = useState([]);
   useEffect(() => {
-    setCuveReadings(tanksForSite.map((t) => ({ cuve: t.name, indexFin: "", stockAmbiant: "" })));
+    setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
   }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const stockAmbiantTotal = cuveReadings.reduce((a, c) => a + (Number(c.stockAmbiant) || 0), 0);
-  const vcfResult = correctVolumeTo15({
-    volumeAmbiant: stockAmbiantTotal,
-    tempC: tempC === "" ? NaN : Number(tempC),
-    densiteObservee: Number(densite) || 0,
+  // Volume à 15°C calculé CUVE PAR CUVE (densité/température propres à chaque cuve).
+  const cuvesComputed = cuveReadings.map((c) => {
+    const amb = Number(c.stockAmbiant) || 0;
+    let volume15 = null;
+    if (c.temperatureC !== "" && c.densite !== "") {
+      const corr = correctVolumeTo15({ volumeAmbiant: amb, tempC: Number(c.temperatureC), densiteObservee: Number(c.densite) });
+      if (corr) volume15 = corr.volume15;
+    }
+    return { ...c, stockAmbiantNum: amb, volume15 };
   });
-  const has15 = !!vcfResult;
+  const stockAmbiantTotal = cuvesComputed.reduce((a, c) => a + c.stockAmbiantNum, 0);
+  const allHave15 = cuvesComputed.length > 0 && cuvesComputed.every((c) => c.volume15 !== null);
+  const stock15Total = allHave15 ? cuvesComputed.reduce((a, c) => a + c.volume15, 0) : null;
 
   const updateCuve = (idx, field, value) => setCuveReadings((prev) => prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c)));
-  const addCuveRow = () => setCuveReadings((prev) => [...prev, { cuve: `Cuve ${prev.length + 1}`, indexFin: "", stockAmbiant: "" }]);
+  const addCuveRow = () => setCuveReadings((prev) => [...prev, emptyCuve(`Cuve ${prev.length + 1}`)]);
   const removeCuveRow = (idx) => setCuveReadings((prev) => prev.filter((_, i) => i !== idx));
 
   const canSubmit = siteId && date && cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "");
@@ -3438,12 +3533,16 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
   const submit = () => {
     if (!canSubmit) return;
     addInventaireOfficiel({
-      siteId, date, type, inventoriste, operateur,
-      cuves: cuveReadings.map((c) => ({ cuve: c.cuve, indexFin: c.indexFin === "" ? null : Number(c.indexFin), stockAmbiant: Number(c.stockAmbiant) || 0 })),
-      temperatureC: tempC, densite, commentaire,
+      siteId, date, type, produit, inventoriste, operateur,
+      cuves: cuveReadings.map((c) => ({
+        cuve: c.cuve, hauteur: c.hauteur === "" ? null : Number(c.hauteur), densite: c.densite === "" ? null : Number(c.densite),
+        temperatureC: c.temperatureC === "" ? null : Number(c.temperatureC), eau: !!c.eau,
+        indexFin: c.indexFin === "" ? null : Number(c.indexFin), stockAmbiant: Number(c.stockAmbiant) || 0,
+      })),
+      commentaire,
     });
-    setCuveReadings(tanksForSite.map((t) => ({ cuve: t.name, indexFin: "", stockAmbiant: "" })));
-    setInventoriste(""); setOperateur(""); setTempC(""); setDensite(""); setCommentaire("");
+    setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
+    setInventoriste(""); setOperateur(""); setCommentaire("");
   };
 
   const list = inventairesOfficiels.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -3451,7 +3550,7 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
   return (
     <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canWrite && (
-        <div className="somip-panel" style={{ padding: 18, flex: "1 1 340px" }}>
+        <div className="somip-panel" style={{ padding: 18, flex: "1 1 460px" }}>
           <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvel inventaire officiel</h3>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <button className={`somip-tab ${type === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setType("mensuel")}>Mensuel</button>
@@ -3468,35 +3567,69 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
             <div style={{ flex: 1 }}><Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field></div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Produit">
+                <select className="somip-select" value={produit} onChange={(e) => setProduit(e.target.value)}>
+                  <option value="gasoil">Gasoil</option>
+                  <option value="lubrifiant_vrac">Lubrifiant vrac</option>
+                </select>
+              </Field>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}><Field label="Inventoriste"><input className="somip-input" value={inventoriste} onChange={(e) => setInventoriste(e.target.value)} placeholder="Nom" /></Field></div>
             <div style={{ flex: 1 }}><Field label="Opérateur"><input className="somip-input" value={operateur} onChange={(e) => setOperateur(e.target.value)} placeholder="Nom" /></Field></div>
           </div>
 
-          <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Relevé cuve par cuve</p>
+          <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Relevé cuve par cuve</p>
           {tanksForSite.length === 0 && (
             <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.warning }}>Aucune cuve configurée pour ce site — ajoute-les depuis la page Sites, ou saisis-les directement ci-dessous.</p>
           )}
-          {cuveReadings.map((c, idx) => (
-            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
-              <div style={{ flex: 1.2 }}>
-                <Field label="Cuve"><input className="somip-input" value={c.cuve} onChange={(e) => updateCuve(idx, "cuve", e.target.value)} placeholder="Cuve 1" /></Field>
+          {cuvesComputed.map((c, idx) => (
+            <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                <div style={{ flex: 1.3 }}>
+                  <Field label="Cuve"><input className="somip-input" value={c.cuve} onChange={(e) => updateCuve(idx, "cuve", e.target.value)} placeholder="Cuve 1" /></Field>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={c.hauteur} onChange={(e) => updateCuve(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Densité"><input type="number" step="0.001" className="somip-input" value={c.densite} onChange={(e) => updateCuve(idx, "densite", e.target.value)} placeholder="0.840" /></Field>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Température (°C)"><input type="number" className="somip-input" value={c.temperatureC} onChange={(e) => updateCuve(idx, "temperatureC", e.target.value)} placeholder="28" /></Field>
+                </div>
+                {cuveReadings.length > 1 && (
+                  <button onClick={() => removeCuveRow(idx)} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                    <X size={16} color={C.danger} />
+                  </button>
+                )}
               </div>
-              <div style={{ flex: 1 }}>
-                <Field label="Index fin"><input type="number" className="somip-input" value={c.indexFin} onChange={(e) => updateCuve(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                <div style={{ flex: 1 }}>
+                  <Field label="Index fin"><input type="number" className="somip-input" value={c.indexFin} onChange={(e) => updateCuve(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+                </div>
+                <div style={{ flex: 1 }}>
+                  <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={c.stockAmbiant} onChange={(e) => updateCuve(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
+                </div>
+                <div style={{ flex: 1, paddingBottom: 9 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: "pointer" }}>
+                    <input type="checkbox" checked={c.eau} onChange={(e) => updateCuve(idx, "eau", e.target.checked)} />
+                    Présence d'eau
+                  </label>
+                </div>
+                <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
+                  <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Volume à 15°C</span>
+                  <span className="somip-mono" style={{ fontWeight: 700, color: c.volume15 !== null ? C.blue : C.sub }}>{c.volume15 !== null ? `${fmt(c.volume15)} L` : "—"}</span>
+                </div>
               </div>
-              <div style={{ flex: 1 }}>
-                <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={c.stockAmbiant} onChange={(e) => updateCuve(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
-              </div>
-              <button onClick={() => removeCuveRow(idx)} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
-                <X size={16} color={C.danger} />
-              </button>
             </div>
           ))}
           <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 12 }} onClick={addCuveRow}>
             <Plus size={13} /> Ajouter une cuve
           </button>
 
-          <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaire} onChange={(e) => setCommentaire(e.target.value)} /></Field>
 
           <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
@@ -3506,7 +3639,7 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
               <span style={{ color: C.sub, fontWeight: 600 }}>Stock total à 15°C</span>
-              <span className="somip-mono" style={{ fontWeight: 700, color: has15 ? C.blue : C.sub }}>{has15 ? `${fmt(vcfResult.volume15)} L` : "— (température/densité manquantes)"}</span>
+              <span className="somip-mono" style={{ fontWeight: 700, color: stock15Total !== null ? C.blue : C.sub }}>{stock15Total !== null ? `${fmt(stock15Total)} L` : "— (densité/température manquantes sur au moins une cuve)"}</span>
             </div>
           </div>
 
@@ -3528,16 +3661,17 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
           <table className="somip-table">
             <thead>
               <tr>
-                <th>Date</th><th>Site</th><th>Type</th><th>Inventoriste</th><th>Opérateur</th>
+                <th>Date</th><th>Site</th><th>Produit</th><th>Type</th><th>Inventoriste</th><th>Opérateur</th>
                 <th style={{ textAlign: "right" }}>Stock ambiant</th><th style={{ textAlign: "right" }}>Stock 15°C</th><th></th>{canManage && <th></th>}
               </tr>
             </thead>
             <tbody>
-              {list.length === 0 && <EmptyRow colSpan={canManage ? 9 : 8} text="Aucun inventaire officiel enregistré." />}
+              {list.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun inventaire officiel enregistré." />}
               {list.map((inv) => (
                 <tr key={inv.id}>
                   <td className="somip-mono">{inv.date}</td>
                   <td>{sites.find((s) => s.id === inv.siteId)?.name}</td>
+                  <td style={{ color: C.sub }}>{PRODUIT_INVENTAIRE_LABELS[inv.produit] || inv.produit}</td>
                   <td><Badge color={inv.type === "inopine" ? C.orange : C.blue}>{TYPE_INVENTAIRE_LABELS[inv.type]}</Badge></td>
                   <td style={{ color: C.sub }}>{inv.inventoriste || "—"}</td>
                   <td style={{ color: C.sub }}>{inv.operateur || "—"}</td>
@@ -4595,7 +4729,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
   const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [
     { name: "Exposition Comilog", rows: rows.map((r) => ({
       Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes),
-      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
+      [`Suivi jauges Comilog au ${stockDate} (L)`]: Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
     })) },
   ]);
 
@@ -4603,7 +4737,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
     filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
     title: titre,
     period: `Ventes du ${mvtDate} — Stock au ${stockDate}`,
-    columns: ["Site", "Ventes", "Stock en consignation", "Demande d'approvisionnement"],
+    columns: ["Site", "Ventes", `Suivi jauges Comilog au ${stockDate}`, "Demande d'approvisionnement"],
     rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
     totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
   });
@@ -4631,7 +4765,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
           <StatCard label={`Ventes cumulées (${mvtDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
-          <StatCard label={`Stock en consignation (${stockDate})`} value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
+          <StatCard label={`Suivi jauges Comilog au ${stockDate}`} value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
           <StatCard label={`Demande d'approvisionnement (${stockDate})`} value={fmt(totalDemande)} unit="L" accent={C.orange} icon={Truck} />
         </div>
 
@@ -4640,7 +4774,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
             <thead>
               <tr>
                 <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
-                <th style={{ textAlign: "right" }}>Stock en consignation ({stockDate})</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
+                <th style={{ textAlign: "right" }}>Suivi jauges Comilog au {stockDate}</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
             <tbody>
@@ -5735,18 +5869,20 @@ function LossGainReport({ sites, inventaires }) {
 /* ------------------------------------------------------------------ */
 function BrandingView({ settings, updateTheme }) {
   const [logoFile, setLogoFile] = useState(null);
+  const [logoTotalFile, setLogoTotalFile] = useState(null);
   const [colorPrimary, setColorPrimary] = useState(settings.colorPrimary || "#0071BD");
   const [colorAccent, setColorAccent] = useState(settings.colorAccent || "#F16B16");
   const [saving, setSaving] = useState(false);
 
   const previewLogo = logoFile ? URL.createObjectURL(logoFile) : settings.logoUrl;
-  const dirty = !!logoFile || colorPrimary !== (settings.colorPrimary || "#0071BD") || colorAccent !== (settings.colorAccent || "#F16B16");
+  const previewLogoTotal = logoTotalFile ? URL.createObjectURL(logoTotalFile) : settings.logoTotalUrl;
+  const dirty = !!logoFile || !!logoTotalFile || colorPrimary !== (settings.colorPrimary || "#0071BD") || colorAccent !== (settings.colorAccent || "#F16B16");
 
   const submit = async () => {
     setSaving(true);
-    await updateTheme({ logoFile, colorPrimary, colorAccent });
+    await updateTheme({ logoFile, logoTotalFile, colorPrimary, colorAccent });
     setSaving(false);
-    setLogoFile(null);
+    setLogoFile(null); setLogoTotalFile(null);
     window.location.reload();
   };
 
@@ -5756,7 +5892,7 @@ function BrandingView({ settings, updateTheme }) {
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Personnalisation</h3>
         <p style={{ margin: "0 0 18px", fontSize: 12.5, color: C.sub }}>Logo et couleurs principales, appliqués à toute l'application et aux rapports (PDF/PowerPoint).</p>
 
-        <Field label="Logo">
+        <Field label="Logo SOMIP">
           <label className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", cursor: "pointer", display: "inline-flex" }}>
             <ImagePlus size={14} /> {settings.logoUrl || logoFile ? "Changer le logo" : "Ajouter un logo"}
             <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => setLogoFile(e.target.files?.[0] || null)} />
@@ -5765,6 +5901,18 @@ function BrandingView({ settings, updateTheme }) {
         {previewLogo && (
           <div style={{ margin: "8px 0 16px", padding: 14, background: C.bg, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <img src={previewLogo} alt="Logo" style={{ maxHeight: 70, maxWidth: "100%" }} />
+          </div>
+        )}
+
+        <Field label="Logo TotalEnergies (pages Inventaires)">
+          <label className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", cursor: "pointer", display: "inline-flex" }}>
+            <ImagePlus size={14} /> {settings.logoTotalUrl || logoTotalFile ? "Changer le logo" : "Ajouter un logo"}
+            <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => setLogoTotalFile(e.target.files?.[0] || null)} />
+          </label>
+        </Field>
+        {previewLogoTotal && (
+          <div style={{ margin: "8px 0 16px", padding: 14, background: C.bg, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <img src={previewLogoTotal} alt="Logo TotalEnergies" style={{ maxHeight: 70, maxWidth: "100%" }} />
           </div>
         )}
 
@@ -5799,11 +5947,15 @@ function BrandingView({ settings, updateTheme }) {
 }
 
 
-function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }) {
+function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive, sites, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
   const [siteDraft, setSiteDraft] = useState([]);
   const [deletingErr, setDeletingErr] = useState(null);
+  const [resetForId, setResetForId] = useState(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetErr, setResetErr] = useState(null);
+  const [resetMsg, setResetMsg] = useState(null);
   const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture", assignedSiteIds: [] });
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
@@ -5821,6 +5973,24 @@ function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }
       if (!res.ok) throw new Error(data.error || "Erreur lors de la suppression du compte.");
     } catch (e) {
       setDeletingErr(e.message || "Erreur lors de la suppression du compte.");
+    }
+  };
+
+  const submitReset = async () => {
+    setResetErr(null); setResetMsg(null);
+    if (!resetPassword || resetPassword.length < 6) { setResetErr("Le mot de passe doit contenir au moins 6 caractères."); return; }
+    try {
+      const res = await fetch("/api/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
+        body: JSON.stringify({ userId: resetForId, newPassword: resetPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Erreur lors de la réinitialisation.");
+      setResetMsg("Mot de passe réinitialisé — communique-le à la personne.");
+      setResetPassword("");
+    } catch (e) {
+      setResetErr(e.message || "Erreur lors de la réinitialisation.");
     }
   };
 
@@ -5884,9 +6054,9 @@ function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }
         </p>
         {deletingErr && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 10px" }}>{deletingErr}</p>}
         <table className="somip-table">
-          <thead><tr><th>Nom</th><th>Rôle</th><th>Site assigné</th><th>Présence</th><th></th></tr></thead>
+          <thead><tr><th>Nom</th><th>Rôle</th><th>Site assigné</th><th>Présence</th><th>Statut</th><th></th></tr></thead>
           <tbody>
-            {profiles.length === 0 && <EmptyRow colSpan={5} text="Aucun compte pour le moment." />}
+            {profiles.length === 0 && <EmptyRow colSpan={6} text="Aucun compte pour le moment." />}
             {profiles.map((u) => {
               const isEditing = editingId === u.id;
               return (
@@ -5911,6 +6081,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }
                         {siteDraft.length === 0 && <p style={{ margin: "4px 0 0", fontSize: 11, color: C.sub }}>Aucun coché = tous les sites</p>}
                       </td>
                       <td></td>
+                      <td></td>
                       <td style={{ whiteSpace: "nowrap" }}>
                         <button className="somip-btn somip-btn-primary" style={{ padding: "5px 10px", fontSize: 12 }} onClick={saveEdit}>OK</button>
                         <button onClick={() => setEditingId(null)} style={{ border: "none", background: "none", cursor: "pointer", marginLeft: 4 }}><X size={16} color={C.sub} /></button>
@@ -5930,8 +6101,19 @@ function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }
                           <span style={{ fontSize: 12, color: C.sub }}>{lastSeenLabel(u)}</span>
                         )}
                       </td>
+                      <td>
+                        {u.active === false ? <Badge color={C.danger}>Désactivé</Badge> : <Badge color={C.success}>Actif</Badge>}
+                      </td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
                         <button onClick={() => startEdit(u)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
+                        {u.id !== session?.user?.id && (
+                          <button onClick={() => toggleUserActive(u.id, u.active === false)} title={u.active === false ? "Réactiver" : "Désactiver"} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
+                            {u.active === false ? <CheckCircle2 size={14} color={C.success} /> : <CloudOff size={14} color={C.warning} />}
+                          </button>
+                        )}
+                        <button onClick={() => { setResetForId(u.id); setResetPassword(""); setResetErr(null); setResetMsg(null); }} title="Réinitialiser le mot de passe" style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
+                          <Lock size={14} color={C.sub} />
+                        </button>
                         {u.id !== session?.user?.id && <ConfirmIconButton onConfirm={() => deleteAccount(u.id)} />}
                       </td>
                     </>
@@ -5941,6 +6123,22 @@ function UsersView({ profiles, updateUserRole, updateUserSites, sites, session }
             })}
           </tbody>
         </table>
+        {resetForId && (
+          <div className="somip-panel" style={{ marginTop: 14, padding: 14, background: C.bg }}>
+            <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.ink }}>
+              Réinitialiser le mot de passe — {profiles.find((u) => u.id === resetForId)?.name}
+            </p>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <Field label="Nouveau mot de passe"><input type="text" className="somip-input" value={resetPassword} onChange={(e) => setResetPassword(e.target.value)} placeholder="Au moins 6 caractères" /></Field>
+              </div>
+              <button className="somip-btn somip-btn-primary" style={{ padding: "9px 14px" }} onClick={submitReset}>Valider</button>
+              <button onClick={() => setResetForId(null)} style={{ border: "none", background: "none", cursor: "pointer", padding: 9 }}><X size={16} color={C.sub} /></button>
+            </div>
+            {resetErr && <p style={{ color: C.danger, fontSize: 12, margin: "8px 0 0" }}>{resetErr}</p>}
+            {resetMsg && <p style={{ color: C.success, fontSize: 12, margin: "8px 0 0" }}>{resetMsg}</p>}
+          </div>
+        )}
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
