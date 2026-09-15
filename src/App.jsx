@@ -3780,7 +3780,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     { id: "synthese_mensuelle_lub", label: "Synthèse journalière du mois — Lubrifiants" },
     { id: "synthese_station_jour", label: "Synthèse journalière — Station (site + camion)" },
     { id: "exposition", label: "Exposition", superviseurOnly: true },
-    { id: "exposition_comilog", label: "Exposition Comilog", superviseurOnly: true },
+    { id: "exposition_comilog", label: "Suivi Stocks Comilog", superviseurOnly: true },
     { id: "bons", label: "Bons de livraison", superviseurOnly: true },
     { id: "bilan", label: "Bilan Matières", superviseurOnly: true },
   ].filter((t) => !t.superviseurOnly || canManage);
@@ -4691,7 +4691,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
 
 const COMILOG_SITE_CODES = ["PRH", "OKM", "CIM", "CMM", "GTR"];
 
-/* ---- Exposition Comilog — envoi quotidien : ventes & réception de la veille, creux à date ---- */
+/* ---- Suivi Stocks Comilog — envoi quotidien : ventes & réception de la veille, creux à date ---- */
 function ExpositionComilogReport({ sites, movements, inventaires, truckAssignments, productStocks }) {
   const [mvtDate, setMvtDate] = useState(todayStr());
   const [stockDate, setStockDate] = useState(todayStr());
@@ -4705,6 +4705,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
     // vente) + les ventes du/des camion(s) rattaché(s) ce jour-là (Sortie Fiche Terrain).
     const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
     const ventesSite = sumQty(dayMovs, ["sortie"]);
+    const reception = sumQty(dayMovs, ["reception"]);
     let ventesTrucks = 0;
     for (const truckId of trucksAssignedAt(truckAssignments, s.id, mvtDate)) {
       const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === mvtDate);
@@ -4718,28 +4719,29 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
     const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date <= stockDate));
     const siteStockOnly = siteInv ? siteInv.stockPhysique : stockThroughDate(s, movements, stockDate, inventaires);
     const demandeAppro = roundDown5000(s.capacity - siteStockOnly);
-    return { site: s, ventes, stockConsignation, demandeAppro };
+    return { site: s, ventes, reception, stockConsignation, demandeAppro };
   });
   const totalVentes = rows.reduce((a, r) => a + r.ventes, 0);
+  const totalReception = rows.reduce((a, r) => a + r.reception, 0);
   const totalStock = rows.reduce((a, r) => a + r.stockConsignation, 0);
   const totalDemande = rows.reduce((a, r) => a + r.demandeAppro, 0);
 
-  const titre = `Exposition au ${formatDateLong(todayStr())}`;
+  const titre = `Suivi Stocks Comilog au ${formatDateLong(todayStr())}`;
 
-  const doExcel = () => exportToExcel(`SOMIP_Exposition_Comilog_${stockDate}.xlsx`, [
-    { name: "Exposition Comilog", rows: rows.map((r) => ({
-      Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes),
+  const doExcel = () => exportToExcel(`SOMIP_Suivi_Stocks_Comilog_${stockDate}.xlsx`, [
+    { name: "Suivi Stocks Comilog", rows: rows.map((r) => ({
+      Site: r.site.name, [`Ventes du ${mvtDate} (L)`]: Math.round(r.ventes), [`Réception du ${mvtDate} (L)`]: Math.round(r.reception),
       [`Suivi jauges Comilog au ${stockDate} (L)`]: Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
     })) },
   ]);
 
   const doPdf = () => exportToPdf({
-    filename: `SOMIP_Exposition_Comilog_${stockDate}.pdf`,
+    filename: `SOMIP_Suivi_Stocks_Comilog_${stockDate}.pdf`,
     title: titre,
     period: `Ventes du ${mvtDate} — Stock au ${stockDate}`,
-    columns: ["Site", "Ventes", `Suivi jauges Comilog au ${stockDate}`, "Demande d'approvisionnement"],
-    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
+    columns: ["Site", "Ventes", "Réception", `Suivi jauges Comilog au ${stockDate}`, "Demande d'approvisionnement"],
+    rows: rows.map((r) => [r.site.name, `${fmt(r.ventes)} L`, `${fmt(r.reception)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
+    totalsRow: ["Total", `${fmt(totalVentes)} L`, `${fmt(totalReception)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
   });
 
   return (
@@ -4765,6 +4767,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
           <StatCard label={`Ventes cumulées (${mvtDate})`} value={fmt(totalVentes)} unit="L" accent={C.blue} icon={ArrowUpCircle} />
+          <StatCard label={`Réceptions cumulées (${mvtDate})`} value={fmt(totalReception)} unit="L" accent={C.success} icon={ArrowDownCircle} />
           <StatCard label={`Suivi jauges Comilog au ${stockDate}`} value={fmt(totalStock)} unit="L" accent={C.navy} icon={Fuel} />
           <StatCard label={`Demande d'approvisionnement (${stockDate})`} value={fmt(totalDemande)} unit="L" accent={C.orange} icon={Truck} />
         </div>
@@ -4773,7 +4776,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
           <table className="somip-table">
             <thead>
               <tr>
-                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th>
+                <th>Site</th><th style={{ textAlign: "right" }}>Ventes ({mvtDate})</th><th style={{ textAlign: "right" }}>Réception ({mvtDate})</th>
                 <th style={{ textAlign: "right" }}>Suivi jauges Comilog au {stockDate}</th><th style={{ textAlign: "right" }}>Demande d'approvisionnement</th>
               </tr>
             </thead>
@@ -4782,6 +4785,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>{fmt(r.reception)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
                 </tr>
@@ -4789,6 +4793,7 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
               <tr>
                 <td style={{ fontWeight: 700 }}>Total</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalVentes)} L</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>{fmt(totalReception)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalStock)} L</td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalDemande)} L</td>
               </tr>
