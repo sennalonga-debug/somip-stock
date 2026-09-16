@@ -314,7 +314,7 @@ async function loadImageDataUrl(url) {
     reader.readAsDataURL(blob);
   });
 }
-async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections, sideBySide = false, centerTitle = false, subtitle }) {
+async function exportToPdf({ filename, title, period, columns, rows, totalsRow, sections, sideBySide = false, centerTitle = false, subtitle, bigPeriod = false }) {
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -364,10 +364,10 @@ async function exportToPdf({ filename, title, period, columns, rows, totalsRow, 
   }
   if (period) {
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(11);
+    doc.setFontSize(bigPeriod ? 26 : 11);
     doc.setTextColor(aR, aG, aB);
-    doc.text(period, titleX, afterTitleY + 17, titleOpts);
-    afterTitleY += 17;
+    doc.text(period, titleX, afterTitleY + (bigPeriod ? 30 : 17), titleOpts);
+    afterTitleY += bigPeriod ? 30 : 17;
   }
 
   const tableSections = sections && sections.length ? sections : [{ columns, rows, totalsRow }];
@@ -4553,7 +4553,8 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
   const totalHuilesDemande = huilesRows.reduce((a, r) => a + r.demandeAppro, 0);
 
   const titre = `Exposition au ${formatDateLong(todayStr())}`;
-  const venteLabel = `Vente décade (${decadeNum})`;
+  const venteLabel = "Vente";
+  const decadeLabel = `Décade ${decadeNum}`;
 
   const doExcel = () => exportToExcel(`SOMIP_Exposition_${month}_D${decadeNum}.xlsx`, [
     { name: "Exposition", rows: rows.map((r) => ({
@@ -4566,31 +4567,38 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
     })) }] : []),
   ]);
 
-  const doPdf = () => exportToPdf({
-    filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
-    title: titre,
-    centerTitle: true,
-    subtitle: "Sites externalisés — Zone Sud-Est",
-    period: bounds.label,
-    sideBySide: false,
-    sections: [
-      {
-        heading: "Gasoil",
-        columns: ["Site", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
-        rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
-        totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
-      },
-      ...LUBRICANT_SITE_IDS.map((siteId) => {
-        const siteRows = huilesRows.filter((r) => r.site.id === siteId);
-        return {
-          heading: `Lubrifiant — ${siteRows[0]?.site.name || siteId}`,
-          columns: ["Produit", venteLabel, "Stock en consignation"],
-          rows: siteRows.map((r) => [r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`]),
-          totalsRow: ["Total", `${fmt(siteRows.reduce((a, r) => a + r.ventes, 0))} L`, `${fmt(siteRows.reduce((a, r) => a + r.stockConsignation, 0))} L`],
-        };
-      }),
-    ],
-  });
+  const doPdf = () => {
+    const [pR, pG, pB] = hexToRgb(C.blue);
+    const dividerStyle = { fillColor: [pR, pG, pB], textColor: [255, 255, 255], fontStyle: "bold", halign: "left", fontSize: 9.5 };
+    const divider = (label) => [{ content: label.toUpperCase(), colSpan: 4, styles: dividerStyle }];
+    const gasoilRows = rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]);
+    const lubRowsFor = (siteId) => huilesRows.filter((r) => r.site.id === siteId).map((r) => [r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, "—"]);
+    const prehomoSite = sites.find((s) => s.id === LUBRICANT_SITE_IDS[0]);
+    const okoumaSite = sites.find((s) => s.id === LUBRICANT_SITE_IDS[1]);
+    exportToPdf({
+      filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
+      title: titre,
+      centerTitle: true,
+      subtitle: `Sites externalisés — Zone Sud-Est · ${bounds.start} au ${bounds.end}`,
+      period: decadeLabel,
+      bigPeriod: true,
+      sideBySide: false,
+      sections: [
+        {
+          columns: ["Site / Produit", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
+          rows: [
+            divider("Gasoil"),
+            ...gasoilRows,
+            divider(`Lubrifiant — ${prehomoSite?.name || "Prehomo"}`),
+            ...lubRowsFor(LUBRICANT_SITE_IDS[0]),
+            divider(`Lubrifiant — ${okoumaSite?.name || "Okouma"}`),
+            ...lubRowsFor(LUBRICANT_SITE_IDS[1]),
+          ],
+          totalsRow: ["Total réseau (Gasoil)", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
+        },
+      ],
+    });
+  };
 
   return (
     <div>
@@ -4616,7 +4624,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
         </div>
       </div>
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title={titre} period={bounds.label} showEditedDate={false} />
+        <ReportHeader title={titre} period={decadeLabel} showEditedDate={false} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
 
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
