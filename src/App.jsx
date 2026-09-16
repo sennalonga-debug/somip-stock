@@ -447,6 +447,104 @@ async function exportToPdf({ filename, title, period, columns, rows, totalsRow, 
 
 // Procès-verbal d'inventaire officiel (inopiné/mensuel), cuve par cuve, avec 3 cases de
 // signature (SOMIP / Opérateur / TotalEnergies Marketing) — document portrait, à imprimer et signer.
+// Exposition — reproduction fidèle du modèle Excel fourni : bandeau orange, logo, en-tête
+// EXPOSITION AU [date] - ZONE SUD-EST / DECADE N°[n] - [mois année], tableau Gasoil (8 sites,
+// dans l'ordre fourni) à gauche, tableau Lubrifiant vrac (4 produits × Prehomo/Okouma) à droite.
+async function exportExpositionModelPdf({ dateStr, decadeNum, monthLabel, gasoilRows, totalVentes, totalStock, totalDemande, productOrder, lubFor, filename }) {
+  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = 28;
+  const fullWidth = pageWidth - marginX * 2;
+  const [pR, pG, pB] = hexToRgb(C.blue);
+  const [aR, aG, aB] = hexToRgb(C.orange);
+  const [gR, gG, gB] = hexToRgb("#2E9B5C");
+  const [brR, brG, brB] = hexToRgb("#8B5E34");
+
+  // Ligne 1 : bandeau orange plein largeur.
+  doc.setFillColor(aR, aG, aB);
+  doc.rect(0, 0, pageWidth, 10, "F");
+
+  let y = 30;
+  if (CURRENT_LOGO_URL) {
+    try {
+      const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
+      const fmtImg = dataUrl.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrl, fmtImg, marginX, y, 42, 42);
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(pR, pG, pB);
+  doc.text(`EXPOSITION AU ${formatDateShort(dateStr)} - ZONE SUD-EST`, marginX + 130, y + 18);
+  doc.setFontSize(13);
+  doc.setTextColor(aR, aG, aB);
+  doc.text(`DECADE N°${decadeNum} - ${monthLabel}`, pageWidth - marginX, y + 18, { align: "right" });
+  doc.setDrawColor(226, 230, 234);
+  doc.setLineWidth(0.75);
+  doc.line(marginX, y + 50, pageWidth - marginX, y + 50);
+  y += 64;
+
+  const leftWidth = fullWidth * 0.32;
+  const rightX = marginX + leftWidth + 22;
+  const rightWidth = fullWidth - leftWidth - 22;
+
+  // Tableau Gasoil (gauche).
+  autoTable(doc, {
+    startY: y,
+    head: [["SITES", "CONSIGNATION", "DEMANDE D'APPRO", `VENTES DECADE${decadeNum}`]],
+    body: gasoilRows.map((r) => [r.label, fmt(r.stockConsignation), fmt(r.demandeAppro), fmt(r.ventesCumulees)]),
+    foot: [["TOTAL", fmt(totalStock), fmt(totalDemande), fmt(totalVentes)]],
+    theme: "grid",
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 8, halign: "center", cellPadding: 5 },
+    footStyles: { fillColor: [240, 242, 244], textColor: [20, 30, 40], fontStyle: "bold", fontSize: 9, cellPadding: 5 },
+    bodyStyles: { fontSize: 9, cellPadding: 5, halign: "right", textColor: [40, 48, 56] },
+    alternateRowStyles: { fillColor: [249, 250, 251] },
+    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5 },
+    columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+    margin: { left: marginX, right: pageWidth - marginX - leftWidth },
+    tableWidth: leftWidth,
+  });
+
+  // Tableau Lubrifiant vrac (droite) — Prehomo et Okouma, mêmes 4 produits, en-tête à 3 niveaux.
+  const PRODUCT_LABELS = { rubia_tir7400: "TIR-7400", ac50: "AC50", ac30: "AC30", sw10: "SW10" };
+  const colColors = [[pR, pG, pB], [aR, aG, aB], [gR, gG, gB], [brR, brG, brB]];
+  const head = [
+    [{ content: "LUBRIFIANT VRAC", colSpan: 9, styles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", halign: "center", fontSize: 10, cellPadding: 6 } }],
+    [
+      { content: "SITE", rowSpan: 2, styles: { fillColor: [60, 68, 76], textColor: 255, fontStyle: "bold", valign: "middle", fontSize: 8.5 } },
+      ...productOrder.flatMap((p, i) => [{ content: PRODUCT_LABELS[p], colSpan: 2, styles: { fillColor: colColors[i], textColor: 255, fontStyle: "bold", halign: "center", fontSize: 8.5 } }]),
+    ],
+    productOrder.flatMap(() => [
+      { content: "STOCK", styles: { fillColor: [240, 242, 244], textColor: [20, 30, 40], fontStyle: "bold", fontSize: 7.5, halign: "center" } },
+      { content: "VENTES", styles: { fillColor: [240, 242, 244], textColor: [20, 30, 40], fontStyle: "bold", fontSize: 7.5, halign: "center" } },
+    ]),
+  ];
+  const lubRow = (siteId, label) => [label, ...productOrder.flatMap((p) => {
+    const r = lubFor(siteId, p);
+    return [r ? fmt(r.stockConsignation) : "—", r ? fmt(r.ventes) : "—"];
+  })];
+  autoTable(doc, {
+    startY: y,
+    head,
+    body: [lubRow("prehomo", "PREHOMO"), lubRow("okouma", "OKOUMA")],
+    theme: "grid",
+    bodyStyles: { fontSize: 8.5, cellPadding: 5, halign: "right", textColor: [40, 48, 56] },
+    alternateRowStyles: { fillColor: [249, 250, 251] },
+    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5 },
+    columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+    margin: { left: rightX, right: marginX },
+    tableWidth: rightWidth,
+  });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(150, 158, 165);
+  doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, marginX, pageHeight - 16);
+
+  doc.save(filename);
+}
+
 async function exportInventaireOfficielToPdf(inv, site) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -4568,38 +4666,21 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
   ]);
 
   const doPdf = () => {
-    const [pR, pG, pB] = hexToRgb(C.blue);
-    const dividerStyle = { fillColor: [pR, pG, pB], textColor: [255, 255, 255], fontStyle: "bold", halign: "left", fontSize: 9.5 };
-    const divider = (label) => [{ content: label.toUpperCase(), colSpan: 4, styles: dividerStyle }];
-    const gasoilRows = rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]);
-    const lubRowsFor = (siteId) => huilesRows.filter((r) => r.site.id === siteId).map((r) => [r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`, "—"]);
-    const prehomoSite = sites.find((s) => s.id === LUBRICANT_SITE_IDS[0]);
-    const okoumaSite = sites.find((s) => s.id === LUBRICANT_SITE_IDS[1]);
-    exportToPdf({
+    const GASOIL_ORDER = [
+      { code: "OKM", label: "OKOUMA" }, { code: "CIM", label: "CIM" }, { code: "GTR", label: "GARE" }, { code: "PRH", label: "PREHOMO" },
+      { code: "CMM", label: "CMM" }, { code: "FCV", label: "SETRAG FRANCEVILLE" }, { code: "GSB", label: "GSEZ BENGUIA" }, { code: "LPK", label: "AMD LIPAKA" },
+    ];
+    const gasoilOrdered = GASOIL_ORDER.map((o) => rows.find((r) => r.site.code === o.code)).filter(Boolean)
+      .map((r, i) => ({ ...r, label: GASOIL_ORDER[i].label }));
+    const PRODUCT_ORDER = ["rubia_tir7400", "ac50", "ac30", "sw10"];
+    const lubFor = (siteId, prodId) => huilesRows.find((r) => r.site.id === siteId && r.lub.id === prodId);
+    exportExpositionModelPdf({
+      dateStr: todayStr(), decadeNum, monthLabel: `${FRENCH_MONTHS[Number(month.slice(5, 7)) - 1].toUpperCase()} ${month.slice(0, 4)}`,
+      gasoilRows: gasoilOrdered, totalVentes, totalStock, totalDemande,
+      productOrder: PRODUCT_ORDER, lubFor,
       filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
-      title: titre,
-      centerTitle: true,
-      subtitle: `Sites externalisés — Zone Sud-Est · ${bounds.start} au ${bounds.end}`,
-      period: decadeLabel,
-      bigPeriod: true,
-      sideBySide: false,
-      sections: [
-        {
-          columns: ["Site / Produit", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
-          rows: [
-            divider("Gasoil"),
-            ...gasoilRows,
-            divider(`Lubrifiant — ${prehomoSite?.name || "Prehomo"}`),
-            ...lubRowsFor(LUBRICANT_SITE_IDS[0]),
-            divider(`Lubrifiant — ${okoumaSite?.name || "Okouma"}`),
-            ...lubRowsFor(LUBRICANT_SITE_IDS[1]),
-          ],
-          totalsRow: ["Total réseau (Gasoil)", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
-        },
-      ],
     });
   };
-
   return (
     <div>
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
