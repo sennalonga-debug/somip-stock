@@ -4572,19 +4572,19 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
     centerTitle: true,
     subtitle: "Sites externalisés — Zone Sud-Est",
     period: bounds.label,
-    sideBySide: true,
+    sideBySide: false,
     sections: [
       {
         heading: "Gasoil",
-        columns: ["Site", venteLabel, "Stock en consig.", "Demande approvis."],
+        columns: ["Site", venteLabel, "Stock en consignation", "Demande d'approvisionnement"],
         rows: rows.map((r) => [r.site.name, `${fmt(r.ventesCumulees)} L`, `${fmt(r.stockConsignation)} L`, `${fmt(r.demandeAppro)} L`]),
         totalsRow: ["Total réseau", `${fmt(totalVentes)} L`, `${fmt(totalStock)} L`, `${fmt(totalDemande)} L`],
       },
-      LUBRICANT_SITE_IDS.map((siteId) => {
+      ...LUBRICANT_SITE_IDS.map((siteId) => {
         const siteRows = huilesRows.filter((r) => r.site.id === siteId);
         return {
           heading: `Lubrifiant — ${siteRows[0]?.site.name || siteId}`,
-          columns: ["Produit", venteLabel, "Stock en consig."],
+          columns: ["Produit", venteLabel, "Stock en consignation"],
           rows: siteRows.map((r) => [r.lub.label, `${fmt(r.ventes)} L`, `${fmt(r.stockConsignation)} L`]),
           totalsRow: ["Total", `${fmt(siteRows.reduce((a, r) => a + r.ventes, 0))} L`, `${fmt(siteRows.reduce((a, r) => a + r.stockConsignation, 0))} L`],
         };
