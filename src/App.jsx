@@ -544,32 +544,37 @@ async function exportExpositionModelPdf({ dateStr, decadeNum, monthLabel, gasoil
   }
   ry += rowHHeader;
 
-  // Lignes de données : 8 sites Gasoil (dans l'ordre fourni). Les 2 premières lignes portent
-  // aussi les données Lubrifiant (Prehomo puis Okouma), à l'intérieur de la même grille.
+  // Lignes de données : 8 sites Gasoil (dans l'ordre fourni). La ligne Lubrifiant Prehomo
+  // s'aligne sur la ligne où "PREHOMO" apparaît côté Gasoil, et la ligne Lubrifiant Okouma sur
+  // celle où "OKOUMA" apparaît — pas juste les 2 premières lignes de la liste.
   const lubDataFor = (siteId) => productOrder.flatMap((p) => {
     const r = lubFor(siteId, p);
     return [r ? fmt(r.stockConsignation) : "—", r ? fmt(r.ventes) : "—"];
   });
-  const lubRows = [lubDataFor("prehomo"), lubDataFor("okouma")];
+  const prehomoRowIdx = gasoilRows.findIndex((r) => r.label === "PREHOMO");
+  const okoumaRowIdx = gasoilRows.findIndex((r) => r.label === "OKOUMA");
+  const lubRowsByIdx = {};
+  if (prehomoRowIdx >= 0) lubRowsByIdx[prehomoRowIdx] = lubDataFor("prehomo");
+  if (okoumaRowIdx >= 0) lubRowsByIdx[okoumaRowIdx] = lubDataFor("okouma");
 
   gasoilRows.forEach((r, idx) => {
     cell(0, 0, ry, rowHData, { text: r.label, bold: true, align: "left", fontSize: 8.5 });
     cell(1, 1, ry, rowHData, { text: fmt(r.stockConsignation), fontSize: 8.5, align: "right" });
     cell(2, 2, ry, rowHData, { text: fmt(r.demandeAppro), fontSize: 8.5, align: "right" });
     cell(3, 3, ry, rowHData, { text: fmt(r.ventesCumulees), fontSize: 8.5, align: "right" });
-    if (idx < 2) {
-      lubRows[idx].forEach((val, i) => cell(4 + i, 4 + i, ry, rowHData, { text: val, fontSize: 8, align: "right" }));
+    if (lubRowsByIdx[idx]) {
+      lubRowsByIdx[idx].forEach((val, i) => cell(4 + i, 4 + i, ry, rowHData, { text: val, fontSize: 8, align: "right" }));
     } else {
       cell(4, 11, ry, rowHData, { fill: [255, 255, 255] });
     }
     ry += rowHData;
   });
 
-  // Ligne TOTAL.
-  cell(0, 0, ry, rowHData, { fill: GREY_SUB, text: "TOTAL", bold: true, align: "left", fontSize: 8.5 });
-  cell(1, 1, ry, rowHData, { fill: GREY_SUB, text: fmt(totalStock), bold: true, fontSize: 8.5, align: "right" });
-  cell(2, 2, ry, rowHData, { fill: GREY_SUB, text: fmt(totalDemande), bold: true, fontSize: 8.5, align: "right" });
-  cell(3, 3, ry, rowHData, { fill: GREY_SUB, text: fmt(totalVentes), bold: true, fontSize: 8.5, align: "right" });
+  // Ligne TOTAL — bandeau bleu.
+  cell(0, 0, ry, rowHData, { fill: [pR, pG, pB], text: "TOTAL", bold: true, color: [255, 255, 255], align: "left", fontSize: 8.5 });
+  cell(1, 1, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalStock), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
+  cell(2, 2, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalDemande), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
+  cell(3, 3, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalVentes), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
   cell(4, 11, ry, rowHData, { fill: [255, 255, 255] });
   ry += rowHData;
 
