@@ -2681,9 +2681,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
       if (sortieQty > 0) {
         const compteurField = meters.length > 1 ? compteur : undefined;
         if (indexBloque) {
-          // Panne de compteur (Superviseur) : la vente est saisie directement, sans index.
-          const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: sortieQty, delta: -sortieQty, commentaire: "Compteur en panne — saisie directe sans index", destinataire, compteur: compteurField, ...vcfExtra(sortieQty) });
-          if (!ok) return;
+          // Panne de compteur (Superviseur) : la quantité saisie est le flux total (comme le
+          // ferait le compteur) — les chargements laitiers doivent en être déduits pour obtenir
+          // la vraie vente, exactement comme en fonctionnement normal (venteStation).
+          if (venteStation > 0) {
+            const ok = await addMovement({ siteId, product, type: "sortie", date, quantity: venteStation, delta: -venteStation, commentaire: "Compteur en panne — saisie directe sans index", destinataire, compteur: compteurField, ...vcfExtra(venteStation) });
+            if (!ok) return;
+          }
           if (isLubSite && !isLub) {
             for (const c of chargements) {
               const qty = Number(c.quantite) || 0;
@@ -2871,10 +2875,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           )}
           {isLub && receptionN > 0 && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>≈ {fmt(receptionN * lubDensite)} kg</p>}
 
-          {canManage && (
+          {canWrite && (
             <label style={{ display: "flex", alignItems: "center", gap: 7, margin: "10px 0 8px", cursor: "pointer", fontSize: 12, color: C.warning, fontWeight: 600 }}>
               <input type="checkbox" checked={indexBloque} onChange={(e) => setIndexBloque(e.target.checked)} />
-              Compteur en panne — saisir la sortie directement, sans index (Superviseur)
+              Compteur en panne — saisir la sortie directement, sans index
             </label>
           )}
           {indexBloque ? (
@@ -2910,6 +2914,21 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                   <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
                     <Plus size={13} /> Ajouter un camion
                   </button>
+                  {!chargementsValid && <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.danger }}>Le total chargé ({fmt(totalChargements)} L) dépasse la quantité saisie ({fmt(sortieQty)} L).</p>}
+                  {sortieQty > 0 && (
+                    <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12.5 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: totalChargements > 0 ? 4 : 0 }}>
+                        <span style={{ color: C.sub, fontWeight: 600 }}>Vente réelle (déduite des chargements)</span>
+                        <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(venteStation)} L</span>
+                      </div>
+                      {totalChargements > 0 && (
+                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                          <span style={{ color: C.sub, fontWeight: 600 }}>Chargements laitiers (total)</span>
+                          <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(totalChargements)} L</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
             </>
