@@ -2153,13 +2153,22 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   }).sort((a, b) => a.ecartCumule - b.ecartCumule);
   const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
 
-  // Alerte saisie manquante : à partir de 6h00, signale les sites fixes sans Stock fin saisi
-  // pour la veille (laisse la nuit/le petit matin pour rattraper la saisie sans fausse alerte).
+  // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
+  // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
+  // (pas en service, pas d'alerte à lui envoyer).
   const now = new Date();
   const yesterday = new Date(now); yesterday.setDate(yesterday.getDate() - 1);
   const yesterdayStr = `${yesterday.getFullYear()}-${pad2(yesterday.getMonth() + 1)}-${pad2(yesterday.getDate())}`;
   const missingSites = now.getHours() >= 6
-    ? sites.filter((s) => !s.isMobile).filter((s) => !inventaires.some((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === yesterdayStr))
+    ? sites.filter((s) => {
+        const hasYesterday = inventaires.some((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === yesterdayStr);
+        if (hasYesterday) return false;
+        if (s.isMobile) {
+          const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil"));
+          if (lastInv && Number(lastInv.stockPhysique) === 0) return false;
+        }
+        return true;
+      })
     : [];
 
   return (
@@ -2323,7 +2332,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   const assignmentsSorted = [...truckAssignments].sort((a, b) => (a.startDate < b.startDate ? 1 : -1));
 
   const currentMeters = siteMeters.filter((m) => m.siteId === meterSiteId);
-  const displayedMeters = currentMeters.length ? currentMeters : metersForSite(stations.find((s) => s.id === meterSiteId)).map((name, i) => ({ id: `default-${i}`, name, isDefault: true }));
+  const displayedMeters = currentMeters.length ? currentMeters : metersForSite(sites.find((s) => s.id === meterSiteId)).map((name, i) => ({ id: `default-${i}`, name, isDefault: true }));
   const submitMeter = () => {
     if (!newMeterName.trim() || !meterSiteId) return;
     addSiteMeter({ siteId: meterSiteId, name: newMeterName });
@@ -2466,10 +2475,15 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
 
       <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Compteurs par site</h3>
-        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Ajoute ou retire un compteur si la configuration physique d'un site change.</p>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Ajoute ou retire un compteur si la configuration physique d'un site change. Sur un camion, ça sert aussi à définir des "postes" (ex. Poste 1 / Poste 2) quand la saisie se fait en deux temps dans la journée.</p>
         <Field label="Site">
           <select className="somip-select" value={meterSiteId} onChange={(e) => setMeterSiteId(e.target.value)}>
-            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <optgroup label="Sites fixes">
+              {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </optgroup>
+            <optgroup label="Camions">
+              {trucks.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+            </optgroup>
           </select>
         </Field>
         <table className="somip-table" style={{ marginBottom: 12 }}>
@@ -2591,7 +2605,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const receptionN = receptions.reduce((a, r) => a + (Number(r.quantite) || 0), 0);
   const retourN = (isLub || isMobileSite) ? 0 : (isLubSite ? retoursCuve.reduce((a, r) => a + (Number(r.quantite) || 0), 0) : (Number(retourQty) || 0));
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
-  const isMultiCompteurEntry = meters.length > 1 && !isLub && !isMobileSite;
+  const isMultiCompteurEntry = meters.length > 1 && !isLub;
   const readingFlows = compteurReadings.map((r) => ({
     ...r,
     flow: r.indexAvant !== "" && r.indexApres !== "" ? Number(r.indexApres) - Number(r.indexAvant) : 0,
@@ -2949,7 +2963,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             </>
           ) : isMultiCompteurEntry ? (
             <>
-              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isLubSite ? "Sortie (compteurs — flux total : vente + chargements camions)" : "Sortie (compteurs)"}</p>
+              <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isLubSite ? "Sortie (compteurs — flux total : vente + chargements camions)" : isMobileSite ? "Sortie Fiche Terrain (postes)" : "Sortie (compteurs)"}</p>
               {compteurReadings.map((r, idx) => {
                 const lastIdx = r.compteur ? lastIndexForMeter(r.compteur) : undefined;
                 const mismatch = lastIdx !== undefined && r.indexAvant !== "" && Number(r.indexAvant) !== lastIdx;
@@ -2958,7 +2972,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                       {meters.length > 1 && (
                         <div style={{ flex: 1 }}>
-                          <Field label="Compteur">
+                          <Field label={isMobileSite ? "Poste" : "Compteur"}>
                             <select className="somip-select" value={r.compteur} onChange={(e) => setCompteurReadings((prev) => prev.map((row, i) => (i === idx ? { ...row, compteur: e.target.value } : row)))}>
                               {meters.map((m) => <option key={m} value={m}>{m}</option>)}
                             </select>
