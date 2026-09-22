@@ -2091,7 +2091,7 @@ export default function App() {
         )}
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
-          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} />}
+          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} />}
@@ -2109,7 +2109,7 @@ export default function App() {
 /* ------------------------------------------------------------------ */
 /* Dashboard                                                            */
 /* ------------------------------------------------------------------ */
-function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage }) {
+function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments }) {
   const month = currentMonth();
   const rows = sites.map((s) => {
     const stock = stockOf(s.id);
@@ -2134,6 +2134,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   // à chacun, indépendant — comme demandé, tout dans un même tableau).
   const monthStartD = `${month}-01`;
   const todayD = todayStr();
+  const bigLosses = [];
   const ecartRows = sites.map((s) => {
     let cur = new Date(monthStartD);
     const end = new Date(todayD);
@@ -2148,12 +2149,27 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
       const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
-      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
+      if (inv) {
+        const dayEcart = inv.stockPhysique - theorique;
+        ecartCumule += dayEcart; daysWithJauge++;
+        // Alerte perte > 500 L en une seule journée (site ou camion).
+        if (dayEcart <= -500) bigLosses.push({ site: s, date: d, ecart: dayEcart });
+      }
       cur.setDate(cur.getDate() + 1);
     }
     return { site: s, ecartCumule, daysWithJauge };
   }).sort((a, b) => a.ecartCumule - b.ecartCumule);
   const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  bigLosses.sort((a, b) => a.ecart - b.ecart);
+
+  // Transferts entre sites (mois en cours) : chargements de camions normalement affectés à un
+  // autre site que celui où ils ont été chargés — secours, panne d'un site, etc.
+  const transfers = movements.filter((m) => m.type === "sortie_camion" && m.camion && m.date >= monthStartD && m.date <= todayD)
+    .map((m) => {
+      const label = transferLabel(sites, truckAssignments || [], m.camion, m.siteId, m.date);
+      if (!label) return null;
+      return { date: m.date, camion: sites.find((s) => s.id === m.camion)?.name || m.camion, from: sites.find((s) => s.id === m.siteId)?.name || m.siteId, label, quantity: m.quantity };
+    }).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1));
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
   // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
@@ -2212,6 +2228,45 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
         <StatCard label="Gain/Perte réseau (mois)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
       </div>
+
+      {bigLosses.length > 0 && (
+        <div className="somip-panel" style={{ marginBottom: 18, padding: 18, borderLeft: `4px solid ${C.danger}` }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, color: C.danger, display: "flex", alignItems: "center", gap: 8 }}>
+            <AlertTriangle size={17} /> Perte de plus de 500 L en une journée
+          </h3>
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Mois en cours — à vérifier en priorité.</p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {bigLosses.map((b, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.bg, borderRadius: 6, padding: "8px 12px", fontSize: 13 }}>
+                <span><strong>{b.site.name}</strong> {!b.site.isMobile && <span style={{ color: C.sub }}>({b.site.code})</span>} — {b.date}</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: C.danger }}>{fmt(b.ecart)} L</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {transfers.length > 0 && (
+        <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Transferts entre sites</h3>
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Mois en cours — camion chargé sur un site différent de celui où il est normalement affecté (secours, panne...). La réception a été ajoutée automatiquement côté camion.</p>
+          <div style={{ overflowX: "auto" }}>
+            <table className="somip-table">
+              <thead><tr><th>Date</th><th>Camion</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
+              <tbody>
+                {transfers.map((t, i) => (
+                  <tr key={i}>
+                    <td className="somip-mono">{t.date}</td>
+                    <td style={{ fontWeight: 600 }}>{t.camion}</td>
+                    <td style={{ color: C.orange, fontWeight: 600 }}>{t.label}</td>
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(t.quantity)} L</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Gain/Perte du mois — sites et camions</h3>
@@ -2712,14 +2767,20 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               if (qty > 0 && c.camion) {
                 const ok2 = await addMovement({ siteId, product, type: "sortie_camion", date, quantity: qty, delta: -qty, camion: c.camion, ...vcfExtra(qty) });
                 if (!ok2) return;
+                // Transfert (camion normalement affecté ailleurs) : la réception se crée
+                // automatiquement côté camion, sans double saisie.
+                const label = transferLabel(sites, truckAssignments || [], c.camion, siteId, date);
+                if (label) {
+                  const ok3 = await addMovement({ siteId: c.camion, product, type: "reception", date, quantity: qty, delta: qty, commentaire: label, ...vcfExtra(qty) });
+                  if (!ok3) return;
+                }
               }
             }
           }
         } else if (isMultiCompteurEntry) {
           // Le(s) compteur(s) mesurent le flux total (vente + chargements camions confondus) :
           // on répartit les chargements sur les compteurs saisis (dans l'ordre), puis on
-          // enregistre le reliquat "vente" par compteur avec son propre index. Chaque
-          // chargement camion crée automatiquement la réception correspondante côté camion.
+          // enregistre le reliquat "vente" par compteur avec son propre index.
           let remaining = totalChargements;
           for (const r of readingFlows) {
             if (r.flow <= 0) continue;
@@ -2736,6 +2797,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             if (qty > 0 && c.camion) {
               const ok = await addMovement({ siteId, product, type: "sortie_camion", date, quantity: qty, delta: -qty, camion: c.camion, ...vcfExtra(qty) });
               if (!ok) return;
+              // Transfert (camion normalement affecté ailleurs) : la réception se crée
+              // automatiquement côté camion, sans double saisie.
+              const label = transferLabel(sites, truckAssignments || [], c.camion, siteId, date);
+              if (label) {
+                const ok3 = await addMovement({ siteId: c.camion, product, type: "reception", date, quantity: qty, delta: qty, commentaire: label, ...vcfExtra(qty) });
+                if (!ok3) return;
+              }
             }
           }
         } else if (isLub || isMobileSite) {
@@ -3004,7 +3072,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               {isLubSite && (
                 <>
                   <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Chargement laitiers (prélevé sur ce flux)</p>
-                  <p style={{ margin: "0 0 8px", fontSize: 11, color: C.warning }}>Pense à saisir aussi ce chargement côté camion (Chargement) — les deux côtés sont indépendants.</p>
+                  <p style={{ margin: "0 0 8px", fontSize: 11, color: C.warning }}>Pense à saisir aussi ce chargement côté camion (Chargement) — sauf pour un transfert (camion affecté à un autre site), ajouté automatiquement.</p>
                   {chargements.map((c, idx) => (
                     <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
                       <div style={{ flex: 1 }}>
@@ -3027,6 +3095,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                       )}
                     </div>
                   ))}
+                  {chargements.map((c, idx2) => {
+                    const label = c.camion ? transferLabel(sites, truckAssignments || [], c.camion, siteId, date) : "";
+                    return label ? (
+                      <p key={idx2} style={{ margin: "-4px 0 8px", fontSize: 11, color: C.success, fontWeight: 600 }}>
+                        {label} — la réception sera ajoutée automatiquement côté camion, rien à saisir en plus.
+                      </p>
+                    ) : null;
+                  })}
                   <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setChargements((prev) => [...prev, { camion: "", quantite: "" }])}>
                     <Plus size={13} /> Ajouter un camion
                   </button>
