@@ -2323,6 +2323,15 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       if (!label) return null;
       return { date: m.date, camion: sites.find((s) => s.id === m.camion)?.name || m.camion, from: sites.find((s) => s.id === m.siteId)?.name || m.siteId, label, quantity: m.quantity };
     }).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const totalTransfers = transfers.reduce((a, t) => a + t.quantity, 0);
+  const transfersByRoute = Object.values(
+    transfers.reduce((acc, t) => {
+      if (!acc[t.label]) acc[t.label] = { label: t.label, quantity: 0, count: 0 };
+      acc[t.label].quantity += t.quantity;
+      acc[t.label].count += 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b.quantity - a.quantity);
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
   // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
@@ -2380,6 +2389,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Sites en alerte" value={alerts.length} unit={`/ ${rows.length}`} accent={C.danger} icon={AlertTriangle} />
         <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
         <StatCard label="Gain/Perte réseau (mois)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
+        {transfers.length > 0 && <StatCard label="Transferts entre sites (mois)" value={fmt(totalTransfers)} unit="L" accent={C.orange} icon={Truck} />}
       </div>
 
       {bigLosses.length > 0 && (
@@ -2401,8 +2411,24 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 
       {transfers.length > 0 && (
         <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Transferts entre sites</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+            <h3 style={{ margin: 0, fontSize: 14 }}>Transferts entre sites</h3>
+            <span className="somip-mono" style={{ fontWeight: 700, color: C.orange, fontSize: 14 }}>Total : {fmt(totalTransfers)} L</span>
+          </div>
           <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Mois en cours — camion chargé sur un site différent de celui où il est normalement affecté (secours, panne...). La réception a été ajoutée automatiquement côté camion.</p>
+
+          {transfersByRoute.length > 1 && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+              {transfersByRoute.map((r, i) => (
+                <div key={i} style={{ background: C.bg, borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+                  <span style={{ fontWeight: 600, color: C.ink }}>{r.label}</span>
+                  <span style={{ color: C.sub }}> — {r.count} transfert{r.count > 1 ? "s" : ""} — </span>
+                  <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(r.quantity)} L</span>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div style={{ overflowX: "auto" }}>
             <table className="somip-table">
               <thead><tr><th>Date</th><th>Camion</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
@@ -2415,6 +2441,10 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
                     <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(t.quantity)} L</td>
                   </tr>
                 ))}
+                <tr>
+                  <td colSpan={3} style={{ fontWeight: 700 }}>Total</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalTransfers)} L</td>
+                </tr>
               </tbody>
             </table>
           </div>
