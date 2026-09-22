@@ -772,11 +772,17 @@ async function exportInventaireOfficielToPdf(inv, site) {
   }
 
   // Cases de signature, en bas de page (fixe, pas juste après le contenu, pour un rendu
-  // toujours propre même si le tableau des cuves est court ou long).
+  // toujours propre même si le tableau des cuves est court ou long). Si une signature
+  // numérique a déjà été apposée, son image remplace la case vide.
   const sigY = Math.max(y + 20, pageHeight - 150);
   const sigW = (fullWidth - 32) / 3;
-  const sigLabels = ["SOMIP", "Opérateur", "TotalEnergies Marketing"];
-  sigLabels.forEach((label, i) => {
+  const sigSlots = [
+    { label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt },
+    { label: "Opérateur", url: inv.signatureOperateurUrl, by: inv.signatureOperateurBy, at: inv.signatureOperateurAt },
+    { label: "TotalEnergies Marketing", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt },
+  ];
+  for (let i = 0; i < sigSlots.length; i++) {
+    const slot = sigSlots[i];
     const x = marginX + i * (sigW + 16);
     doc.setDrawColor(180, 188, 195);
     doc.setLineWidth(0.75);
@@ -784,12 +790,25 @@ async function exportInventaireOfficielToPdf(inv, site) {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(9.5);
     doc.setTextColor(20, 30, 40);
-    doc.text(label.toUpperCase(), x + sigW / 2, sigY + 14, { align: "center" });
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    doc.setTextColor(150, 158, 165);
-    doc.text("Signature", x + sigW / 2, sigY + 82, { align: "center" });
-  });
+    doc.text(slot.label.toUpperCase(), x + sigW / 2, sigY + 14, { align: "center" });
+    if (slot.url) {
+      try {
+        const sigDataUrl = await loadImageDataUrl(slot.url);
+        const sigFmt = sigDataUrl.includes("image/png") ? "PNG" : "JPEG";
+        doc.addImage(sigDataUrl, sigFmt, x + 10, sigY + 20, sigW - 20, 45, undefined, "FAST");
+      } catch (e) { /* signature indisponible : on continue sans */ }
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+      doc.setTextColor(110, 120, 130);
+      const dateLabel = slot.at ? new Date(slot.at).toLocaleDateString("fr-FR") : "";
+      doc.text(`${slot.by || ""}${dateLabel ? " — " + dateLabel : ""}`, x + sigW / 2, sigY + 82, { align: "center" });
+    } else {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(150, 158, 165);
+      doc.text("Signature", x + sigW / 2, sigY + 82, { align: "center" });
+    }
+  }
 
   doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || inv.siteId}_${inv.date}.pdf`);
 }
@@ -807,6 +826,76 @@ async function uploadPhotos(files, folder) {
     urls.push(data.publicUrl);
   }
   return urls;
+}
+function dataUrlToFile(dataUrl, filename) {
+  const [header, base64] = dataUrl.split(",");
+  const mime = /data:(.*?);base64/.exec(header)?.[1] || "image/png";
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new File([bytes], filename, { type: mime });
+}
+
+// Pavé de signature tactile/souris — dessin libre, effacer, valider (renvoie un data URL PNG).
+function SignaturePad({ onSave, onCancel }) {
+  const canvasRef = useRef(null);
+  const drawingRef = useRef(false);
+  const hasDrawnRef = useRef(false);
+  const lastPos = useRef({ x: 0, y: 0 });
+
+  const getPos = (e) => {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (clientX - rect.left) * (canvas.width / rect.width), y: (clientY - rect.top) * (canvas.height / rect.height) };
+  };
+  const start = (e) => {
+    e.preventDefault();
+    drawingRef.current = true;
+    lastPos.current = getPos(e);
+  };
+  const move = (e) => {
+    if (!drawingRef.current) return;
+    e.preventDefault();
+    const ctx = canvasRef.current.getContext("2d");
+    const pos = getPos(e);
+    ctx.strokeStyle = "#1A2733";
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(lastPos.current.x, lastPos.current.y);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.stroke();
+    lastPos.current = pos;
+    hasDrawnRef.current = true;
+  };
+  const end = () => { drawingRef.current = false; };
+  const clear = () => {
+    const canvas = canvasRef.current;
+    canvas.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    hasDrawnRef.current = false;
+  };
+  const save = () => {
+    if (!hasDrawnRef.current) return;
+    onSave(canvasRef.current.toDataURL("image/png"));
+  };
+
+  return (
+    <div>
+      <canvas
+        ref={canvasRef} width={500} height={200}
+        style={{ width: "100%", maxWidth: 500, height: 160, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 8, touchAction: "none", cursor: "crosshair" }}
+        onMouseDown={start} onMouseMove={move} onMouseUp={end} onMouseLeave={end}
+        onTouchStart={start} onTouchMove={move} onTouchEnd={end}
+      />
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        <button className="somip-btn somip-btn-primary" onClick={save}><Check size={14} /> Valider la signature</button>
+        <button className="somip-btn somip-btn-secondary" onClick={clear}><RotateCcw size={14} /> Effacer</button>
+        {onCancel && <button onClick={onCancel} style={{ border: "none", background: "none", cursor: "pointer", padding: "6px 10px" }}><X size={16} color={C.sub} /></button>}
+      </div>
+    </div>
+  );
 }
 
 // Petit sélecteur de photos réutilisable : aperçus en miniature + bouton de suppression avant envoi.
@@ -1035,8 +1124,8 @@ function ReportToolbar({ onExcel, onPrint, onPdf }) {
 /* ------------------------------------------------------------------ */
 /* Rôles & permissions                                                  */
 /* ------------------------------------------------------------------ */
-const ROLE_VALUES = ["superviseur", "operateur", "chauffeur", "lecture"];
-const ROLE_LABELS = { superviseur: "Superviseur", operateur: "Opérateur", chauffeur: "Chauffeur", lecture: "Lecture" };
+const ROLE_VALUES = ["superviseur", "operateur", "chauffeur", "lecture", "totalenergies"];
+const ROLE_LABELS = { superviseur: "Superviseur", operateur: "Opérateur", chauffeur: "Chauffeur", lecture: "Lecture", totalenergies: "TotalEnergies" };
 const PERIOD_TYPE_LABELS = { mensuel: "Mensuel", trimestriel: "Trimestriel", decadaire: "Décadaire" };
 const TYPE_INVENTAIRE_LABELS = { inopine: "Inopiné", mensuel: "Mensuel" };
 const PRODUIT_INVENTAIRE_LABELS = { gasoil: "Gasoil", lubrifiant_vrac: "Lubrifiant vrac" };
@@ -1047,6 +1136,11 @@ function permsFor(role) {
     canManage: role === "superviseur",
     canWrite: role === "superviseur" || role === "operateur" || role === "chauffeur",
     canInventaireOfficiel: role === "superviseur" || role === "operateur",
+    // Qui peut apposer chaque signature. TotalEnergies : uniquement sa propre case.
+    canSignSomip: role === "superviseur" || role === "operateur",
+    canSignOperateur: role === "superviseur" || role === "operateur",
+    canSignTotal: role === "totalenergies" || role === "superviseur",
+    isTotalEnergiesOnly: role === "totalenergies",
   };
 }
 
@@ -1119,6 +1213,9 @@ const bilanToRow = (b) => ({
 const rowToInventaireOfficiel = (r) => ({
   id: r.id, siteId: r.site_id, date: r.date, type: r.type, produit: r.produit || "gasoil", inventoriste: r.inventoriste || "", operateur: r.operateur || "",
   cuves: r.cuves || [], depotage: r.depotage || [], indexCompteurs: r.index_compteurs || [], stockAmbiant: Number(r.stock_ambiant || 0), stock15: numOrUndef(r.stock15), commentaire: r.commentaire || "",
+  signatureSomipUrl: r.signature_somip_url || null, signatureSomipBy: r.signature_somip_by || null, signatureSomipAt: r.signature_somip_at || null,
+  signatureOperateurUrl: r.signature_operateur_url || null, signatureOperateurBy: r.signature_operateur_by || null, signatureOperateurAt: r.signature_operateur_at || null,
+  signatureTotalUrl: r.signature_total_url || null, signatureTotalBy: r.signature_total_by || null, signatureTotalAt: r.signature_total_at || null,
   createdBy: r.created_by, createdAt: r.created_at,
 });
 const inventaireOfficielToRow = (i) => ({
@@ -1718,6 +1815,20 @@ export default function App() {
     setInventairesOfficiels((prev) => prev.filter((i) => i.id !== inv.id));
     flash("Inventaire officiel supprimé.");
   });
+  const signInventaireOfficiel = (inv, role, dataUrl) => withSync(async () => {
+    const file = dataUrlToFile(dataUrl, `signature-${role}.png`);
+    const [url] = await uploadPhotos([file], `signatures/${inv.id}`);
+    const col = role === "somip" ? "signature_somip" : role === "operateur" ? "signature_operateur" : "signature_total";
+    const nowIso = new Date().toISOString();
+    const patch = { [`${col}_url`]: url, [`${col}_by`]: currentUserName, [`${col}_at`]: nowIso };
+    const { data, error } = await supabase.from("inventaires_officiels").update(patch).eq("id", inv.id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("La signature n'a pas pu être confirmée par le serveur — réessaie.");
+    const saved = rowToInventaireOfficiel(data);
+    setInventairesOfficiels((prev) => prev.map((i) => (i.id === inv.id ? saved : i)));
+    appendAudit("Signature inventaire officiel", `${role} — ${sites.find((s) => s.id === inv.siteId)?.name || inv.siteId} — ${inv.date}`);
+    flash("Signature enregistrée.");
+  });
 
   /* ---- mutations : cuves par site (Superviseur uniquement) ---- */
   const addSiteTank = ({ siteId, name }) => withSync(async () => {
@@ -1943,17 +2054,18 @@ export default function App() {
   });
 
   const NAV = [
-    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: true },
+    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: !perms.isTotalEnergiesOnly },
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
-    { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: true },
+    { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
     { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: true },
-    { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: true },
-    { id: "rapports", label: "Rapports", icon: FileBarChart, show: true },
+    { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly },
+    { id: "rapports", label: "Rapports", icon: FileBarChart, show: !perms.isTotalEnergiesOnly },
     { id: "utilisateurs", label: "Utilisateurs", icon: Users, show: perms.canManage },
     { id: "personnalisation", label: "Personnalisation", icon: Palette, show: perms.canManage },
     { id: "historique", label: "Historique", icon: History, show: perms.canManage },
   ].filter((n) => n.show);
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
+  useEffect(() => { if (perms.isTotalEnergiesOnly && view === "dashboard") setView("inventaires"); }, [perms.isTotalEnergiesOnly]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!SUPABASE_CONFIGURED) {
     return (
@@ -2135,7 +2247,7 @@ export default function App() {
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
@@ -3633,8 +3745,8 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters }) {
-  const [mainTab, setMainTab] = useState("rapide");
+function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly }) {
+  const [mainTab, setMainTab] = useState(isTotalEnergiesOnly ? "officiel" : "rapide");
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [stockPhysique, setStockPhysique] = useState("");
@@ -3674,11 +3786,11 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   return (
     <div className="somip-fade">
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-        <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} onClick={() => setMainTab("rapide")}>Inventaire rapide</button>
+        {!isTotalEnergiesOnly && <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} onClick={() => setMainTab("rapide")}>Inventaire rapide</button>}
         <button className={`somip-tab ${mainTab === "officiel" ? "active" : ""}`} onClick={() => setMainTab("officiel")}>Inventaire officiel (inopiné / mensuel)</button>
       </div>
 
-      {mainTab === "rapide" && (
+      {mainTab === "rapide" && !isTotalEnergiesOnly && (
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18, flex: "1 1 300px" }}>
         {canWrite && (
@@ -3820,14 +3932,14 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
       )}
 
       {mainTab === "officiel" && (
-        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} />
+        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} />
       )}
     </div>
   );
 }
 
 /* ---- Inventaire officiel (inopiné / mensuel) — cuve par cuve, avec PDF signé ---- */
-function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage }) {
+function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly }) {
   const fixedSites = sites.filter((s) => !s.isMobile);
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -3837,7 +3949,8 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   const [operateur, setOperateur] = useState("");
   const [commentaire, setCommentaire] = useState("");
   const [filterSite, setFilterSite] = useState("all");
-
+  const [signingId, setSigningId] = useState(null);
+  const [signingRole, setSigningRole] = useState(null);
   const emptyCuve = (name) => ({ cuve: name, hauteur: "", densite: "", temperatureC: "", eau: false, stockAmbiant: "" });
   const tanksForSite = siteTanks.filter((t) => t.siteId === siteId);
   const [cuveReadings, setCuveReadings] = useState([]);
@@ -4060,11 +4173,11 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
             <thead>
               <tr>
                 <th>Date</th><th>Site</th><th>Produit</th><th>Type</th><th>Inventoriste</th><th>Opérateur</th>
-                <th style={{ textAlign: "right" }}>Stock ambiant</th><th style={{ textAlign: "right" }}>Stock 15°C</th><th></th>{canManage && <th></th>}
+                <th style={{ textAlign: "right" }}>Stock ambiant</th><th style={{ textAlign: "right" }}>Stock 15°C</th><th>Signatures</th><th></th>{canManage && <th></th>}
               </tr>
             </thead>
             <tbody>
-              {list.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun inventaire officiel enregistré." />}
+              {list.length === 0 && <EmptyRow colSpan={canManage ? 11 : 10} text="Aucun inventaire officiel enregistré." />}
               {list.map((inv) => (
                 <tr key={inv.id}>
                   <td className="somip-mono">{inv.date}</td>
@@ -4076,6 +4189,11 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(inv.stockAmbiant)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: inv.stock15 !== undefined ? C.blue : C.sub }}>{inv.stock15 !== undefined ? `${fmt(inv.stock15)} L` : "—"}</td>
                   <td>
+                    <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => setSigningId(signingId === inv.id ? null : inv.id)}>
+                      <Pencil size={12} /> {[inv.signatureSomipUrl, inv.signatureOperateurUrl, inv.signatureTotalUrl].filter(Boolean).length}/3
+                    </button>
+                  </td>
+                  <td>
                     <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielToPdf(inv, sites.find((s) => s.id === inv.siteId))}>
                       <Download size={12} /> PDF
                     </button>
@@ -4086,6 +4204,48 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
             </tbody>
           </table>
         </div>
+
+        {signingId && (() => {
+          const inv = list.find((i) => i.id === signingId);
+          if (!inv) return null;
+          const slots = [
+            { role: "somip", label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt, can: canSignSomip },
+            { role: "operateur", label: "Opérateur", url: inv.signatureOperateurUrl, by: inv.signatureOperateurBy, at: inv.signatureOperateurAt, can: canSignOperateur },
+            { role: "total", label: "TotalEnergies", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt, can: canSignTotal },
+          ];
+          return (
+            <div className="somip-panel" style={{ marginTop: 14, padding: 14, background: C.bg }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                <p style={{ margin: 0, fontSize: 12.5, fontWeight: 700, color: C.ink }}>
+                  Signatures — {sites.find((s) => s.id === inv.siteId)?.name} — {inv.date}
+                </p>
+                <button onClick={() => { setSigningId(null); setSigningRole(null); }} style={{ border: "none", background: "none", cursor: "pointer" }}><X size={16} color={C.sub} /></button>
+              </div>
+              <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                {slots.map((slot) => (
+                  <div key={slot.role} style={{ flex: "1 1 220px", border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, background: "#fff" }}>
+                    <p style={{ margin: "0 0 8px", fontSize: 12, fontWeight: 700, color: C.ink }}>{slot.label}</p>
+                    {slot.url ? (
+                      <>
+                        <img src={slot.url} alt="" style={{ maxWidth: "100%", height: 60, objectFit: "contain", border: `1px solid ${C.border}`, borderRadius: 6, background: "#fff" }} />
+                        <p style={{ margin: "6px 0 0", fontSize: 11, color: C.sub }}>Signé par {slot.by || "—"}{slot.at ? ` le ${new Date(slot.at).toLocaleString("fr-FR")}` : ""}</p>
+                      </>
+                    ) : slot.can && signingRole === slot.role ? (
+                      <SignaturePad
+                        onSave={(dataUrl) => { signInventaireOfficiel(inv, slot.role, dataUrl); setSigningRole(null); }}
+                        onCancel={() => setSigningRole(null)}
+                      />
+                    ) : slot.can ? (
+                      <button className="somip-btn somip-btn-primary" style={{ fontSize: 12 }} onClick={() => setSigningRole(slot.role)}>Signer</button>
+                    ) : (
+                      <p style={{ margin: 0, fontSize: 11, color: C.sub }}>Non signé</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
       </div>
     </div>
   );
@@ -6047,7 +6207,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
   const [resetPassword, setResetPassword] = useState("");
   const [resetErr, setResetErr] = useState(null);
   const [resetMsg, setResetMsg] = useState(null);
-  const [form, setForm] = useState({ fullName: "", username: "", password: "", role: "lecture", assignedSiteIds: [] });
+  const [form, setForm] = useState({ fullName: "", username: "", email: "", password: "", role: "lecture", assignedSiteIds: [] });
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
   const [createMsg, setCreateMsg] = useState(null);
@@ -6116,19 +6276,20 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
 
   const createAccount = async () => {
     setCreateErr(null); setCreateMsg(null);
-    if (!form.fullName.trim() || !form.username.trim() || !form.password) { setCreateErr("Tous les champs sont requis."); return; }
+    if (!form.fullName.trim() || (!form.username.trim() && !form.email.trim()) || !form.password) { setCreateErr("Le nom, le mot de passe, et soit l'e-mail soit le nom d'utilisateur, sont requis."); return; }
+    if (form.email.trim() && !form.email.includes("@")) { setCreateErr("L'adresse e-mail n'a pas l'air valide."); return; }
     if (form.password.length < 6) { setCreateErr("Le mot de passe doit contenir au moins 6 caractères."); return; }
     setCreating(true);
     try {
       const res = await fetch("/api/create-user", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${session?.access_token || ""}` },
-        body: JSON.stringify({ username: form.username.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role, assignedSiteIds: form.assignedSiteIds }),
+        body: JSON.stringify({ username: form.username.trim(), email: form.email.trim(), password: form.password, fullName: form.fullName.trim(), role: form.role, assignedSiteIds: form.assignedSiteIds }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Erreur lors de la création du compte.");
       setCreateMsg(`Compte créé pour ${form.fullName.trim()} (${ROLE_LABELS[form.role]}). Identifiant de connexion : "${data.loginEmail}" — communique-le avec le mot de passe.`);
-      setForm({ fullName: "", username: "", password: "", role: "lecture", assignedSiteIds: [] });
+      setForm({ fullName: "", username: "", email: "", password: "", role: "lecture", assignedSiteIds: [] });
     } catch (e) {
       setCreateErr(e.message || "Erreur lors de la création du compte.");
     } finally {
@@ -6235,7 +6396,10 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
         <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Créer un compte</h3>
         <Field label="Nom complet"><input className="somip-input" value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} placeholder="Ex : Jean Mabiala" /></Field>
-        <Field label="Nom d'utilisateur (identifiant de connexion)"><input className="somip-input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="Ex : jean.mabiala" /></Field>
+        <Field label="Adresse e-mail professionnelle (si la personne en a une)"><input type="email" className="somip-input" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Ex : jean.mabiala@somip-sarl.ga" /></Field>
+        {!form.email.trim() && (
+          <Field label="Sinon, nom d'utilisateur (un identifiant sera généré)"><input className="somip-input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="Ex : jean.mabiala" /></Field>
+        )}
         <Field label="Mot de passe provisoire"><input type="text" className="somip-input" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Au moins 6 caractères" /></Field>
         <Field label="Rôle">
           <select className="somip-select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
