@@ -5,7 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const VALID_ROLES = ["superviseur", "operateur", "chauffeur", "lecture"];
+const VALID_ROLES = ["superviseur", "operateur", "chauffeur", "lecture", "totalenergies"];
 
 function slugify(str) {
   return String(str)
