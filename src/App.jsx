@@ -705,22 +705,43 @@ async function exportInventaireOfficielToPdf(inv, site) {
   });
   y = doc.lastAutoTable.finalY + 20;
 
-  // Tableau 2 — Index, séparé (comme demandé), lié aux mêmes cuves.
-  drawBanner("INDEX — RELEVÉ COMPTEUR");
-  autoTable(doc, {
-    startY: y,
-    head: [["Cuve", "Index fin"]],
-    body: (inv.cuves || []).map((c) => [c.cuve, c.indexFin !== null && c.indexFin !== undefined ? fmt(c.indexFin) : "—"]),
-    theme: "grid",
-    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, cellPadding: 7 },
-    bodyStyles: { fontSize: 10, cellPadding: 7, textColor: [40, 48, 56] },
-    alternateRowStyles: { fillColor: [249, 250, 251] },
-    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
-    columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
-    margin: { left: marginX, right: marginX },
-    tableWidth: fullWidth / 2,
-  });
-  y = doc.lastAutoTable.finalY + 20;
+  // Tableau 2 — Index, indépendant des cuves (les compteurs de vente habituels du site).
+  if (inv.indexCompteurs && inv.indexCompteurs.length > 0) {
+    drawBanner("INDEX — RELEVÉ COMPTEUR");
+    autoTable(doc, {
+      startY: y,
+      head: [["Compteur", "Index fin"]],
+      body: inv.indexCompteurs.map((d) => [d.compteur, d.indexFin !== null && d.indexFin !== undefined ? fmt(d.indexFin) : "—"]),
+      theme: "grid",
+      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, cellPadding: 7 },
+      bodyStyles: { fontSize: 10, cellPadding: 7, textColor: [40, 48, 56] },
+      alternateRowStyles: { fillColor: [249, 250, 251] },
+      styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
+      columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+      margin: { left: marginX, right: marginX },
+      tableWidth: fullWidth / 2,
+    });
+    y = doc.lastAutoTable.finalY + 20;
+  }
+
+  // Tableau 3 — Index des compteurs de dépotage (livraison), séparé lui aussi.
+  if (inv.depotage && inv.depotage.length > 0) {
+    drawBanner("INDEX — COMPTEURS DE DÉPOTAGE");
+    autoTable(doc, {
+      startY: y,
+      head: [["Compteur de dépotage", "Index fin"]],
+      body: inv.depotage.map((d) => [d.compteur, d.indexFin !== null && d.indexFin !== undefined ? fmt(d.indexFin) : "—"]),
+      theme: "grid",
+      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, cellPadding: 7 },
+      bodyStyles: { fontSize: 10, cellPadding: 7, textColor: [40, 48, 56] },
+      alternateRowStyles: { fillColor: [249, 250, 251] },
+      styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
+      columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+      margin: { left: marginX, right: marginX },
+      tableWidth: fullWidth / 2,
+    });
+    y = doc.lastAutoTable.finalY + 20;
+  }
 
   // Totaux : stock ambiant et à 15°C, côte à côte.
   const halfW = (fullWidth - 16) / 2;
@@ -769,11 +790,6 @@ async function exportInventaireOfficielToPdf(inv, site) {
     doc.setTextColor(150, 158, 165);
     doc.text("Signature", x + sigW / 2, sigY + 82, { align: "center" });
   });
-
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(8);
-  doc.setTextColor(150, 158, 165);
-  doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, marginX, pageHeight - 18);
 
   doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || inv.siteId}_${inv.date}.pdf`);
 }
@@ -1102,16 +1118,18 @@ const bilanToRow = (b) => ({
 
 const rowToInventaireOfficiel = (r) => ({
   id: r.id, siteId: r.site_id, date: r.date, type: r.type, produit: r.produit || "gasoil", inventoriste: r.inventoriste || "", operateur: r.operateur || "",
-  cuves: r.cuves || [], stockAmbiant: Number(r.stock_ambiant || 0), stock15: numOrUndef(r.stock15), commentaire: r.commentaire || "",
+  cuves: r.cuves || [], depotage: r.depotage || [], indexCompteurs: r.index_compteurs || [], stockAmbiant: Number(r.stock_ambiant || 0), stock15: numOrUndef(r.stock15), commentaire: r.commentaire || "",
   createdBy: r.created_by, createdAt: r.created_at,
 });
 const inventaireOfficielToRow = (i) => ({
   site_id: i.siteId, date: i.date, type: i.type, produit: i.produit || "gasoil", inventoriste: i.inventoriste ?? null, operateur: i.operateur ?? null,
-  cuves: i.cuves || [], stock_ambiant: i.stockAmbiant || 0, stock15: i.stock15 ?? null, commentaire: i.commentaire ?? null,
+  cuves: i.cuves || [], depotage: i.depotage || [], index_compteurs: i.indexCompteurs || [], stock_ambiant: i.stockAmbiant || 0, stock15: i.stock15 ?? null, commentaire: i.commentaire ?? null,
   created_by: i.createdBy ?? null,
 });
 const rowToSiteTank = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteTankToRow = (t) => ({ site_id: t.siteId, name: t.name });
+const rowToSiteDepotageMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
+const siteDepotageMeterToRow = (t) => ({ site_id: t.siteId, name: t.name });
 
 const rowToAssignment = (r) => ({ id: r.id, truckId: r.truck_id, stationId: r.station_id, startDate: r.start_date, endDate: r.end_date || null });
 const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, start_date: a.startDate, end_date: a.endDate ?? null });
@@ -1408,6 +1426,7 @@ export default function App() {
   const [bilans, setBilans] = useState([]);
   const [inventairesOfficiels, setInventairesOfficiels] = useState([]);
   const [siteTanks, setSiteTanks] = useState([]);
+  const [siteDepotageMeters, setSiteDepotageMeters] = useState([]);
   const [truckAssignments, setTruckAssignments] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [audit, setAudit] = useState([]);
@@ -1484,7 +1503,7 @@ export default function App() {
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData] = await Promise.all([
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData] = await Promise.all([
             fetchTable("sites", rowToSite),
             fetchTable("movements", rowToMovement, "date"),
             fetchTable("inventaires", rowToInventaire, "date"),
@@ -1496,13 +1515,14 @@ export default function App() {
             fetchTable("bilan_matieres", rowToBilan, "period_key"),
             fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
             fetchTable("site_tanks", rowToSiteTank, "name"),
+            fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
           ]);
           let settingsRow = null;
           try {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
@@ -1517,6 +1537,7 @@ export default function App() {
         setBilans(result.bilansData);
         setInventairesOfficiels(result.invOffData);
         setSiteTanks(result.siteTanksData);
+        setSiteDepotageMeters(result.siteDepotageMetersData);
         setSettings(rowToSettings(result.settingsRow));
         setLastSync(new Date());
         setLoadError(null);
@@ -1535,7 +1556,7 @@ export default function App() {
   useEffect(() => {
     if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
-      const [s, m, i, p, a, ps, ta, sm, bl, io, st] = await Promise.all([
+      const [s, m, i, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
         fetchTable("sites", rowToSite),
         fetchTable("movements", rowToMovement, "date"),
         fetchTable("inventaires", rowToInventaire, "date"),
@@ -1547,8 +1568,9 @@ export default function App() {
         fetchTable("bilan_matieres", rowToBilan, "period_key"),
         fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
         fetchTable("site_tanks", rowToSiteTank, "name"),
+        fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
       ]);
-      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st);
+      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm);
       const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
       if (se) setSettings(rowToSettings(se));
       setLastSync(new Date());
@@ -1664,10 +1686,11 @@ export default function App() {
   });
 
   /* ---- mutations : Inventaires officiels (inopinés/mensuels), cuve par cuve ---- */
-  const addInventaireOfficiel = ({ siteId, date, type, produit, inventoriste, operateur, cuves, commentaire }) => withSync(async () => {
+  const addInventaireOfficiel = ({ siteId, date, type, produit, inventoriste, operateur, cuves, depotage, indexCompteurs, commentaire }) => withSync(async () => {
     // Densité et température sont désormais propres à CHAQUE cuve : le volume à 15°C se calcule
     // cuve par cuve, puis on additionne. Le total à 15°C n'est complet que si toutes les cuves
-    // ont une densité + température renseignées.
+    // ont une densité + température renseignées. Les index (relevé compteur) sont indépendants
+    // des cuves — une liste à part, comme les compteurs de dépotage.
     const cuvesComputed = (cuves || []).map((c) => {
       const amb = Number(c.stockAmbiant) || 0;
       let volume15 = null;
@@ -1679,7 +1702,7 @@ export default function App() {
     });
     const stockAmbiant = cuvesComputed.reduce((a, c) => a + c.stockAmbiant, 0);
     const stock15 = cuvesComputed.every((c) => c.volume15 !== null) ? cuvesComputed.reduce((a, c) => a + c.volume15, 0) : undefined;
-    const row = inventaireOfficielToRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, stockAmbiant, stock15, commentaire, createdBy: currentUserName });
+    const row = inventaireOfficielToRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, depotage: depotage || [], indexCompteurs: indexCompteurs || [], stockAmbiant, stock15, commentaire, createdBy: currentUserName });
     const { data, error } = await supabase.from("inventaires_officiels").insert(row).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("L'inventaire officiel n'a pas pu être confirmé par le serveur — réessaie.");
@@ -1714,6 +1737,24 @@ export default function App() {
     setSiteTanks((prev) => prev.filter((t) => t.id !== tank.id));
     appendAudit("Suppression cuve", `${tank.name} — ${sites.find((s) => s.id === tank.siteId)?.name || ""}`);
     flash("Cuve supprimée.");
+  });
+  const addSiteDepotageMeter = ({ siteId, name }) => withSync(async () => {
+    const cleanName = name.trim();
+    if (!cleanName) throw new Error("Le nom du compteur ne peut pas être vide.");
+    const { data, error } = await supabase.from("site_depotage_meters").insert(siteDepotageMeterToRow({ siteId, name: cleanName })).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("Le compteur n'a pas pu être confirmé par le serveur — réessaie.");
+    setSiteDepotageMeters((prev) => [...prev, rowToSiteDepotageMeter(data)]);
+    appendAudit("Ajout compteur de dépotage", `${cleanName} — ${sites.find((s) => s.id === siteId)?.name || ""}`);
+    flash("Compteur de dépotage ajouté.");
+  });
+  const removeSiteDepotageMeter = (meter) => withSync(async () => {
+    const { data, error } = await supabase.from("site_depotage_meters").delete().eq("id", meter.id).select();
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données — le compteur n'a pas été retiré.");
+    setSiteDepotageMeters((prev) => prev.filter((m) => m.id !== meter.id));
+    appendAudit("Suppression compteur de dépotage", `${meter.name} — ${sites.find((s) => s.id === meter.siteId)?.name || ""}`);
+    flash("Compteur de dépotage supprimé.");
   });
 
   /* ---- mutations : affectation des camions aux stations (Superviseur uniquement) ---- */
@@ -2092,9 +2133,9 @@ export default function App() {
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
@@ -2350,7 +2391,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank }) {
+function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter }) {
   const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -2364,6 +2405,8 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   const [newMeterName, setNewMeterName] = useState("");
   const [tankSiteId, setTankSiteId] = useState(stations[0]?.id || "");
   const [newTankName, setNewTankName] = useState("");
+  const [depotageSiteId, setDepotageSiteId] = useState(stations[0]?.id || "");
+  const [newDepotageName, setNewDepotageName] = useState("");
 
   const submitAdd = () => {
     if (!form.name.trim() || !form.code.trim() || !form.capacity) return;
@@ -2402,6 +2445,12 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
     if (!newTankName.trim() || !tankSiteId) return;
     addSiteTank({ siteId: tankSiteId, name: newTankName });
     setNewTankName("");
+  };
+  const currentDepotageMeters = siteDepotageMeters.filter((m) => m.siteId === depotageSiteId);
+  const submitDepotageMeter = () => {
+    if (!newDepotageName.trim() || !depotageSiteId) return;
+    addSiteDepotageMeter({ siteId: depotageSiteId, name: newDepotageName });
+    setNewDepotageName("");
   };
 
   return (
@@ -2589,6 +2638,32 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
         <div style={{ display: "flex", gap: 8 }}>
           <input className="somip-input" style={{ flex: 1 }} value={newTankName} onChange={(e) => setNewTankName(e.target.value)} placeholder="Ex : Cuve 1" />
           <button className="somip-btn somip-btn-primary" onClick={submitTank} disabled={!newTankName.trim()}><Plus size={15} /></button>
+        </div>
+      </div>
+
+      <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Compteurs de dépotage par site</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Pour les inventaires officiels : un site peut avoir plusieurs compteurs de dépotage (livraison), chacun relevé séparément.</p>
+        <Field label="Site">
+          <select className="somip-select" value={depotageSiteId} onChange={(e) => setDepotageSiteId(e.target.value)}>
+            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <table className="somip-table" style={{ marginBottom: 12 }}>
+          <thead><tr><th>Compteur de dépotage</th><th></th></tr></thead>
+          <tbody>
+            {currentDepotageMeters.length === 0 && <EmptyRow colSpan={2} text="Aucun compteur de dépotage configuré." />}
+            {currentDepotageMeters.map((m) => (
+              <tr key={m.id}>
+                <td>{m.name}</td>
+                <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => removeSiteDepotageMeter(m)} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input className="somip-input" style={{ flex: 1 }} value={newDepotageName} onChange={(e) => setNewDepotageName(e.target.value)} placeholder="Ex : Dépotage 1" />
+          <button className="somip-btn somip-btn-primary" onClick={submitDepotageMeter} disabled={!newDepotageName.trim()}><Plus size={15} /></button>
         </div>
       </div>
     </div>
@@ -3558,7 +3633,7 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, siteTanks }) {
+function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters }) {
   const [mainTab, setMainTab] = useState("rapide");
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -3745,14 +3820,14 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
       )}
 
       {mainTab === "officiel" && (
-        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} />
+        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} />
       )}
     </div>
   );
 }
 
 /* ---- Inventaire officiel (inopiné / mensuel) — cuve par cuve, avec PDF signé ---- */
-function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage }) {
+function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage }) {
   const fixedSites = sites.filter((s) => !s.isMobile);
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -3763,7 +3838,7 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
   const [commentaire, setCommentaire] = useState("");
   const [filterSite, setFilterSite] = useState("all");
 
-  const emptyCuve = (name) => ({ cuve: name, hauteur: "", densite: "", temperatureC: "", eau: false, indexFin: "", stockAmbiant: "" });
+  const emptyCuve = (name) => ({ cuve: name, hauteur: "", densite: "", temperatureC: "", eau: false, stockAmbiant: "" });
   const tanksForSite = siteTanks.filter((t) => t.siteId === siteId);
   const [cuveReadings, setCuveReadings] = useState([]);
   useEffect(() => {
@@ -3788,6 +3863,29 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
   const addCuveRow = () => setCuveReadings((prev) => [...prev, emptyCuve(`Cuve ${prev.length + 1}`)]);
   const removeCuveRow = (idx) => setCuveReadings((prev) => prev.filter((_, i) => i !== idx));
 
+  const emptyDepotage = (name) => ({ compteur: name, indexFin: "" });
+  const depotageMetersForSite = siteDepotageMeters.filter((m) => m.siteId === siteId);
+  const [depotageReadings, setDepotageReadings] = useState([]);
+  useEffect(() => {
+    setDepotageReadings(depotageMetersForSite.length ? depotageMetersForSite.map((m) => emptyDepotage(m.name)) : []);
+  }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const updateDepotage = (idx, field, value) => setDepotageReadings((prev) => prev.map((d, i) => (i === idx ? { ...d, [field]: value } : d)));
+  const addDepotageRow = () => setDepotageReadings((prev) => [...prev, emptyDepotage(`Dépotage ${prev.length + 1}`)]);
+  const removeDepotageRow = (idx) => setDepotageReadings((prev) => prev.filter((_, i) => i !== idx));
+
+  // Index (relevé compteur) — liste indépendante des cuves, basée sur les compteurs de vente
+  // habituels du site (les mêmes que pour la Saisie journalière).
+  const emptyIndex = (name) => ({ compteur: name, indexFin: "" });
+  const currentSite = sites.find((s) => s.id === siteId);
+  const salesMetersForSite = metersForSite(currentSite, siteMeters);
+  const [indexReadings, setIndexReadings] = useState([]);
+  useEffect(() => {
+    setIndexReadings(salesMetersForSite.map((name) => emptyIndex(name)));
+  }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
+  const updateIndex = (idx, field, value) => setIndexReadings((prev) => prev.map((d, i) => (i === idx ? { ...d, [field]: value } : d)));
+  const addIndexRow = () => setIndexReadings((prev) => [...prev, emptyIndex(`Compteur ${prev.length + 1}`)]);
+  const removeIndexRow = (idx) => setIndexReadings((prev) => prev.filter((_, i) => i !== idx));
+
   const canSubmit = siteId && date && cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "");
 
   const submit = () => {
@@ -3796,12 +3894,15 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
       siteId, date, type, produit, inventoriste, operateur,
       cuves: cuveReadings.map((c) => ({
         cuve: c.cuve, hauteur: c.hauteur === "" ? null : Number(c.hauteur), densite: c.densite === "" ? null : Number(c.densite),
-        temperatureC: c.temperatureC === "" ? null : Number(c.temperatureC), eau: !!c.eau,
-        indexFin: c.indexFin === "" ? null : Number(c.indexFin), stockAmbiant: Number(c.stockAmbiant) || 0,
+        temperatureC: c.temperatureC === "" ? null : Number(c.temperatureC), eau: !!c.eau, stockAmbiant: Number(c.stockAmbiant) || 0,
       })),
+      depotage: depotageReadings.map((d) => ({ compteur: d.compteur, indexFin: d.indexFin === "" ? null : Number(d.indexFin) })),
+      indexCompteurs: indexReadings.map((d) => ({ compteur: d.compteur, indexFin: d.indexFin === "" ? null : Number(d.indexFin) })),
       commentaire,
     });
     setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
+    setDepotageReadings(depotageMetersForSite.length ? depotageMetersForSite.map((m) => emptyDepotage(m.name)) : []);
+    setIndexReadings(salesMetersForSite.map((name) => emptyIndex(name)));
     setInventoriste(""); setOperateur(""); setCommentaire("");
   };
 
@@ -3868,9 +3969,6 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
               </div>
               <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                 <div style={{ flex: 1 }}>
-                  <Field label="Index fin"><input type="number" className="somip-input" value={c.indexFin} onChange={(e) => updateCuve(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
-                </div>
-                <div style={{ flex: 1 }}>
                   <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={c.stockAmbiant} onChange={(e) => updateCuve(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
                 </div>
                 <div style={{ flex: 1, paddingBottom: 9 }}>
@@ -3888,6 +3986,46 @@ function InventaireOfficielTab({ sites, siteTanks, inventairesOfficiels, addInve
           ))}
           <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 12 }} onClick={addCuveRow}>
             <Plus size={13} /> Ajouter une cuve
+          </button>
+
+          <p style={{ margin: "16px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Index — Relevé compteur</p>
+          <p style={{ margin: "0 0 8px", fontSize: 11, color: C.sub }}>Indépendant des cuves — les compteurs habituels du site (mêmes que pour la Saisie journalière).</p>
+          {indexReadings.map((d, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+              <div style={{ flex: 1.2 }}>
+                <Field label="Compteur"><input className="somip-input" value={d.compteur} onChange={(e) => updateIndex(idx, "compteur", e.target.value)} placeholder="Poste 1" /></Field>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Field label="Index fin"><input type="number" className="somip-input" value={d.indexFin} onChange={(e) => updateIndex(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+              </div>
+              <button onClick={() => removeIndexRow(idx)} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                <X size={16} color={C.danger} />
+              </button>
+            </div>
+          ))}
+          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 12 }} onClick={addIndexRow}>
+            <Plus size={13} /> Ajouter un compteur
+          </button>
+
+          <p style={{ margin: "16px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Index des compteurs de dépotage</p>
+          {depotageMetersForSite.length === 0 && depotageReadings.length === 0 && (
+            <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.warning }}>Aucun compteur de dépotage configuré pour ce site — ajoute-les depuis la page Sites, ou saisis-les directement ci-dessous.</p>
+          )}
+          {depotageReadings.map((d, idx) => (
+            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+              <div style={{ flex: 1.2 }}>
+                <Field label="Compteur de dépotage"><input className="somip-input" value={d.compteur} onChange={(e) => updateDepotage(idx, "compteur", e.target.value)} placeholder="Dépotage 1" /></Field>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Field label="Index fin"><input type="number" className="somip-input" value={d.indexFin} onChange={(e) => updateDepotage(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+              </div>
+              <button onClick={() => removeDepotageRow(idx)} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
+                <X size={16} color={C.danger} />
+              </button>
+            </div>
+          ))}
+          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 12 }} onClick={addDepotageRow}>
+            <Plus size={13} /> Ajouter un compteur de dépotage
           </button>
 
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaire} onChange={(e) => setCommentaire(e.target.value)} /></Field>
