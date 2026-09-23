@@ -136,6 +136,17 @@ function readAppCache(userId) {
 function writeAppCache(userId, data) {
   try { localStorage.setItem(APP_CACHE_PREFIX + userId, JSON.stringify(data)); } catch (e) { /* stockage plein ou indisponible : tant pis, pas bloquant */ }
 }
+// Pointeur léger vers la dernière identité connectée avec succès sur cet appareil — sert de
+// secours quand le jeton de connexion a expiré (au bout d'~1h) et qu'aucun réseau n'est
+// disponible pour le renouveler : on continue avec cette identité plutôt que de bloquer
+// l'opérateur sur le terrain avec un écran de connexion auquel il ne peut pas répondre.
+const LAST_USER_KEY = "somip_last_user_v1";
+function readLastUserPointer() {
+  try { return JSON.parse(localStorage.getItem(LAST_USER_KEY) || "null"); } catch (e) { return null; }
+}
+function writeLastUserPointer(p) {
+  try { localStorage.setItem(LAST_USER_KEY, JSON.stringify(p)); } catch (e) { /* pas bloquant */ }
+}
 const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
 function formatDateLong(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -1574,11 +1585,33 @@ export default function App() {
   /* ---- authentification ---- */
   useEffect(() => {
     if (!SUPABASE_CONFIGURED) { setAuthLoading(false); return; }
+    const fallbackOrNull = () => {
+      // Pas de session valide (jeton expiré, ou jamais rafraîchi) : si on est hors-ligne et
+      // qu'une identité a déjà été connectée avec succès sur cet appareil, on continue avec
+      // elle plutôt que d'exiger une reconnexion impossible sans réseau.
+      if (!navigator.onLine) {
+        const last = readLastUserPointer();
+        if (last?.userId) return { user: { id: last.userId, email: last.email }, access_token: last.accessToken || "", isOfflineFallback: true };
+      }
+      return null;
+    };
     supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+      if (data.session) {
+        setSession(data.session);
+        writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
+      } else {
+        setSession(fallbackOrNull());
+      }
       setAuthLoading(false);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => setSession(s));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => {
+      if (s) {
+        setSession(s);
+        writeLastUserPointer({ userId: s.user.id, email: s.user.email, accessToken: s.access_token });
+      } else {
+        setSession(fallbackOrNull());
+      }
+    });
     return () => listener.subscription.unsubscribe();
   }, []);
 
@@ -1586,6 +1619,19 @@ export default function App() {
     if (!session) { setProfile(null); return; }
     let cancelled = false;
     (async () => {
+      // Identité de secours déjà signalée hors-ligne (jeton expiré, pas de réseau pour le
+      // renouveler) : inutile d'attendre un appel réseau voué à l'échec, on va direct au cache.
+      if (session.isOfflineFallback) {
+        const cached = readAppCache(session.user.id);
+        if (cached?.profile) {
+          setProfile(cached.profile);
+          setIsOfflineStart(true);
+          return;
+        }
+        setLoadError("Le jeton de connexion a expiré et aucune donnée hors-ligne n'est disponible pour ce compte sur cet appareil. Reconnecte-toi dès que le réseau est disponible.");
+        setLoading(false);
+        return;
+      }
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé lors du chargement du profil (le serveur ne répond pas).")), ms));
         const fetchProfile = supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
@@ -1636,6 +1682,33 @@ export default function App() {
     if (!session || !profile) return;
     let cancelled = false;
     (async () => {
+      // Identité de secours déjà signalée hors-ligne : inutile d'attendre un appel réseau voué
+      // à l'échec, on charge directement le dernier instantané connu sur cet appareil.
+      if (session.isOfflineFallback) {
+        const cached = readAppCache(session.user.id);
+        if (cached && cached.sitesData) {
+          setSites(cached.sitesData);
+          setMovements(cached.movementsData || []);
+          setInventaires(cached.inventairesData || []);
+          setProfiles(cached.profilesData || []);
+          setAudit(cached.auditData || []);
+          setProductStocks(cached.productStocksData || []);
+          setTruckAssignments(cached.assignmentsData || []);
+          setSiteMeters(cached.siteMetersData || []);
+          setBilans(cached.bilansData || []);
+          setInventairesOfficiels(cached.invOffData || []);
+          setSiteTanks(cached.siteTanksData || []);
+          setSiteDepotageMeters(cached.siteDepotageMetersData || []);
+          setSettings(rowToSettings(cached.settingsRow));
+          setLoadError(null);
+          setLoading(false);
+          setIsOfflineStart(true);
+        } else {
+          setLoadError("Aucune donnée hors-ligne disponible pour ce compte sur cet appareil.");
+          setLoading(false);
+        }
+        return;
+      }
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
