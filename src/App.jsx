@@ -1488,20 +1488,32 @@ function AuthScreen() {
   };
 
   return (
-    <div style={{ minHeight: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: C.bg, padding: 24, fontFamily: "'Inter', -apple-system, sans-serif" }}>
-      <div style={{ background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: 30, width: "100%", maxWidth: 380 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 22 }}>
+    <div style={{ minHeight: "100%", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(160deg, #EAF4FC 0%, ${C.bg} 55%, #FFF8F0 100%)`, padding: 24, fontFamily: "'Inter', -apple-system, sans-serif", overflow: "hidden" }}>
+        {/* Illustration décorative — pompe à carburant, en fond clair, purement vectorielle (aucune image externe). */}
+        <svg
+          viewBox="0 0 400 500" preserveAspectRatio="xMidYMid slice"
+          style={{ position: "absolute", right: "-8%", bottom: "-6%", width: "min(60vw, 520px)", height: "auto", opacity: 0.1, pointerEvents: "none" }}
+        >
+          <rect x="90" y="110" width="150" height="330" rx="14" fill={C.blue} />
+          <rect x="108" y="140" width="114" height="80" rx="6" fill="#fff" />
+          <rect x="118" y="240" width="94" height="22" rx="4" fill={C.orange} />
+          <rect x="70" y="420" width="190" height="24" rx="6" fill={C.navy} />
+          <path d="M240 200 q60 0 60 60 v130 q0 20 -20 20 h-4 q-20 0 -20 -20 v-110 q0 -16 -16 -16 h-10" fill="none" stroke={C.orange} strokeWidth="14" strokeLinecap="round" />
+          <circle cx="200" cy="90" r="26" fill={C.orange} />
+          <rect x="188" y="60" width="24" height="34" rx="6" fill={C.orange} />
+        </svg>
+
+      <div style={{ position: "relative", background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: 30, width: "100%", maxWidth: 380, boxShadow: "0 10px 40px rgba(20,40,60,0.08)" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 24 }}>
           {logoUrl ? (
-            <img src={logoUrl} alt="Logo" style={{ width: 34, height: 34, borderRadius: 8, objectFit: "cover" }} />
+            <img src={logoUrl} alt="Logo SOMIP" style={{ width: 64, height: 64, borderRadius: 12, objectFit: "cover", marginBottom: 12 }} />
           ) : (
-            <div style={{ width: 34, height: 34, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
-              <Fuel size={18} color="#fff" />
+            <div style={{ width: 64, height: 64, borderRadius: 12, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
+              <Fuel size={30} color="#fff" />
             </div>
           )}
-          <div>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>SOMIP</div>
-            <div style={{ color: C.sub, fontSize: 11 }}>Stock Gasoil</div>
-          </div>
+          <div style={{ fontWeight: 800, fontSize: 19, color: C.navy }}>Gestion de Stock SOMIP</div>
+          <div style={{ color: C.sub, fontSize: 12.5, marginTop: 3 }}>Zone Sud-Est · Gabon</div>
         </div>
 
         <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
