@@ -4364,31 +4364,66 @@ function VcfView() {
 /* Rapports                                                              */
 /* ------------------------------------------------------------------ */
 function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage }) {
-  const [tab, setTab] = useState("synthese_mensuelle_site");
-  const TABS = [
-    { id: "synthese_mensuelle_site", label: "Synthèse journalière du mois" },
-    { id: "synthese_mensuelle_site_15", label: "Synthèse journalière du mois — 15°C" },
-    { id: "synthese_mensuelle_lub", label: "Synthèse journalière du mois — Lubrifiants" },
-    { id: "synthese_station_jour", label: "Synthèse journalière — Station (site + camion)" },
-    { id: "exposition", label: "Exposition", superviseurOnly: true },
-    { id: "exposition_comilog", label: "Suivi Stocks Comilog", superviseurOnly: true },
-    { id: "bons", label: "Bons de livraison", superviseurOnly: true },
-    { id: "bilan", label: "Bilan Matières", superviseurOnly: true },
-    { id: "ecart_mensuel", label: "Gain/Perte du mois", superviseurOnly: true },
-    { id: "transferts", label: "Transferts entre sites", superviseurOnly: true },
-  ].filter((t) => !t.superviseurOnly || canManage);
-  useEffect(() => { if (!TABS.some((t) => t.id === tab)) setTab(TABS[0]?.id || "synthese_mensuelle_site"); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+  const CATEGORIES = [
+    { id: "expositions", label: "Expositions", superviseurOnly: true, tabs: [
+        { id: "exposition", label: "Exposition" },
+        { id: "exposition_comilog", label: "Suivi Stocks Comilog" },
+      ] },
+    { id: "bons_cat", label: "Bon de livraison", superviseurOnly: true, tabs: [
+        { id: "bons", label: "Bons de livraison" },
+      ] },
+    { id: "synthese_mois", label: "Synthèse journalières du mois", tabs: [
+        { id: "synthese_mensuelle_site", label: "Gasoil" },
+        { id: "synthese_mensuelle_site_15", label: "Gasoil — 15°C" },
+        { id: "synthese_station_jour", label: "Station (site + camion)" },
+        { id: "synthese_station_jour_15", label: "Station (site + camion) — 15°C" },
+        { id: "synthese_mensuelle_lub", label: "Lubrifiants" },
+      ] },
+    { id: "transferts_cat", label: "Transferts", superviseurOnly: true, tabs: [
+        { id: "transferts", label: "Transferts entre sites" },
+      ] },
+    { id: "bilan_cat", label: "Bilans matières", superviseurOnly: true, tabs: [
+        { id: "bilan", label: "Bilan Matières" },
+      ] },
+    { id: "ecart_cat", label: "Gain/Perte du mois", superviseurOnly: true, tabs: [
+        { id: "ecart_mensuel", label: "Gain/Perte du mois" },
+      ] },
+  ].filter((c) => !c.superviseurOnly || canManage);
+
+  const [category, setCategory] = useState(CATEGORIES[0]?.id || "synthese_mois");
+  const activeCategory = CATEGORIES.find((c) => c.id === category) || CATEGORIES[0];
+  const [tab, setTab] = useState(activeCategory?.tabs[0]?.id || "synthese_mensuelle_site");
+
+  useEffect(() => {
+    if (!CATEGORIES.some((c) => c.id === category)) { setCategory(CATEGORIES[0]?.id); setTab(CATEGORIES[0]?.tabs[0]?.id); }
+  }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectCategory = (catId) => {
+    setCategory(catId);
+    const cat = CATEGORIES.find((c) => c.id === catId);
+    setTab(cat?.tabs[0]?.id);
+  };
+
   return (
     <div className="somip-fade">
-      <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        {TABS.map((t) => (
-          <button key={t.id} className={`somip-tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
+      <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        {CATEGORIES.map((c) => (
+          <button key={c.id} className={`somip-tab ${category === c.id ? "active" : ""}`} onClick={() => selectCategory(c.id)}>{c.label}</button>
         ))}
       </div>
+      {activeCategory && activeCategory.tabs.length > 1 && (
+        <div className="somip-no-print" style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap", paddingLeft: 4, borderLeft: `3px solid ${C.border}` }}>
+          {activeCategory.tabs.map((t) => (
+            <button key={t.id} className={`somip-tab ${tab === t.id ? "active" : ""}`} style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={() => setTab(t.id)}>{t.label}</button>
+          ))}
+        </div>
+      )}
+      {activeCategory && activeCategory.tabs.length === 1 && <div style={{ marginBottom: 4 }} />}
       {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
       {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
       {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
+      {tab === "synthese_station_jour_15" && <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
       {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
@@ -5619,6 +5654,181 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Équation basée sur les mouvements de la station ET du (des) camion(s) qui lui sont rattachés ce jour-là (page Sites → Affectation des camions) : Stock théorique combiné = équation du site + équation de chaque camion rattaché (le chargement/transfert interne s'annule automatiquement dans la somme). Stock jauge combiné apparaît dès que le site est jaugé ce jour-là ; un camion non jaugé ce jour précis utilise son théorique (ancré sur sa dernière jauge connue) à la place.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Synthèse journalière — Station (site + camion) — 15°C ---- */
+function StationDailyLedgerReport15({ sites, movements, inventaires, truckAssignments }) {
+  const stations = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+  const [stationId, setStationId] = useState(stations[0]?.id || "");
+  const [month, setMonth] = useState(currentMonth());
+  const station = sites.find((s) => s.id === stationId);
+  const bounds = monthBounds(month);
+
+  const days = [];
+  const truckEcartByTruck = {};
+  if (station) {
+    let cur = new Date(bounds.start);
+    const end = new Date(bounds.end);
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const siteStockDebut = stockBeforeDate15(station, movements, d, inventaires);
+      const dayMovsSite = movements.filter((m) => m.siteId === station.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty15(dayMovsSite, ["reception"]);
+      const ventesDirectes = sumQty15(dayMovsSite, ["sortie"]);
+      const chargementLaitiers = sumQty15(dayMovsSite, ["sortie_camion"]);
+      const chargementTransfers = dayMovsSite.filter((m) => m.type === "sortie_camion" && m.camion)
+        .map((m) => transferLabel(sites, truckAssignments, m.camion, station.id, d)).filter(Boolean);
+      const retourCamions = sumQty15(dayMovsSite, ["retour_camion"]);
+      const siteTheorique = siteStockDebut + reception + retourCamions - ventesDirectes - chargementLaitiers;
+      const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
+      const siteEcart = siteInv ? siteInv.stockPhysique15 - siteTheorique : null;
+
+      const truckIdsToday = trucksAssignedAt(truckAssignments, station.id, d);
+      let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJaugeOuTheorique = 0;
+      const truckDetails = [];
+      for (const truckId of truckIdsToday) {
+        const truck = sites.find((s) => s.id === truckId);
+        if (!truck) continue;
+        const tStockDebut = stockBeforeDate15(truck, movements, d, inventaires);
+        const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
+        const tChargement = sumQty15(dayMovsTruck, ["reception"]);
+        const tSortieTerrainRaw = sumQty15(dayMovsTruck, ["sortie"]);
+        const tRetourCuve = sumQty15(dayMovsTruck, ["retour_cuve_camion"]);
+        const tSortieTerrain = Math.max(0, tSortieTerrainRaw - tRetourCuve);
+        const tTheorique = tStockDebut + tChargement - tSortieTerrainRaw;
+        const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
+        trucksStockDebut += tStockDebut;
+        trucksTheorique += tTheorique;
+        trucksVentesTerrain += tSortieTerrain;
+        trucksJaugeOuTheorique += tInv ? tInv.stockPhysique15 : tTheorique;
+        if (tInv) {
+          const tEcart = tInv.stockPhysique15 - tTheorique;
+          if (!truckEcartByTruck[truckId]) truckEcartByTruck[truckId] = { name: truck.name, sum: 0 };
+          truckEcartByTruck[truckId].sum += tEcart;
+        }
+        truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique15 : null });
+      }
+
+      const stockDebutCombine = siteStockDebut + trucksStockDebut;
+      const ventesCombinees = ventesDirectes + trucksVentesTerrain;
+      const stockTheoriqueCombine = siteTheorique + trucksTheorique;
+      const stockJaugeCombine = siteInv !== null ? siteInv.stockPhysique15 + trucksJaugeOuTheorique : null;
+      const ecart = stockJaugeCombine !== null ? stockJaugeCombine - stockTheoriqueCombine : null;
+
+      days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, chargementTransfers, stockTheoriqueCombine, stockJaugeCombine, ecart, siteEcart, truckDetails, nbTrucks: truckIdsToday.length });
+      cur.setDate(cur.getDate() + 1);
+    }
+  }
+
+  const totalReception = days.reduce((a, d) => a + d.reception, 0);
+  const totalVentes = days.reduce((a, d) => a + d.ventesCombinees, 0);
+  const daysWithJauge = days.filter((d) => d.stockJaugeCombine !== null);
+  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
+  const firstDay = days[0] || null;
+  const lastDay = days[days.length - 1] || null;
+  const siteEcartCumule = days.reduce((a, d) => a + (d.siteEcart || 0), 0);
+  const truckEcarts = Object.values(truckEcartByTruck);
+  const trucksEcartCumule = truckEcarts.reduce((a, t) => a + t.sum, 0);
+  const ecartCumule = siteEcartCumule + trucksEcartCumule;
+
+  const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_15C_${station?.code || ""}_${month}.xlsx`, [{
+    name: "Synthèse Station 15°C", rows: days.map((d) => ({
+      Date: d.date, "Stock début combiné (L)": Math.round(d.stockDebutCombine), "Réception (L)": Math.round(d.reception),
+      "Ventes combinées (L)": Math.round(d.ventesCombinees), "Chargement laitiers (L)": Math.round(d.chargementLaitiers),
+      "Camions rattachés": d.nbTrucks, "Stock théorique combiné (L)": Math.round(d.stockTheoriqueCombine),
+      "Stock jauge combiné (L)": d.stockJaugeCombine !== null ? Math.round(d.stockJaugeCombine) : "",
+      "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
+    })),
+  }]);
+
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Synthese_Station_15C_${station?.code || ""}_${month}.pdf`,
+    title: `Synthèse journalière — ${station?.name || ""} (site + camions) — 15°C`,
+    period: `Mois de ${bounds.start} au ${bounds.end}`,
+    columns: ["Date", "Stock début combiné", "Réception", "Ventes combinées", "Chargement laitiers", "Camions", "Stock théorique combiné", "Stock jauge combiné", "Gain/Perte"],
+    rows: days.map((d) => [
+      d.date, `${fmt(d.stockDebutCombine)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—",
+      d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—", String(d.nbTrucks || 0),
+      `${fmt(d.stockTheoriqueCombine)} L`, d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—",
+      d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
+    ]),
+  });
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Field label="Station">
+          <select className="somip-select" style={{ maxWidth: 240 }} value={stationId} onChange={(e) => setStationId(e.target.value)}>
+            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+
+      {station && (
+        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
+          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {station.name} (site + camions rattachés) — base 15°C</h4>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <MiniStat label="Stock début combiné (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebutCombine)} L` : "—"} />
+            <MiniStat label="Total Réceptions (site)" value={`+${fmt(totalReception)} L`} color={C.success} />
+            <MiniStat label="Total Ventes combinées" value={`${fmt(totalVentes)} L`} />
+            <MiniStat label="Stock théorique combiné (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheoriqueCombine)} L` : "—"} bold />
+            <MiniStat label="Stock jauge combiné (dernière mesure complète)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJaugeCombine)} L (${lastDayWithJauge.date})` : "—"} bold />
+            <MiniStat label="Gain/Perte cumulé (site + camions)" value={`${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L`} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
+          </div>
+          <p style={{ margin: "12px 0 0", fontSize: 12, color: C.sub }}>
+            Détail du cumul : <strong style={{ color: C.ink }}>{station.name}</strong> {siteEcartCumule >= 0 ? "+" : ""}{fmt(siteEcartCumule)} L
+            {truckEcarts.map((t) => <span key={t.name}> · <strong style={{ color: C.ink }}>{t.name}</strong> {t.sum >= 0 ? "+" : ""}{fmt(t.sum)} L</span>)}
+            {truckEcarts.length === 0 && " (aucun camion jaugé ce mois-ci)"}
+          </p>
+        </div>
+      )}
+
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title={`Synthèse journalière — ${station?.name || ""} (site + camions) — 15°C`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead>
+              <tr>
+                <th>Date</th><th style={{ textAlign: "right" }}>Stock début combiné</th>
+                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes combinées</th>
+                <th style={{ textAlign: "right" }}>Chargement laitiers</th><th style={{ textAlign: "right" }}>Camions</th>
+                <th style={{ textAlign: "right" }}>Stock théorique combiné</th><th style={{ textAlign: "right" }}>Stock jauge combiné</th>
+                <th style={{ textAlign: "right" }}>Gain/Perte</th>
+              </tr>
+            </thead>
+            <tbody>
+              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne une station." />}
+              {days.map((d) => (
+                <tr key={d.date}>
+                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebutCombine)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventesCombinees ? C.ink : C.sub, fontWeight: d.ventesCombinees ? 600 : 400 }}>{d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub }}>
+                    {d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}
+                    {d.chargementTransfers?.length > 0 && d.chargementTransfers.map((t, i) => (
+                      <div key={i} style={{ fontSize: 10, fontWeight: 600, color: C.warning }}>{t}</div>
+                    ))}
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.nbTrucks || "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheoriqueCombine)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
+                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Version 15°C — mêmes règles que la synthèse en base ambiante, avec les valeurs corrigées à 15°C (jours sans température/densité renseignées exclus du Stock jauge).
         </p>
       </div>
     </div>
