@@ -124,7 +124,17 @@ function writeOfflineQueue(q) {
 function isNetworkError(e) {
   if (!navigator.onLine) return true;
   const msg = String(e?.message || e || "");
-  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET/i.test(msg);
+  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET|Délai dépassé/i.test(msg);
+}
+// ---- Cache local des données essentielles, pour ouvrir l'appli et saisir même sans AUCUN
+// réseau au démarrage (pas seulement une coupure en cours de route). Un jeu de données par
+// compte (userId), pour ne pas mélanger sur un appareil partagé.
+const APP_CACHE_PREFIX = "somip_offline_cache_v1_";
+function readAppCache(userId) {
+  try { return JSON.parse(localStorage.getItem(APP_CACHE_PREFIX + userId) || "null"); } catch (e) { return null; }
+}
+function writeAppCache(userId, data) {
+  try { localStorage.setItem(APP_CACHE_PREFIX + userId, JSON.stringify(data)); } catch (e) { /* stockage plein ou indisponible : tant pis, pas bloquant */ }
 }
 const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
 function formatDateLong(dateStr) {
@@ -1525,6 +1535,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [isOfflineStart, setIsOfflineStart] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -1592,9 +1603,22 @@ export default function App() {
           setLoading(false);
           return;
         }
-        setProfile(rowToProfile(data));
+        const p = rowToProfile(data);
+        setProfile(p);
+        // Garde ce profil en cache pour cet appareil : permet de démarrer même sans réseau
+        // du tout (pas seulement une coupure en cours de session).
+        const cached = readAppCache(session.user.id) || {};
+        writeAppCache(session.user.id, { ...cached, profile: p });
       } catch (e) {
         if (cancelled) return;
+        if (isNetworkError(e)) {
+          const cached = readAppCache(session.user.id);
+          if (cached?.profile) {
+            setProfile(cached.profile);
+            setIsOfflineStart(true);
+            return;
+          }
+        }
         setLoadError(e?.message || "Erreur lors du chargement du profil.");
         setLoading(false);
       }
@@ -1654,8 +1678,36 @@ export default function App() {
         setLastSync(new Date());
         setLoadError(null);
         setLoading(false);
+        setIsOfflineStart(false);
+        // Snapshot complet en cache local : permet de rouvrir l'appli et saisir même sans
+        // AUCUN réseau au démarrage (pas seulement une coupure en cours de session).
+        const cached = readAppCache(session.user.id) || {};
+        writeAppCache(session.user.id, { ...cached, ...result, cachedAt: new Date().toISOString() });
       } catch (e) {
         if (cancelled) return;
+        if (isNetworkError(e)) {
+          const cached = readAppCache(session.user.id);
+          if (cached && cached.sitesData) {
+            setSites(cached.sitesData);
+            setMovements(cached.movementsData || []);
+            setInventaires(cached.inventairesData || []);
+            setProfiles(cached.profilesData || []);
+            setAudit(cached.auditData || []);
+            setProductStocks(cached.productStocksData || []);
+            setTruckAssignments(cached.assignmentsData || []);
+            setSiteMeters(cached.siteMetersData || []);
+            setBilans(cached.bilansData || []);
+            setInventairesOfficiels(cached.invOffData || []);
+            setSiteTanks(cached.siteTanksData || []);
+            setSiteDepotageMeters(cached.siteDepotageMetersData || []);
+            setSettings(rowToSettings(cached.settingsRow));
+            setLoadError(null);
+            setLoading(false);
+            setIsOfflineStart(true);
+            flash(`Pas de connexion — données du ${new Date(cached.cachedAt).toLocaleString("fr-FR")} (dernière fois en ligne). La saisie reste possible, elle sera synchronisée au retour du réseau.`);
+            return;
+          }
+        }
         setLoadError(e?.message || "Erreur de chargement inconnue.");
         setLoading(false);
       }
@@ -1668,30 +1720,46 @@ export default function App() {
   useEffect(() => {
     if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
-      if (navigator.onLine) flushOfflineQueue();
-      const [s, m, i, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
-        fetchTable("sites", rowToSite),
-        fetchTable("movements", rowToMovement, "date"),
-        fetchTable("inventaires", rowToInventaire, "date"),
-        fetchTable("profiles", rowToProfile),
-        fetchTable("audit", rowToAudit, "ts", false),
-        fetchTable("product_stocks", rowToProductStock),
-        fetchTable("truck_assignments", rowToAssignment, "start_date"),
-        fetchTable("site_meters", rowToSiteMeter, "name"),
-        fetchTable("bilan_matieres", rowToBilan, "period_key"),
-        fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
-        fetchTable("site_tanks", rowToSiteTank, "name"),
-        fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
-      ]);
-      setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm);
-      const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
-      if (se) setSettings(rowToSettings(se));
-      setLastSync(new Date());
-      // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
-      const now = Date.now();
-      if (now - heartbeatRef.current > 30000) {
-        heartbeatRef.current = now;
+      if (!navigator.onLine) return;
+      try {
+        await flushOfflineQueue();
+        const [s, m, i, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
+          fetchTable("sites", rowToSite),
+          fetchTable("movements", rowToMovement, "date"),
+          fetchTable("inventaires", rowToInventaire, "date"),
+          fetchTable("profiles", rowToProfile),
+          fetchTable("audit", rowToAudit, "ts", false),
+          fetchTable("product_stocks", rowToProductStock),
+          fetchTable("truck_assignments", rowToAssignment, "start_date"),
+          fetchTable("site_meters", rowToSiteMeter, "name"),
+          fetchTable("bilan_matieres", rowToBilan, "period_key"),
+          fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
+          fetchTable("site_tanks", rowToSiteTank, "name"),
+          fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
+        ]);
+        setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm);
+        const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
+        if (se) setSettings(rowToSettings(se));
+        setLastSync(new Date());
+        setIsOfflineStart(false);
+        // Rafraîchit le cache local avec ces données à jour, pour la prochaine ouverture hors-connexion.
+        if (session?.user?.id) {
+          writeAppCache(session.user.id, {
+            sitesData: s, movementsData: m, inventairesData: i, profilesData: p, auditData: a,
+            productStocksData: ps, assignmentsData: ta, siteMetersData: sm, bilansData: bl,
+            invOffData: io, siteTanksData: st, siteDepotageMetersData: sdm,
+            settingsRow: se, cachedAt: new Date().toISOString(),
+          });
+        }
+        // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
+        const now = Date.now();
+        if (now - heartbeatRef.current > 30000) {
+          heartbeatRef.current = now;
         supabase.from("profiles").update({ last_seen_at: new Date().toISOString() }).eq("id", session.user.id);
+      }
+      } catch (e) {
+        // Toujours hors-ligne (ou coupure passagère) : on retentera au prochain tick, sans
+        // bloquer l'utilisateur — la saisie continue de fonctionner sur les données en cache.
       }
     }, 7000);
     return () => clearInterval(interval);
@@ -2293,8 +2361,13 @@ export default function App() {
             </button>
             <div>
               <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{viewTitle}</h1>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <SyncIndicator status={syncStatus} lastSync={lastSync} />
+                {isOfflineStart && (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.danger, background: "#FDEBEB", padding: "2px 8px", borderRadius: 12 }}>
+                    <CloudOff size={11} /> Hors-connexion — données en cache
+                  </span>
+                )}
                 {offlineQueueCount > 0 && (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.warning, background: "#FFF6E5", padding: "2px 8px", borderRadius: 12 }}>
                     <CloudOff size={11} /> {offlineQueueCount} en attente
