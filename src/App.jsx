@@ -112,6 +112,20 @@ const TYPE_META = {
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
+
+// ---- Saisie hors-connexion : file d'attente locale, synchronisée dès le retour du réseau ----
+const OFFLINE_QUEUE_KEY = "somip_offline_queue_v1";
+function readOfflineQueue() {
+  try { return JSON.parse(localStorage.getItem(OFFLINE_QUEUE_KEY) || "[]"); } catch (e) { return []; }
+}
+function writeOfflineQueue(q) {
+  try { localStorage.setItem(OFFLINE_QUEUE_KEY, JSON.stringify(q)); } catch (e) { /* stockage indisponible : tant pis, pas bloquant */ }
+}
+function isNetworkError(e) {
+  if (!navigator.onLine) return true;
+  const msg = String(e?.message || e || "");
+  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET/i.test(msg);
+}
 const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
 function formatDateLong(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
@@ -1517,6 +1531,7 @@ export default function App() {
   const [retryKey, setRetryKey] = useState(0);
   const [sites, setSites] = useState([]);
   const [movements, setMovements] = useState([]);
+  const [offlineQueueCount, setOfflineQueueCount] = useState(() => readOfflineQueue().length);
   const [inventaires, setInventaires] = useState([]);
   const [productStocks, setProductStocks] = useState([]);
   const [siteMeters, setSiteMeters] = useState([]);
@@ -1653,6 +1668,7 @@ export default function App() {
   useEffect(() => {
     if (loading || !session || !profile) return;
     const interval = setInterval(async () => {
+      if (navigator.onLine) flushOfflineQueue();
       const [s, m, i, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
         fetchTable("sites", rowToSite),
         fetchTable("movements", rowToMovement, "date"),
@@ -1680,6 +1696,42 @@ export default function App() {
     }, 7000);
     return () => clearInterval(interval);
   }, [loading, session, profile]);
+
+  // Vide la file d'attente hors-connexion vers Supabase, dès qu'une tentative semble possible.
+  // Ce qui échoue encore (toujours hors-ligne) reste en attente pour la prochaine tentative.
+  const flushingRef = useRef(false);
+  const flushOfflineQueue = async () => {
+    if (flushingRef.current) return;
+    const q = readOfflineQueue();
+    if (q.length === 0) return;
+    flushingRef.current = true;
+    const remaining = [];
+    let anySucceeded = false;
+    for (const item of q) {
+      try {
+        const { error } = await supabase.from(item.table).insert(item.row);
+        if (error) throw error;
+        anySucceeded = true;
+      } catch (e) {
+        remaining.push(item);
+      }
+    }
+    writeOfflineQueue(remaining);
+    setOfflineQueueCount(remaining.length);
+    flushingRef.current = false;
+    if (anySucceeded) {
+      // Au moins une entrée a été synchronisée : les remplace localement par les vraies
+      // données du serveur (retire les entrées optimistes temporaires du même coup).
+      const [m, i] = await Promise.all([fetchTable("movements", rowToMovement, "date"), fetchTable("inventaires", rowToInventaire, "date")]);
+      setMovements(m); setInventaires(i);
+      flash(remaining.length === 0 ? "Toutes les saisies hors-connexion ont été synchronisées." : `${q.length - remaining.length} saisie(s) synchronisée(s), ${remaining.length} en attente.`);
+    }
+  };
+  useEffect(() => {
+    const onOnline = () => flushOfflineQueue();
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const appendAudit = async (action, detail) => {
     const { data } = await supabase.from("audit").insert({ user_name: currentUserName, action, detail }).select().maybeSingle();
@@ -1919,11 +1971,24 @@ export default function App() {
   /* ---- mutations : mouvements ---- */
   const addMovement = (payload) => withSync(async () => {
     const record = { id: uid(), createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false, ...payload };
-    const { data, error } = await supabase.from("movements").insert(movementToRow(record)).select().maybeSingle();
-    if (error) throw error;
-    const saved = data ? rowToMovement(data) : record;
-    setMovements((prev) => [...prev, saved]);
-    appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
+    const row = movementToRow(record);
+    try {
+      const { data, error } = await supabase.from("movements").insert(row).select().maybeSingle();
+      if (error) throw error;
+      const saved = data ? rowToMovement(data) : record;
+      setMovements((prev) => [...prev, saved]);
+      appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
+    } catch (e) {
+      if (!isNetworkError(e)) throw e;
+      // Pas de réseau : on garde la saisie en local (visible immédiatement) et on la met en
+      // file d'attente, synchronisée automatiquement dès le retour de la connexion.
+      const q = readOfflineQueue();
+      q.push({ id: uid(), table: "movements", row, createdAt: new Date().toISOString() });
+      writeOfflineQueue(q);
+      setOfflineQueueCount(q.length);
+      setMovements((prev) => [...prev, record]);
+      flash("Pas de connexion — saisie enregistrée sur l'appareil, sera synchronisée automatiquement dès le retour du réseau.");
+    }
     // Chargement et retour cuve se saisissent indépendamment des deux côtés (site et camion) —
     // aucune création automatique de miroir, pour éviter tout risque de double comptage.
   });
@@ -1960,7 +2025,8 @@ export default function App() {
     const cls = classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
     const has15 = stockPhysique15 !== undefined;
     const vcfFields = has15 ? { temperatureC, densiteObservee, densite15, vcf, stockPhysique15 } : {};
-    const photoUrls = photoFiles.length ? await uploadPhotos(photoFiles, `inventaires/${siteId}`) : [];
+    const offline = !navigator.onLine;
+    const photoUrls = (!offline && photoFiles.length) ? await uploadPhotos(photoFiles, `inventaires/${siteId}`) : [];
     const invDraft = {
       siteId, product, date, stockPhysique, commentaire, basisEcart,
       stockTheoriqueAmbiant: theoriqueAmbiant, stockTheorique15: theorique15,
@@ -1969,13 +2035,26 @@ export default function App() {
       tauxFreinte: cls.tauxFreinte, objectifUtilise: cls.objectif, conformite: cls.conformite,
       adjustmentId: null, photoUrls, createdBy: currentUserName, createdAt: new Date().toISOString(), ...vcfFields,
     };
-    const { data: dataI, error: e2 } = await supabase.from("inventaires").insert(inventaireToRow(invDraft)).select().maybeSingle();
-    if (e2) throw e2;
-    if (!dataI) throw new Error("L'inventaire n'a pas pu être confirmé par le serveur — réessaie.");
-    const invRecord = rowToInventaire(dataI);
-    setInventaires((prev) => [...prev, invRecord]);
-    appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
-    flash("Inventaire enregistré.");
+    const row = inventaireToRow(invDraft);
+    try {
+      const { data: dataI, error: e2 } = await supabase.from("inventaires").insert(row).select().maybeSingle();
+      if (e2) throw e2;
+      if (!dataI) throw new Error("L'inventaire n'a pas pu être confirmé par le serveur — réessaie.");
+      const invRecord = rowToInventaire(dataI);
+      setInventaires((prev) => [...prev, invRecord]);
+      appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
+      flash("Inventaire enregistré.");
+    } catch (e) {
+      if (!isNetworkError(e)) throw e;
+      const q = readOfflineQueue();
+      q.push({ id: uid(), table: "inventaires", row, createdAt: new Date().toISOString() });
+      writeOfflineQueue(q);
+      setOfflineQueueCount(q.length);
+      setInventaires((prev) => [...prev, { id: uid(), ...invDraft }]);
+      flash(photoFiles.length
+        ? "Pas de connexion — inventaire enregistré sur l'appareil SANS les photos (à rajouter une fois reconnecté). Synchronisation automatique dès le retour du réseau."
+        : "Pas de connexion — inventaire enregistré sur l'appareil, sera synchronisé automatiquement dès le retour du réseau.");
+    }
   });
   const deleteInventaire = (inv) => withSync(async () => {
     const { data, error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id).select();
@@ -2214,7 +2293,14 @@ export default function App() {
             </button>
             <div>
               <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{viewTitle}</h1>
-              <SyncIndicator status={syncStatus} lastSync={lastSync} />
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <SyncIndicator status={syncStatus} lastSync={lastSync} />
+                {offlineQueueCount > 0 && (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.warning, background: "#FFF6E5", padding: "2px 8px", borderRadius: 12 }}>
+                    <CloudOff size={11} /> {offlineQueueCount} en attente
+                  </span>
+                )}
+              </div>
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -2315,24 +2401,6 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
   bigLosses.sort((a, b) => a.ecart - b.ecart);
 
-  // Transferts entre sites (mois en cours) : chargements de camions normalement affectés à un
-  // autre site que celui où ils ont été chargés — secours, panne d'un site, etc.
-  const transfers = movements.filter((m) => m.type === "sortie_camion" && m.camion && m.date >= monthStartD && m.date <= todayD)
-    .map((m) => {
-      const label = transferLabel(sites, truckAssignments || [], m.camion, m.siteId, m.date);
-      if (!label) return null;
-      return { date: m.date, camion: sites.find((s) => s.id === m.camion)?.name || m.camion, from: sites.find((s) => s.id === m.siteId)?.name || m.siteId, label, quantity: m.quantity };
-    }).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1));
-  const totalTransfers = transfers.reduce((a, t) => a + t.quantity, 0);
-  const transfersByRoute = Object.values(
-    transfers.reduce((acc, t) => {
-      if (!acc[t.label]) acc[t.label] = { label: t.label, quantity: 0, count: 0 };
-      acc[t.label].quantity += t.quantity;
-      acc[t.label].count += 1;
-      return acc;
-    }, {})
-  ).sort((a, b) => b.quantity - a.quantity);
-
   // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
   // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
   // (pas en service, pas d'alerte à lui envoyer).
@@ -2389,7 +2457,6 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Sites en alerte" value={alerts.length} unit={`/ ${rows.length}`} accent={C.danger} icon={AlertTriangle} />
         <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
         <StatCard label="Gain/Perte réseau (mois)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
-        {transfers.length > 0 && <StatCard label="Transferts entre sites (mois)" value={fmt(totalTransfers)} unit="L" accent={C.orange} icon={Truck} />}
       </div>
 
       {bigLosses.length > 0 && (
@@ -2408,70 +2475,6 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
           </div>
         </div>
       )}
-
-      {transfers.length > 0 && (
-        <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
-            <h3 style={{ margin: 0, fontSize: 14 }}>Transferts entre sites</h3>
-            <span className="somip-mono" style={{ fontWeight: 700, color: C.orange, fontSize: 14 }}>Total : {fmt(totalTransfers)} L</span>
-          </div>
-          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Mois en cours — camion chargé sur un site différent de celui où il est normalement affecté (secours, panne...). La réception a été ajoutée automatiquement côté camion.</p>
-
-          {transfersByRoute.length > 1 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-              {transfersByRoute.map((r, i) => (
-                <div key={i} style={{ background: C.bg, borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
-                  <span style={{ fontWeight: 600, color: C.ink }}>{r.label}</span>
-                  <span style={{ color: C.sub }}> — {r.count} transfert{r.count > 1 ? "s" : ""} — </span>
-                  <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(r.quantity)} L</span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div style={{ overflowX: "auto" }}>
-            <table className="somip-table">
-              <thead><tr><th>Date</th><th>Camion</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
-              <tbody>
-                {transfers.map((t, i) => (
-                  <tr key={i}>
-                    <td className="somip-mono">{t.date}</td>
-                    <td style={{ fontWeight: 600 }}>{t.camion}</td>
-                    <td style={{ color: C.orange, fontWeight: 600 }}>{t.label}</td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(t.quantity)} L</td>
-                  </tr>
-                ))}
-                <tr>
-                  <td colSpan={3} style={{ fontWeight: 700 }}>Total</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalTransfers)} L</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      <div className="somip-panel" style={{ marginBottom: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Gain/Perte du mois — sites et camions</h3>
-        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>Cumul du 1er du mois à aujourd'hui, calcul propre à chaque site et chaque camion.</p>
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead><tr><th>Type</th><th>Nom</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
-            <tbody>
-              {ecartRows.map((r) => (
-                <tr key={r.site.id}>
-                  <td><Badge color={r.site.isMobile ? C.orange : C.blue}>{r.site.isMobile ? "Camion" : "Site"}</Badge></td>
-                  <td style={{ fontWeight: 600 }}>{r.site.name} {!r.site.isMobile && <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span>}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: r.ecartCumule < 0 ? C.danger : r.ecartCumule > 0 ? C.success : C.sub }}>
-                    {r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—"}
-                  </td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.daysWithJauge}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
@@ -4371,6 +4374,8 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     { id: "exposition_comilog", label: "Suivi Stocks Comilog", superviseurOnly: true },
     { id: "bons", label: "Bons de livraison", superviseurOnly: true },
     { id: "bilan", label: "Bilan Matières", superviseurOnly: true },
+    { id: "ecart_mensuel", label: "Gain/Perte du mois", superviseurOnly: true },
+    { id: "transferts", label: "Transferts entre sites", superviseurOnly: true },
   ].filter((t) => !t.superviseurOnly || canManage);
   useEffect(() => { if (!TABS.some((t) => t.id === tab)) setTab(TABS[0]?.id || "synthese_mensuelle_site"); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
@@ -4388,6 +4393,8 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
       {tab === "bilan" && canManage && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
+      {tab === "ecart_mensuel" && canManage && <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "transferts" && canManage && <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} />}
     </div>
   );
 }
@@ -5941,6 +5948,168 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage })
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Rassemble la saisie de chaque site pour la période choisie ci-dessus (indépendante de celle du panneau de saisie). Un site sans saisie pour cette période n'apparaît pas dans le tableau. Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts.
         </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Gain/Perte du mois — sites et camions (ex-Tableau de bord) ---- */
+function EcartMensuelReport({ sites, movements, inventaires }) {
+  const [month, setMonth] = useState(currentMonth());
+  const monthStartD = `${month}-01`;
+  const [endDate, setEndDate] = useState(todayStr());
+
+  const ecartRows = sites.map((s) => {
+    let cur = new Date(monthStartD);
+    const end = new Date(endDate);
+    let ecartCumule = 0, daysWithJauge = 0;
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
+      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty(dayMovs, ["reception"]);
+      const ventes = sumQty(dayMovs, ["sortie"]);
+      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
+      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
+      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
+      cur.setDate(cur.getDate() + 1);
+    }
+    return { site: s, ecartCumule, daysWithJauge };
+  }).sort((a, b) => a.ecartCumule - b.ecartCumule);
+  const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+
+  const doExcel = () => exportToExcel(`SOMIP_Gain_Perte_${month}.xlsx`, [{
+    name: "Gain-Perte", rows: ecartRows.map((r) => ({
+      Type: r.site.isMobile ? "Camion" : "Site", Nom: r.site.name,
+      "Gain/Perte cumulé (L)": r.daysWithJauge > 0 ? Math.round(r.ecartCumule) : "", "Jours jaugés": r.daysWithJauge,
+    })),
+  }]);
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Gain_Perte_${month}.pdf`,
+    title: "Gain/Perte du mois — sites et camions",
+    period: `Du ${monthStartD} au ${endDate}`,
+    columns: ["Type", "Nom", "Gain/Perte cumulé", "Jours jaugés"],
+    rows: ecartRows.map((r) => [r.site.isMobile ? "Camion" : "Site", r.site.name, r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—", String(r.daysWithJauge)]),
+    totalsRow: ["", "Total réseau (sites)", `${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)} L`, ""],
+  });
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+        <Field label="Jusqu'au"><input type="date" className="somip-input" style={{ maxWidth: 200 }} value={endDate} onChange={(e) => setEndDate(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Gain/Perte du mois — sites et camions" period={`Du ${monthStartD} au ${endDate}`} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
+        <StatCard label="Gain/Perte réseau (sites)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
+        <div style={{ overflowX: "auto", marginTop: 16 }}>
+          <table className="somip-table">
+            <thead><tr><th>Type</th><th>Nom</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
+            <tbody>
+              {ecartRows.length === 0 && <EmptyRow colSpan={4} text="Aucune donnée." />}
+              {ecartRows.map((r) => (
+                <tr key={r.site.id}>
+                  <td><Badge color={r.site.isMobile ? C.orange : C.blue}>{r.site.isMobile ? "Camion" : "Site"}</Badge></td>
+                  <td style={{ fontWeight: 600 }}>{r.site.name} {!r.site.isMobile && <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span>}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: r.ecartCumule < 0 ? C.danger : r.ecartCumule > 0 ? C.success : C.sub }}>
+                    {r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—"}
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.daysWithJauge}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+          Cumul du 1er du mois choisi jusqu'à la date choisie, calcul propre à chaque site et chaque camion (indépendants l'un de l'autre).
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Transferts entre sites (ex-Tableau de bord) ---- */
+function TransfersReport({ sites, movements, truckAssignments }) {
+  const [month, setMonth] = useState(currentMonth());
+  const monthStartD = `${month}-01`;
+  const monthEndD = (() => { const d = new Date(month + "-01"); d.setMonth(d.getMonth() + 1); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+
+  const transfers = movements.filter((m) => m.type === "sortie_camion" && m.camion && m.date >= monthStartD && m.date <= monthEndD)
+    .map((m) => {
+      const label = transferLabel(sites, truckAssignments || [], m.camion, m.siteId, m.date);
+      if (!label) return null;
+      return { date: m.date, camion: sites.find((s) => s.id === m.camion)?.name || m.camion, label, quantity: m.quantity };
+    }).filter(Boolean).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const totalTransfers = transfers.reduce((a, t) => a + t.quantity, 0);
+  const transfersByRoute = Object.values(
+    transfers.reduce((acc, t) => {
+      if (!acc[t.label]) acc[t.label] = { label: t.label, quantity: 0, count: 0 };
+      acc[t.label].quantity += t.quantity;
+      acc[t.label].count += 1;
+      return acc;
+    }, {})
+  ).sort((a, b) => b.quantity - a.quantity);
+
+  const doExcel = () => exportToExcel(`SOMIP_Transferts_${month}.xlsx`, [{
+    name: "Transferts", rows: transfers.map((t) => ({ Date: t.date, Camion: t.camion, Détail: t.label, "Quantité (L)": Math.round(t.quantity) })),
+  }]);
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Transferts_${month}.pdf`,
+    title: "Transferts entre sites",
+    period: `${PERIOD_TYPE_LABELS.mensuel} — ${month}`,
+    columns: ["Date", "Camion", "Détail", "Quantité"],
+    rows: transfers.map((t) => [t.date, t.camion, t.label, `${fmt(t.quantity)} L`]),
+    totalsRow: ["", "", "Total", `${fmt(totalTransfers)} L`],
+  });
+
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14 }}>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Transferts entre sites" period={`${PERIOD_TYPE_LABELS.mensuel} — ${month}`} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
+        <StatCard label="Total transféré" value={fmt(totalTransfers)} unit="L" accent={C.orange} icon={Truck} />
+        <p style={{ margin: "14px 0 0", fontSize: 12, color: C.sub }}>Camion chargé sur un site différent de celui où il est normalement affecté (secours, panne...). La réception a été ajoutée automatiquement côté camion.</p>
+
+        {transfersByRoute.length > 1 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "14px 0" }}>
+            {transfersByRoute.map((r, i) => (
+              <div key={i} style={{ background: C.bg, borderRadius: 8, padding: "8px 12px", fontSize: 12.5 }}>
+                <span style={{ fontWeight: 600, color: C.ink }}>{r.label}</span>
+                <span style={{ color: C.sub }}> — {r.count} transfert{r.count > 1 ? "s" : ""} — </span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: C.orange }}>{fmt(r.quantity)} L</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ overflowX: "auto", marginTop: 16 }}>
+          <table className="somip-table">
+            <thead><tr><th>Date</th><th>Camion</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
+            <tbody>
+              {transfers.length === 0 && <EmptyRow colSpan={4} text="Aucun transfert ce mois-ci." />}
+              {transfers.map((t, i) => (
+                <tr key={i}>
+                  <td className="somip-mono">{t.date}</td>
+                  <td style={{ fontWeight: 600 }}>{t.camion}</td>
+                  <td style={{ color: C.orange, fontWeight: 600 }}>{t.label}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(t.quantity)} L</td>
+                </tr>
+              ))}
+              {transfers.length > 0 && (
+                <tr>
+                  <td colSpan={3} style={{ fontWeight: 700 }}>Total</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(totalTransfers)} L</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
