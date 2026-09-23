@@ -1595,15 +1595,27 @@ export default function App() {
       }
       return null;
     };
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) {
-        setSession(data.session);
-        writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
-      } else {
-        setSession(fallbackOrNull());
-      }
+    // Hors-ligne dès le départ (mode avion...) : inutile d'attendre getSession(), qui peut
+    // rester bloquée longtemps à tenter de joindre le serveur pour rafraîchir le jeton. On va
+    // directement au secours local.
+    if (!navigator.onLine) {
+      setSession(fallbackOrNull());
       setAuthLoading(false);
-    });
+    } else {
+      const timeout = new Promise((resolve) => setTimeout(() => resolve({ data: { session: undefined } }), 6000));
+      Promise.race([supabase.auth.getSession(), timeout]).then(({ data }) => {
+        if (data.session) {
+          setSession(data.session);
+          writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
+        } else if (data.session === undefined) {
+          // Délai dépassé (ni succès ni échec net) : on retente le secours local au cas où.
+          setSession(fallbackOrNull());
+        } else {
+          setSession(fallbackOrNull());
+        }
+        setAuthLoading(false);
+      });
+    }
     const { data: listener } = supabase.auth.onAuthStateChange((_event, s) => {
       if (s) {
         setSession(s);
