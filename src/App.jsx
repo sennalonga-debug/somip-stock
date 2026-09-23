@@ -1488,64 +1488,114 @@ function AuthScreen() {
   };
 
   return (
-    <div style={{ minHeight: "100%", position: "relative", display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(160deg, #EAF4FC 0%, ${C.bg} 55%, #FFF8F0 100%)`, padding: 24, fontFamily: "'Inter', -apple-system, sans-serif", overflow: "hidden" }}>
-        {/* Illustration décorative — pompe à carburant, en fond clair, purement vectorielle (aucune image externe). */}
-        <svg
-          viewBox="0 0 400 500" preserveAspectRatio="xMidYMid slice"
-          style={{ position: "absolute", right: "-8%", bottom: "-6%", width: "min(60vw, 520px)", height: "auto", opacity: 0.1, pointerEvents: "none" }}
-        >
-          <rect x="90" y="110" width="150" height="330" rx="14" fill={C.blue} />
-          <rect x="108" y="140" width="114" height="80" rx="6" fill="#fff" />
-          <rect x="118" y="240" width="94" height="22" rx="4" fill={C.orange} />
-          <rect x="70" y="420" width="190" height="24" rx="6" fill={C.navy} />
-          <path d="M240 200 q60 0 60 60 v130 q0 20 -20 20 h-4 q-20 0 -20 -20 v-110 q0 -16 -16 -16 h-10" fill="none" stroke={C.orange} strokeWidth="14" strokeLinecap="round" />
-          <circle cx="200" cy="90" r="26" fill={C.orange} />
-          <rect x="188" y="60" width="24" height="34" rx="6" fill={C.orange} />
-        </svg>
+    <div style={{ minHeight: "100%", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+      <style>{`
+        .somip-auth-wrap { min-height: 100%; display: flex; flex-direction: row; }
+        .somip-auth-illustration { flex: 1 1 46%; min-height: 260px; position: relative; overflow: hidden; }
+        .somip-auth-form-side { flex: 1 1 54%; display: flex; align-items: center; justify-content: center; padding: 24px; background: #fff; }
+        @media (max-width: 760px) {
+          .somip-auth-wrap { flex-direction: column; }
+          .somip-auth-illustration { flex: none; height: 230px; }
+        }
+      `}</style>
+      <div className="somip-auth-wrap">
+        <div className="somip-auth-illustration" style={{ background: `linear-gradient(155deg, ${C.blue} 0%, ${C.navy} 100%)` }}>
+          {/* Motifs décoratifs modernes. */}
+          <div style={{ position: "absolute", top: "-60px", right: "-60px", width: 220, height: 220, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+          <div style={{ position: "absolute", bottom: "10%", left: "-40px", width: 140, height: 140, borderRadius: "50%", background: "rgba(255,255,255,0.05)" }} />
+          <div style={{ position: "absolute", top: "18%", left: "8%", fontWeight: 800, fontSize: "clamp(22px, 3vw, 30px)", color: "#fff", maxWidth: 320 }}>
+            Gestion de Stock SOMIP
+          </div>
+          <div style={{ position: "absolute", top: "calc(18% + 46px)", left: "8%", fontSize: 13.5, color: "rgba(255,255,255,0.82)", maxWidth: 280 }}>
+            Sur le terrain, avec vous.
+          </div>
+          {/* Opérateur SOMIP en EPI, pistolet de distribution à la main — illustration vectorielle. */}
+          <svg viewBox="0 0 400 460" preserveAspectRatio="xMidYMax meet" style={{ position: "absolute", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "min(80%, 360px)", height: "auto" }}>
+            {/* Sol / ombre */}
+            <ellipse cx="200" cy="440" rx="130" ry="14" fill="rgba(0,0,0,0.15)" />
+            {/* Pompe à carburant, à droite */}
+            <rect x="300" y="230" width="70" height="180" rx="10" fill="#0E3A5C" />
+            <rect x="311" y="248" width="48" height="44" rx="4" fill="#fff" opacity="0.92" />
+            <rect x="316" y="304" width="38" height="14" rx="3" fill={C.orange} />
+            {/* Jambes */}
+            <rect x="150" y="300" width="34" height="110" rx="10" fill="#1E2A38" />
+            <rect x="196" y="300" width="34" height="110" rx="10" fill="#1E2A38" />
+            <rect x="146" y="398" width="42" height="18" rx="6" fill="#0E1620" />
+            <rect x="192" y="398" width="42" height="18" rx="6" fill="#0E1620" />
+            {/* Gilet de sécurité (torse) */}
+            <path d="M150 170 q40 -18 80 0 l14 130 q-54 18 -108 0 z" fill={C.orange} />
+            <path d="M162 172 l10 122 M228 172 l-10 122" stroke="#fff" strokeWidth="6" opacity="0.85" />
+            <rect x="176" y="215" width="48" height="20" rx="3" fill="#fff" opacity="0.95" />
+            <text x="200" y="230" textAnchor="middle" fontSize="11" fontWeight="700" fill={C.blue}>SOMIP</text>
+            {/* Bras gauche (le long du corps) */}
+            <rect x="138" y="180" width="22" height="90" rx="11" fill="#F0A75B" />
+            {/* Bras droit tendu, tenant le pistolet */}
+            <path d="M222 190 q50 6 70 46" stroke="#F0A75B" strokeWidth="22" strokeLinecap="round" fill="none" />
+            {/* Pistolet de distribution */}
+            <g transform="translate(280,224) rotate(20)">
+              <rect x="0" y="0" width="34" height="14" rx="5" fill="#1E2A38" />
+              <rect x="-4" y="10" width="12" height="22" rx="5" fill="#1E2A38" />
+              <rect x="30" y="4" width="16" height="7" rx="3" fill={C.orange} />
+            </g>
+            {/* Tuyau reliant le pistolet à la pompe */}
+            <path d="M300 250 q-14 20 -4 40 q10 20 -6 34" stroke="#1E2A38" strokeWidth="7" fill="none" strokeLinecap="round" opacity="0.85" />
+            {/* Tête + casque */}
+            <circle cx="196" cy="140" r="30" fill="#F0A75B" />
+            <path d="M164 132 a32 32 0 0 1 64 0 q2 10 -6 10 h-52 q-8 0 -6 -10 z" fill={C.blue} />
+            <rect x="162" y="138" width="68" height="10" rx="5" fill={C.blue} />
+            {/* Gilet — bande réfléchissante sur l'épaule */}
+            <rect x="150" y="176" width="80" height="8" rx="4" fill="#fff" opacity="0.9" />
+          </svg>
+        </div>
 
-      <div style={{ position: "relative", background: "#fff", border: `1px solid ${C.border}`, borderRadius: 12, padding: 30, width: "100%", maxWidth: 380, boxShadow: "0 10px 40px rgba(20,40,60,0.08)" }}>
-        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", marginBottom: 24 }}>
-          {logoUrl ? (
-            <img src={logoUrl} alt="Logo SOMIP" style={{ width: 64, height: 64, borderRadius: 12, objectFit: "cover", marginBottom: 12 }} />
-          ) : (
-            <div style={{ width: 64, height: 64, borderRadius: 12, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 12 }}>
-              <Fuel size={30} color="#fff" />
+        <div className="somip-auth-form-side">
+          <div style={{ background: "#fff", borderRadius: 14, padding: 30, width: "100%", maxWidth: 380, boxShadow: "0 10px 40px rgba(20,40,60,0.07)", border: `1px solid ${C.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 22 }}>
+              {logoUrl ? (
+                <img src={logoUrl} alt="Logo SOMIP" style={{ width: 44, height: 44, borderRadius: 10, objectFit: "cover" }} />
+              ) : (
+                <div style={{ width: 44, height: 44, borderRadius: 10, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Fuel size={22} color="#fff" />
+                </div>
+              )}
+              <div>
+                <div style={{ fontWeight: 800, fontSize: 16, color: C.navy }}>SOMIP</div>
+                <div style={{ color: C.sub, fontSize: 12 }}>Gestion de Stock</div>
+              </div>
             </div>
-          )}
-          <div style={{ fontWeight: 800, fontSize: 19, color: C.navy }}>Gestion de Stock SOMIP</div>
-          <div style={{ color: C.sub, fontSize: 12.5, marginTop: 3 }}>Zone Sud-Est · Gabon</div>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+              <button className={`somip-tab ${mode === "login" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("login"); setError(""); setInfo(""); }}>Connexion</button>
+              <button className={`somip-tab ${mode === "signup" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("signup"); setError(""); setInfo(""); }}>Créer un compte</button>
+            </div>
+
+            {mode === "signup" && (
+              <Field label="Nom complet">
+                <input className="somip-input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Ex : Jean Mabiala" />
+              </Field>
+            )}
+            <Field label="E-mail ou identifiant">
+              <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="prenom.nom@somip-sarl.ga" />
+            </Field>
+            <Field label="Mot de passe">
+              <input type="password" className="somip-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+            </Field>
+
+            {error && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 12px" }}>{error}</p>}
+            {info && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 12px" }}>{info}</p>}
+
+            <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={busy}>
+              {mode === "login" ? <Lock size={15} /> : <Mail size={15} />}
+              {mode === "login" ? "Se connecter" : "Créer mon compte"}
+            </button>
+
+            {mode === "signup" && (
+              <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+                Par défaut, un nouveau compte n'a que des droits de consultation. Un Superviseur doit t'accorder le droit de saisie depuis la page Utilisateurs.
+              </p>
+            )}
+          </div>
         </div>
-
-        <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-          <button className={`somip-tab ${mode === "login" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("login"); setError(""); setInfo(""); }}>Connexion</button>
-          <button className={`somip-tab ${mode === "signup" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("signup"); setError(""); setInfo(""); }}>Créer un compte</button>
-        </div>
-
-        {mode === "signup" && (
-          <Field label="Nom complet">
-            <input className="somip-input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Ex : Jean Mabiala" />
-          </Field>
-        )}
-        <Field label="E-mail ou identifiant">
-          <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="prenom.nom@somip-sarl.ga" />
-        </Field>
-        <Field label="Mot de passe">
-          <input type="password" className="somip-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
-        </Field>
-
-        {error && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 12px" }}>{error}</p>}
-        {info && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 12px" }}>{info}</p>}
-
-        <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={busy}>
-          {mode === "login" ? <Lock size={15} /> : <Mail size={15} />}
-          {mode === "login" ? "Se connecter" : "Créer mon compte"}
-        </button>
-
-        {mode === "signup" && (
-          <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-            Par défaut, un nouveau compte n'a que des droits de consultation. Un Superviseur doit t'accorder le droit de saisie depuis la page Utilisateurs.
-          </p>
-        )}
       </div>
     </div>
   );
