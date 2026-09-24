@@ -96,9 +96,9 @@ const MOVEMENTS_SEED = [
   { id: "m5", siteId: "traction", type: "sortie", date: "2026-09-02", quantity: 1800, delta: -1800, destinataire: "Locomotive 12", commentaire: "", isDemo: true },
 ];
 
-const SETTINGS_SEED = { objectifFreinte: 3, logoUrl: null, logoTotalUrl: null, colorPrimary: "#0071BD", colorAccent: "#F16B16" };
+const SETTINGS_SEED = { objectifFreinte: 3, logoUrl: null, logoTotalUrl: null, loginBgUrl: null, colorPrimary: "#0071BD", colorAccent: "#F16B16" };
 const rowToSettings = (r) => r ? {
-  objectifFreinte: Number(r.objectif_freinte), logoUrl: r.logo_url || null, logoTotalUrl: r.logo_total_url || null,
+  objectifFreinte: Number(r.objectif_freinte), logoUrl: r.logo_url || null, logoTotalUrl: r.logo_total_url || null, loginBgUrl: r.login_bg_url || null,
   colorPrimary: r.color_primary || "#0071BD", colorAccent: r.color_accent || "#F16B16",
 } : SETTINGS_SEED;
 
@@ -1463,10 +1463,14 @@ function AuthScreen() {
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
   const [logoUrl, setLogoUrl] = useState(null);
+  const [loginBgUrl, setLoginBgUrl] = useState(null);
 
   useEffect(() => {
-    supabase.from("settings").select("logo_url").eq("id", 1).maybeSingle()
-      .then(({ data }) => { if (data?.logo_url) setLogoUrl(data.logo_url); })
+    supabase.from("settings").select("logo_url, login_bg_url").eq("id", 1).maybeSingle()
+      .then(({ data }) => {
+        if (data?.logo_url) setLogoUrl(data.logo_url);
+        if (data?.login_bg_url) setLoginBgUrl(data.login_bg_url);
+      })
       .catch(() => {});
   }, []);
 
@@ -1499,53 +1503,28 @@ function AuthScreen() {
         }
       `}</style>
       <div className="somip-auth-wrap">
-        <div className="somip-auth-illustration" style={{ background: `linear-gradient(155deg, ${C.blue} 0%, ${C.navy} 100%)` }}>
-          {/* Motifs décoratifs modernes. */}
-          <div style={{ position: "absolute", top: "-60px", right: "-60px", width: 220, height: 220, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
-          <div style={{ position: "absolute", bottom: "10%", left: "-40px", width: 140, height: 140, borderRadius: "50%", background: "rgba(255,255,255,0.05)" }} />
-          <div style={{ position: "absolute", top: "18%", left: "8%", fontWeight: 800, fontSize: "clamp(22px, 3vw, 30px)", color: "#fff", maxWidth: 320 }}>
-            Gestion de Stock SOMIP
+        <div
+          className="somip-auth-illustration"
+          style={{
+            background: loginBgUrl
+              ? `linear-gradient(180deg, rgba(6,26,46,0.35) 0%, rgba(6,26,46,0.75) 100%), url(${loginBgUrl}) center/cover no-repeat`
+              : `linear-gradient(155deg, ${C.blue} 0%, ${C.navy} 100%)`,
+          }}
+        >
+          {!loginBgUrl && (
+            <>
+              <div style={{ position: "absolute", top: "-60px", right: "-60px", width: 220, height: 220, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+              <div style={{ position: "absolute", bottom: "-40px", left: "-40px", width: 180, height: 180, borderRadius: "50%", background: "rgba(255,255,255,0.05)" }} />
+            </>
+          )}
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", padding: "28px 28px 34px" }}>
+            <div style={{ fontWeight: 800, fontSize: "clamp(24px, 3.2vw, 32px)", color: "#fff", textShadow: "0 2px 10px rgba(0,0,0,0.35)", maxWidth: 380 }}>
+              Gestion de Stock SOMIP
+            </div>
+            <div style={{ fontSize: 14, color: "rgba(255,255,255,0.92)", textShadow: "0 1px 6px rgba(0,0,0,0.35)", marginTop: 6, maxWidth: 340 }}>
+              Sur le terrain, avec vous.
+            </div>
           </div>
-          <div style={{ position: "absolute", top: "calc(18% + 46px)", left: "8%", fontSize: 13.5, color: "rgba(255,255,255,0.82)", maxWidth: 280 }}>
-            Sur le terrain, avec vous.
-          </div>
-          {/* Opérateur SOMIP en EPI, pistolet de distribution à la main — illustration vectorielle. */}
-          <svg viewBox="0 0 400 460" preserveAspectRatio="xMidYMax meet" style={{ position: "absolute", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "min(80%, 360px)", height: "auto" }}>
-            {/* Sol / ombre */}
-            <ellipse cx="200" cy="440" rx="130" ry="14" fill="rgba(0,0,0,0.15)" />
-            {/* Pompe à carburant, à droite */}
-            <rect x="300" y="230" width="70" height="180" rx="10" fill="#0E3A5C" />
-            <rect x="311" y="248" width="48" height="44" rx="4" fill="#fff" opacity="0.92" />
-            <rect x="316" y="304" width="38" height="14" rx="3" fill={C.orange} />
-            {/* Jambes */}
-            <rect x="150" y="300" width="34" height="110" rx="10" fill="#1E2A38" />
-            <rect x="196" y="300" width="34" height="110" rx="10" fill="#1E2A38" />
-            <rect x="146" y="398" width="42" height="18" rx="6" fill="#0E1620" />
-            <rect x="192" y="398" width="42" height="18" rx="6" fill="#0E1620" />
-            {/* Gilet de sécurité (torse) */}
-            <path d="M150 170 q40 -18 80 0 l14 130 q-54 18 -108 0 z" fill={C.orange} />
-            <path d="M162 172 l10 122 M228 172 l-10 122" stroke="#fff" strokeWidth="6" opacity="0.85" />
-            <rect x="176" y="215" width="48" height="20" rx="3" fill="#fff" opacity="0.95" />
-            <text x="200" y="230" textAnchor="middle" fontSize="11" fontWeight="700" fill={C.blue}>SOMIP</text>
-            {/* Bras gauche (le long du corps) */}
-            <rect x="138" y="180" width="22" height="90" rx="11" fill="#F0A75B" />
-            {/* Bras droit tendu, tenant le pistolet */}
-            <path d="M222 190 q50 6 70 46" stroke="#F0A75B" strokeWidth="22" strokeLinecap="round" fill="none" />
-            {/* Pistolet de distribution */}
-            <g transform="translate(280,224) rotate(20)">
-              <rect x="0" y="0" width="34" height="14" rx="5" fill="#1E2A38" />
-              <rect x="-4" y="10" width="12" height="22" rx="5" fill="#1E2A38" />
-              <rect x="30" y="4" width="16" height="7" rx="3" fill={C.orange} />
-            </g>
-            {/* Tuyau reliant le pistolet à la pompe */}
-            <path d="M300 250 q-14 20 -4 40 q10 20 -6 34" stroke="#1E2A38" strokeWidth="7" fill="none" strokeLinecap="round" opacity="0.85" />
-            {/* Tête + casque */}
-            <circle cx="196" cy="140" r="30" fill="#F0A75B" />
-            <path d="M164 132 a32 32 0 0 1 64 0 q2 10 -6 10 h-52 q-8 0 -6 -10 z" fill={C.blue} />
-            <rect x="162" y="138" width="68" height="10" rx="5" fill={C.blue} />
-            {/* Gilet — bande réfléchissante sur l'épaule */}
-            <rect x="150" y="176" width="80" height="8" rx="4" fill="#fff" opacity="0.9" />
-          </svg>
         </div>
 
         <div className="somip-auth-form-side">
@@ -2290,9 +2269,10 @@ export default function App() {
     appendAudit("Modification des réglages", patch.objectifFreinte !== undefined ? `Nouvel objectif : ${next.objectifFreinte} ‰` : "Personnalisation (logo/couleurs)");
     flash("Réglages mis à jour.");
   });
-  const updateTheme = ({ logoFile, logoTotalFile, colorPrimary, colorAccent }) => withSync(async () => {
+  const updateTheme = ({ logoFile, logoTotalFile, loginBgFile, clearLoginBg, colorPrimary, colorAccent }) => withSync(async () => {
     let logoUrl = settings.logoUrl;
     let logoTotalUrl = settings.logoTotalUrl;
+    let loginBgUrl = clearLoginBg ? null : settings.loginBgUrl;
     if (logoFile) {
       const urls = await uploadPhotos([logoFile], "branding");
       logoUrl = urls[0];
@@ -2301,13 +2281,17 @@ export default function App() {
       const urls2 = await uploadPhotos([logoTotalFile], "branding-total");
       logoTotalUrl = urls2[0];
     }
-    const next = { ...settings, logoUrl, logoTotalUrl, colorPrimary: colorPrimary || settings.colorPrimary, colorAccent: colorAccent || settings.colorAccent };
+    if (loginBgFile) {
+      const urls3 = await uploadPhotos([loginBgFile], "branding-login-bg");
+      loginBgUrl = urls3[0];
+    }
+    const next = { ...settings, logoUrl, logoTotalUrl, loginBgUrl, colorPrimary: colorPrimary || settings.colorPrimary, colorAccent: colorAccent || settings.colorAccent };
     const { error } = await supabase.from("settings").update({
-      logo_url: next.logoUrl, logo_total_url: next.logoTotalUrl, color_primary: next.colorPrimary, color_accent: next.colorAccent,
+      logo_url: next.logoUrl, logo_total_url: next.logoTotalUrl, login_bg_url: next.loginBgUrl, color_primary: next.colorPrimary, color_accent: next.colorAccent,
     }).eq("id", 1);
     if (error) throw error;
     setSettings(next);
-    appendAudit("Personnalisation", "Logo et/ou couleurs mis à jour");
+    appendAudit("Personnalisation", "Logo, image de fond et/ou couleurs mis à jour");
     flash("Personnalisation enregistrée.");
   });
   useEffect(() => { applyTheme(settings.colorPrimary, settings.colorAccent); setCurrentLogoUrl(settings.logoUrl); setCurrentLogoTotalUrl(settings.logoTotalUrl); }, [settings.colorPrimary, settings.colorAccent, settings.logoUrl, settings.logoTotalUrl]);
@@ -6750,19 +6734,21 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
 function BrandingView({ settings, updateTheme }) {
   const [logoFile, setLogoFile] = useState(null);
   const [logoTotalFile, setLogoTotalFile] = useState(null);
+  const [loginBgFile, setLoginBgFile] = useState(null);
   const [colorPrimary, setColorPrimary] = useState(settings.colorPrimary || "#0071BD");
   const [colorAccent, setColorAccent] = useState(settings.colorAccent || "#F16B16");
   const [saving, setSaving] = useState(false);
 
   const previewLogo = logoFile ? URL.createObjectURL(logoFile) : settings.logoUrl;
   const previewLogoTotal = logoTotalFile ? URL.createObjectURL(logoTotalFile) : settings.logoTotalUrl;
-  const dirty = !!logoFile || !!logoTotalFile || colorPrimary !== (settings.colorPrimary || "#0071BD") || colorAccent !== (settings.colorAccent || "#F16B16");
+  const previewLoginBg = loginBgFile ? URL.createObjectURL(loginBgFile) : settings.loginBgUrl;
+  const dirty = !!logoFile || !!logoTotalFile || !!loginBgFile || colorPrimary !== (settings.colorPrimary || "#0071BD") || colorAccent !== (settings.colorAccent || "#F16B16");
 
   const submit = async () => {
     setSaving(true);
-    await updateTheme({ logoFile, logoTotalFile, colorPrimary, colorAccent });
+    await updateTheme({ logoFile, logoTotalFile, loginBgFile, colorPrimary, colorAccent });
     setSaving(false);
-    setLogoFile(null); setLogoTotalFile(null);
+    setLogoFile(null); setLogoTotalFile(null); setLoginBgFile(null);
     window.location.reload();
   };
 
@@ -6794,6 +6780,26 @@ function BrandingView({ settings, updateTheme }) {
           <div style={{ margin: "8px 0 16px", padding: 14, background: C.bg, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
             <img src={previewLogoTotal} alt="Logo TotalEnergies" style={{ maxHeight: 70, maxWidth: "100%" }} />
           </div>
+        )}
+
+        <Field label="Image de fond — page de connexion (optionnel, une vraie photo si tu en as une)">
+          <label className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", cursor: "pointer", display: "inline-flex" }}>
+            <ImagePlus size={14} /> {settings.loginBgUrl || loginBgFile ? "Changer l'image" : "Ajouter une image"}
+            <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => setLoginBgFile(e.target.files?.[0] || null)} />
+          </label>
+        </Field>
+        {previewLoginBg && (
+          <div style={{ margin: "8px 0 4px", borderRadius: 8, overflow: "hidden" }}>
+            <img src={previewLoginBg} alt="Fond page de connexion" style={{ width: "100%", height: 140, objectFit: "cover", display: "block" }} />
+          </div>
+        )}
+        {(settings.loginBgUrl || loginBgFile) && (
+          <button
+            onClick={() => { setLoginBgFile(null); updateTheme({ colorPrimary, colorAccent, clearLoginBg: true }); }}
+            style={{ border: "none", background: "none", color: C.danger, fontSize: 11.5, cursor: "pointer", padding: "4px 0 16px" }}
+          >
+            Retirer l'image (revenir à l'illustration par défaut)
+          </button>
         )}
 
         <Field label="Couleur primaire">
