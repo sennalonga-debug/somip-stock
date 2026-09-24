@@ -2791,7 +2791,8 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   };
   const currentTanks = siteTanks.filter((t) => t.siteId === tankSiteId);
   const submitTank = () => {
-    if (!newTankName.trim() || !tankSiteId) return;
+    if (!newTankName.trim()) { window.alert("Le nom de la cuve ne peut pas être vide."); return; }
+    if (!tankSiteId) { window.alert("Aucun site sélectionné — vérifie qu'au moins un site existe."); return; }
     addSiteTank({ siteId: tankSiteId, name: newTankName });
     setNewTankName("");
   };
