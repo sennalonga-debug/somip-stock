@@ -47,8 +47,9 @@ export default async function handler(req, res) {
     res.status(400).json({ error: "Compte et nouveau mot de passe requis." });
     return;
   }
-  if (String(newPassword).length < 6) {
-    res.status(400).json({ error: "Le mot de passe doit contenir au moins 6 caractères." });
+  const pw2 = String(newPassword);
+  if (pw2.length < 8 || !/[A-Z]/.test(pw2)) {
+    res.status(400).json({ error: "Le mot de passe doit contenir au moins 8 caractères, dont une majuscule." });
     return;
   }
 
