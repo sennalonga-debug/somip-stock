@@ -169,6 +169,12 @@ const fmt = (n) => {
   return neg ? `-${s}` : s;
 };
 const uid = () => Math.random().toString(36).slice(2, 10);
+// Règle commune de robustesse des mots de passe : au moins 8 caractères, avec au moins une
+// majuscule. Utilisée à la création de compte et à la réinitialisation.
+const PASSWORD_RULE_MSG = "Le mot de passe doit contenir au moins 8 caractères, dont une majuscule.";
+function isStrongPassword(pw) {
+  return typeof pw === "string" && pw.length >= 8 && /[A-Z]/.test(pw);
+}
 
 /**
  * Classification d'un écart d'inventaire.
@@ -1478,16 +1484,8 @@ function AuthScreen() {
     setError(""); setInfo("");
     if (!email || !password) { setError("Adresse e-mail et mot de passe requis."); return; }
     setBusy(true);
-    if (mode === "login") {
-      const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-      if (err) setError("Connexion impossible : " + err.message);
-    } else {
-      const { error: err } = await supabase.auth.signUp({
-        email, password, options: { data: { full_name: fullName || email } },
-      });
-      if (err) setError("Inscription impossible : " + err.message);
-      else setInfo("Compte créé. Un Superviseur doit maintenant t'attribuer un rôle depuis la page Utilisateurs avant que tu puisses saisir des données. Connecte-toi dès que c'est fait.");
-    }
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    if (err) setError("Connexion impossible : " + err.message);
     setBusy(false);
   };
 
@@ -1543,16 +1541,6 @@ function AuthScreen() {
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-              <button className={`somip-tab ${mode === "login" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("login"); setError(""); setInfo(""); }}>Connexion</button>
-              <button className={`somip-tab ${mode === "signup" ? "active" : ""}`} style={{ flex: 1, textAlign: "center" }} onClick={() => { setMode("signup"); setError(""); setInfo(""); }}>Créer un compte</button>
-            </div>
-
-            {mode === "signup" && (
-              <Field label="Nom complet">
-                <input className="somip-input" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Ex : Jean Mabiala" />
-              </Field>
-            )}
             <Field label="E-mail ou identifiant">
               <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="prenom.nom@somip-sarl.ga" />
             </Field>
@@ -1564,15 +1552,13 @@ function AuthScreen() {
             {info && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 12px" }}>{info}</p>}
 
             <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={busy}>
-              {mode === "login" ? <Lock size={15} /> : <Mail size={15} />}
-              {mode === "login" ? "Se connecter" : "Créer mon compte"}
+              <Lock size={15} />
+              Se connecter
             </button>
 
-            {mode === "signup" && (
-              <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-                Par défaut, un nouveau compte n'a que des droits de consultation. Un Superviseur doit t'accorder le droit de saisie depuis la page Utilisateurs.
-              </p>
-            )}
+            <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
+              Pas encore de compte ? Un Superviseur doit t'en créer un depuis la page Utilisateurs.
+            </p>
           </div>
         </div>
       </div>
@@ -1841,18 +1827,47 @@ export default function App() {
     return () => { cancelled = true; };
   }, [session, profile, retryKey]);
 
-  /* ---- synchronisation périodique : voir les changements des autres utilisateurs ---- */
+  /* ---- synchronisation périodique : voir les changements des autres utilisateurs ----
+     Volontairement scindée en deux vitesses pour limiter la consommation Supabase (egress et
+     logs) : les données qui changent souvent (mouvements, inventaires) sont revérifiées
+     fréquemment, le reste (sites, comptes, réglages...) beaucoup plus rarement, puisque ça
+     bouge très peu en cours de journée. */
   const heartbeatRef = useRef(0);
   useEffect(() => {
     if (loading || !session || !profile) return;
-    const interval = setInterval(async () => {
+
+    const fastTick = async () => {
       if (!navigator.onLine) return;
       try {
         await flushOfflineQueue();
-        const [s, m, i, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
-          fetchTable("sites", rowToSite),
+        const [m, i] = await Promise.all([
           fetchTable("movements", rowToMovement, "date"),
           fetchTable("inventaires", rowToInventaire, "date"),
+        ]);
+        setMovements(m); setInventaires(i);
+        setLastSync(new Date());
+        setIsOfflineStart(false);
+        if (session?.user?.id) {
+          const cached = readAppCache(session.user.id) || {};
+          writeAppCache(session.user.id, { ...cached, movementsData: m, inventairesData: i, cachedAt: new Date().toISOString() });
+        }
+        // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
+        const now = Date.now();
+        if (now - heartbeatRef.current > 30000) {
+          heartbeatRef.current = now;
+          supabase.from("profiles").update({ last_seen_at: new Date().toISOString() }).eq("id", session.user.id);
+        }
+      } catch (e) {
+        // Toujours hors-ligne (ou coupure passagère) : on retentera au prochain tick, sans
+        // bloquer l'utilisateur — la saisie continue de fonctionner sur les données en cache.
+      }
+    };
+
+    const slowTick = async () => {
+      if (!navigator.onLine) return;
+      try {
+        const [s, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
+          fetchTable("sites", rowToSite),
           fetchTable("profiles", rowToProfile),
           fetchTable("audit", rowToAudit, "ts", false),
           fetchTable("product_stocks", rowToProductStock),
@@ -1863,32 +1878,25 @@ export default function App() {
           fetchTable("site_tanks", rowToSiteTank, "name"),
           fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
         ]);
-        setSites(s); setMovements(m); setInventaires(i); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm);
+        setSites(s); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
-        setLastSync(new Date());
-        setIsOfflineStart(false);
-        // Rafraîchit le cache local avec ces données à jour, pour la prochaine ouverture hors-connexion.
         if (session?.user?.id) {
+          const cached = readAppCache(session.user.id) || {};
           writeAppCache(session.user.id, {
-            sitesData: s, movementsData: m, inventairesData: i, profilesData: p, auditData: a,
-            productStocksData: ps, assignmentsData: ta, siteMetersData: sm, bilansData: bl,
-            invOffData: io, siteTanksData: st, siteDepotageMetersData: sdm,
-            settingsRow: se, cachedAt: new Date().toISOString(),
+            ...cached, sitesData: s, profilesData: p, auditData: a, productStocksData: ps,
+            assignmentsData: ta, siteMetersData: sm, bilansData: bl, invOffData: io,
+            siteTanksData: st, siteDepotageMetersData: sdm, settingsRow: se, cachedAt: new Date().toISOString(),
           });
         }
-        // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
-        const now = Date.now();
-        if (now - heartbeatRef.current > 30000) {
-          heartbeatRef.current = now;
-        supabase.from("profiles").update({ last_seen_at: new Date().toISOString() }).eq("id", session.user.id);
-      }
       } catch (e) {
-        // Toujours hors-ligne (ou coupure passagère) : on retentera au prochain tick, sans
-        // bloquer l'utilisateur — la saisie continue de fonctionner sur les données en cache.
+        // Toujours hors-ligne (ou coupure passagère) : on retentera au prochain tick.
       }
-    }, 7000);
-    return () => clearInterval(interval);
+    };
+
+    const fastInterval = setInterval(fastTick, 25000);
+    const slowInterval = setInterval(slowTick, 120000);
+    return () => { clearInterval(fastInterval); clearInterval(slowInterval); };
   }, [loading, session, profile]);
 
   // Vide la file d'attente hors-connexion vers Supabase, dès qu'une tentative semble possible.
@@ -6865,7 +6873,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
 
   const submitReset = async () => {
     setResetErr(null); setResetMsg(null);
-    if (!resetPassword || resetPassword.length < 6) { setResetErr("Le mot de passe doit contenir au moins 6 caractères."); return; }
+    if (!resetPassword || !isStrongPassword(resetPassword)) { setResetErr(PASSWORD_RULE_MSG); return; }
     try {
       const res = await fetch("/api/reset-password", {
         method: "POST",
@@ -6914,7 +6922,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
     setCreateErr(null); setCreateMsg(null);
     if (!form.fullName.trim() || (!form.username.trim() && !form.email.trim()) || !form.password) { setCreateErr("Le nom, le mot de passe, et soit l'e-mail soit le nom d'utilisateur, sont requis."); return; }
     if (form.email.trim() && !form.email.includes("@")) { setCreateErr("L'adresse e-mail n'a pas l'air valide."); return; }
-    if (form.password.length < 6) { setCreateErr("Le mot de passe doit contenir au moins 6 caractères."); return; }
+    if (!isStrongPassword(form.password)) { setCreateErr(PASSWORD_RULE_MSG); return; }
     setCreating(true);
     try {
       const res = await fetch("/api/create-user", {
@@ -7018,7 +7026,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
             </p>
             <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
               <div style={{ flex: 1 }}>
-                <Field label="Nouveau mot de passe"><input type="text" className="somip-input" value={resetPassword} onChange={(e) => setResetPassword(e.target.value)} placeholder="Au moins 6 caractères" /></Field>
+                <Field label="Nouveau mot de passe"><input type="text" className="somip-input" value={resetPassword} onChange={(e) => setResetPassword(e.target.value)} placeholder="8 caractères min., 1 majuscule" /></Field>
               </div>
               <button className="somip-btn somip-btn-primary" style={{ padding: "9px 14px" }} onClick={submitReset}>Valider</button>
               <button onClick={() => setResetForId(null)} style={{ border: "none", background: "none", cursor: "pointer", padding: 9 }}><X size={16} color={C.sub} /></button>
@@ -7036,7 +7044,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
         {!form.email.trim() && (
           <Field label="Sinon, nom d'utilisateur (un identifiant sera généré)"><input className="somip-input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} placeholder="Ex : jean.mabiala" /></Field>
         )}
-        <Field label="Mot de passe provisoire"><input type="text" className="somip-input" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Au moins 6 caractères" /></Field>
+        <Field label="Mot de passe provisoire"><input type="text" className="somip-input" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="8 caractères min., 1 majuscule" /></Field>
         <Field label="Rôle">
           <select className="somip-select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
             {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
