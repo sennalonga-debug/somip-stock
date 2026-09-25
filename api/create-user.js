@@ -62,8 +62,9 @@ export default async function handler(req, res) {
     res.status(400).json({ error: "Rôle invalide." });
     return;
   }
-  if (String(password).length < 6) {
-    res.status(400).json({ error: "Le mot de passe doit contenir au moins 6 caractères." });
+  const pw = String(password);
+  if (pw.length < 8 || !/[A-Z]/.test(pw)) {
+    res.status(400).json({ error: "Le mot de passe doit contenir au moins 8 caractères, dont une majuscule." });
     return;
   }
 
