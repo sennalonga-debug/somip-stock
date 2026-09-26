@@ -1520,7 +1520,7 @@ function AuthScreen() {
               Gestion de Stock SOMIP
             </div>
             <div style={{ fontSize: 14, color: "rgba(255,255,255,0.92)", textShadow: "0 1px 6px rgba(0,0,0,0.35)", marginTop: 6, maxWidth: 340 }}>
-              Sur le terrain, avec vous.
+              SOMIP — La technologie des fluides.
             </div>
           </div>
         </div>
@@ -1714,6 +1714,10 @@ export default function App() {
   const currentUserName = profile?.name || session?.user?.email || "Utilisateur";
   const currentRole = profile?.role || "lecture";
   const perms = permsFor(currentRole);
+  // Un opérateur ou chauffeur avec un/des site(s) attribué(s) est limité à une vue simplifiée,
+  // centrée sur son propre site — le Superviseur et les comptes sans site attribué gardent
+  // l'accès complet, sans changement.
+  const isSiteRestricted = (currentRole === "operateur" || currentRole === "chauffeur") && (profile?.assignedSiteIds || []).length > 0;
   const signOut = () => supabase.auth.signOut();
 
   /* ---- chargement initial des données (une fois connecté) ---- */
@@ -2340,11 +2344,12 @@ export default function App() {
   });
 
   const NAV = [
-    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: !perms.isTotalEnergiesOnly },
+    { id: "accueil", label: "Accueil", icon: LayoutDashboard, show: isSiteRestricted },
+    { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
     { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
-    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: true },
-    { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly },
+    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted },
+    { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: !perms.isTotalEnergiesOnly },
     { id: "utilisateurs", label: "Utilisateurs", icon: Users, show: perms.canManage },
     { id: "personnalisation", label: "Personnalisation", icon: Palette, show: perms.canManage },
@@ -2352,6 +2357,7 @@ export default function App() {
   ].filter((n) => n.show);
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
   useEffect(() => { if (perms.isTotalEnergiesOnly && view === "dashboard") setView("inventaires"); }, [perms.isTotalEnergiesOnly]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (isSiteRestricted && view === "dashboard") setView("accueil"); }, [isSiteRestricted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!SUPABASE_CONFIGURED) {
     return (
@@ -2542,12 +2548,13 @@ export default function App() {
         )}
 
         <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
+          {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} />}
           {view === "vcf" && <VcfView />}
-          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} />}
+          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
@@ -2560,6 +2567,84 @@ export default function App() {
 /* ------------------------------------------------------------------ */
 /* Dashboard                                                            */
 /* ------------------------------------------------------------------ */
+/* ---- Accueil — vue simplifiée pour un compte limité à un ou plusieurs sites ---- */
+function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds }) {
+  const mySites = sites.filter((s) => assignedSiteIds.includes(s.id));
+  const today = todayStr();
+  const yesterday = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+
+  const rows = mySites.map((s) => {
+    const stock = stockOf(s.id, "gasoil");
+    const fillPct = s.capacity ? Math.round((stock / s.capacity) * 100) : null;
+    const hasYesterdayJauge = inventaires.some((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === yesterday);
+    // Perte des 7 derniers jours, jour par jour (pas de cumul) — même règle que l'alerte générale.
+    let recentLoss = null;
+    let cur = new Date(); cur.setDate(cur.getDate() - 7);
+    const end = new Date();
+    while (cur <= end) {
+      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
+      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+      const reception = sumQty(dayMovs, ["reception"]);
+      const ventes = sumQty(dayMovs, ["sortie"]);
+      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
+      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
+      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+      if (inv) {
+        const ecart = inv.stockPhysique - theorique;
+        if (ecart <= -500 && (!recentLoss || d > recentLoss.date)) recentLoss = { date: d, ecart };
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+    return { site: s, stock, fillPct, hasYesterdayJauge, recentLoss };
+  });
+
+  return (
+    <div className="somip-fade">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12, marginBottom: 18 }}>
+        {rows.map((r) => (
+          <StatCard key={r.site.id} label={r.site.name} value={fmt(r.stock)} unit="L" accent={C.blue} icon={r.site.isMobile ? Truck : Factory} />
+        ))}
+      </div>
+
+      {rows.some((r) => r.recentLoss) && (
+        <div className="somip-panel" style={{ marginBottom: 18, padding: 18, borderLeft: `4px solid ${C.danger}` }}>
+          <h3 style={{ margin: "0 0 12px", fontSize: 14, color: C.danger, display: "flex", alignItems: "center", gap: 8 }}>
+            <AlertTriangle size={17} /> Perte de plus de 500 L à vérifier
+          </h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {rows.filter((r) => r.recentLoss).map((r) => (
+              <div key={r.site.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.bg, borderRadius: 6, padding: "8px 12px", fontSize: 13 }}>
+                <span><strong>{r.site.name}</strong> — {r.recentLoss.date}</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: C.danger }}>{fmt(r.recentLoss.ecart)} L</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="somip-panel" style={{ padding: 18 }}>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>{mySites.length > 1 ? "Mes sites" : "Mon site"}</h3>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {rows.map((r) => (
+            <div key={r.site.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span style={{ fontWeight: 700 }}>{r.site.name} {!r.site.isMobile && <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span>}</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{fmt(r.stock)} L{r.fillPct !== null ? ` (${r.fillPct}%)` : ""}</span>
+              </div>
+              {!r.hasYesterdayJauge && (
+                <p style={{ margin: 0, fontSize: 12, color: C.warning }}>⚠ Stock fin de la veille pas encore saisi.</p>
+              )}
+            </div>
+          ))}
+          {rows.length === 0 && <p style={{ fontSize: 13, color: C.sub, margin: 0 }}>Aucun site attribué à ce compte pour l'instant — contacte un Superviseur.</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments }) {
   const month = currentMonth();
   const rows = sites.map((s) => {
@@ -4576,32 +4661,32 @@ function VcfView() {
 /* ------------------------------------------------------------------ */
 /* Rapports                                                              */
 /* ------------------------------------------------------------------ */
-function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage }) {
+function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds }) {
   const CATEGORIES = [
-    { id: "expositions", label: "Expositions", superviseurOnly: true, tabs: [
+    { id: "expositions", label: "Expositions", show: canManage, tabs: [
         { id: "exposition", label: "Exposition" },
         { id: "exposition_comilog", label: "Suivi Stocks Comilog" },
       ] },
-    { id: "bons_cat", label: "Bon de livraison", superviseurOnly: true, tabs: [
+    { id: "bons_cat", label: "Bon de livraison", show: canManage || isSiteRestricted, tabs: [
         { id: "bons", label: "Bons de livraison" },
       ] },
-    { id: "synthese_mois", label: "Synthèse journalières du mois", tabs: [
+    { id: "synthese_mois", label: "Synthèse journalières du mois", show: !isSiteRestricted, tabs: [
         { id: "synthese_mensuelle_site", label: "Gasoil" },
         { id: "synthese_mensuelle_site_15", label: "Gasoil — 15°C" },
         { id: "synthese_station_jour", label: "Station (site + camion)" },
         { id: "synthese_station_jour_15", label: "Station (site + camion) — 15°C" },
         { id: "synthese_mensuelle_lub", label: "Lubrifiants" },
       ] },
-    { id: "transferts_cat", label: "Transferts", superviseurOnly: true, tabs: [
+    { id: "transferts_cat", label: "Transferts", show: canManage || isSiteRestricted, tabs: [
         { id: "transferts", label: "Transferts entre sites" },
       ] },
-    { id: "bilan_cat", label: "Bilans matières", superviseurOnly: true, tabs: [
+    { id: "bilan_cat", label: "Bilans matières", show: canManage || isSiteRestricted, tabs: [
         { id: "bilan", label: "Bilan Matières" },
       ] },
-    { id: "ecart_cat", label: "Gain/Perte du mois", superviseurOnly: true, tabs: [
+    { id: "ecart_cat", label: "Gain/Perte du mois", show: canManage, tabs: [
         { id: "ecart_mensuel", label: "Gain/Perte du mois" },
       ] },
-  ].filter((c) => !c.superviseurOnly || canManage);
+  ].filter((c) => c.show);
 
   const [category, setCategory] = useState(CATEGORIES[0]?.id || "synthese_mois");
   const activeCategory = CATEGORIES.find((c) => c.id === category) || CATEGORIES[0];
@@ -4609,7 +4694,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
 
   useEffect(() => {
     if (!CATEGORIES.some((c) => c.id === category)) { setCategory(CATEGORIES[0]?.id); setTab(CATEGORIES[0]?.tabs[0]?.id); }
-  }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [canManage, isSiteRestricted]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectCategory = (catId) => {
     setCategory(catId);
@@ -4639,10 +4724,10 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
       {tab === "synthese_station_jour_15" && <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
       {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
-      {tab === "bons" && canManage && <DeliveryNotesReport sites={sites} movements={movements} />}
-      {tab === "bilan" && canManage && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} />}
+      {tab === "bons" && (canManage || isSiteRestricted) && <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} />}
+      {tab === "bilan" && (canManage || isSiteRestricted) && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} />}
       {tab === "ecart_mensuel" && canManage && <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} />}
-      {tab === "transferts" && canManage && <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} />}
+      {tab === "transferts" && (canManage || isSiteRestricted) && <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} />}
     </div>
   );
 }
@@ -6059,8 +6144,8 @@ function MiniStat({ label, value, color, bold }) {
 
 /* ---- Registre des bons de livraison ---- */
 /* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
-function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage }) {
-  const fixedSites = sites.filter((s) => !s.isMobile);
+function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, assignedSiteIds }) {
+  const fixedSites = sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [periodType, setPeriodType] = useState("mensuel");
   const [monthKey, setMonthKey] = useState(currentMonth());
@@ -6538,11 +6623,12 @@ function TransfersReport({ sites, movements, truckAssignments }) {
   );
 }
 
-function DeliveryNotesReport({ sites, movements }) {
+function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
   const [filterSite, setFilterSite] = useState("all");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [search, setSearch] = useState("");
+  const selectableSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
 
   const rows = movements
     .filter((m) => m.type === "reception")
@@ -6578,7 +6664,7 @@ function DeliveryNotesReport({ sites, movements }) {
         <Field label="Site">
           <select className="somip-select" style={{ maxWidth: 240 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
             <option value="all">Tous les sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            {selectableSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </Field>
         <Field label="Du (optionnel)"><input type="date" className="somip-input" style={{ maxWidth: 180 }} value={start} onChange={(e) => setStart(e.target.value)} /></Field>
