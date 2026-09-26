@@ -1134,25 +1134,34 @@ async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
 
 function ReportHeader({ title, period, showEditedDate = true }) {
   return (
-    <div className="somip-print-only" style={{ marginBottom: 16 }}>
-      <div style={{ height: 5, background: `linear-gradient(90deg, ${C.blue} 0%, ${C.blue} 60%, ${C.orange} 60%, ${C.orange} 100%)`, borderRadius: 3, marginBottom: 12 }} />
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `2px solid ${C.blue}`, paddingBottom: 10, marginBottom: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {CURRENT_LOGO_URL && <img src={CURRENT_LOGO_URL} alt="" style={{ height: 34, width: 34, objectFit: "cover", borderRadius: 6 }} />}
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 17, color: C.blue, letterSpacing: 0.3 }}>SOMIP <span style={{ color: C.orange }}>—</span> Stock Gasoil</div>
-            <div style={{ fontSize: 11, color: C.sub }}>Zone Sud-Est · Gabon</div>
-          </div>
-        </div>
-        {showEditedDate && (
-          <div style={{ textAlign: "right", fontSize: 11, color: C.sub }}>
-            Édité le {new Date().toLocaleDateString("fr-FR")} à {new Date().toLocaleTimeString("fr-FR")}
-          </div>
-        )}
+    <>
+      <div className="somip-no-print" style={{ marginBottom: 16, paddingBottom: 14, borderBottom: `1px solid ${C.border}` }}>
+        <h2 style={{ margin: "0 0 3px", fontSize: 17, fontWeight: 800, color: C.ink, display: "flex", alignItems: "center", gap: 9 }}>
+          <span style={{ width: 6, height: 18, borderRadius: 3, background: `linear-gradient(180deg, ${C.blue}, ${C.orange})`, display: "inline-block" }} />
+          {title}
+        </h2>
+        {period && <div style={{ fontSize: 12.5, color: C.sub, marginLeft: 15 }}>{period}</div>}
       </div>
-      <h2 style={{ margin: "0 0 2px", fontSize: 16, color: C.navy }}>{title}</h2>
-      {period && <div style={{ fontSize: 12.5, color: C.orange, fontWeight: 600 }}>{period}</div>}
-    </div>
+      <div className="somip-print-only" style={{ marginBottom: 16 }}>
+        <div style={{ height: 5, background: `linear-gradient(90deg, ${C.blue} 0%, ${C.blue} 60%, ${C.orange} 60%, ${C.orange} 100%)`, borderRadius: 3, marginBottom: 12 }} />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `2px solid ${C.blue}`, paddingBottom: 10, marginBottom: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            {CURRENT_LOGO_URL && <img src={CURRENT_LOGO_URL} alt="" style={{ height: 34, width: 34, objectFit: "cover", borderRadius: 6 }} />}
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 17, color: C.blue, letterSpacing: 0.3 }}>SOMIP <span style={{ color: C.orange }}>—</span> Stock Gasoil</div>
+              <div style={{ fontSize: 11, color: C.sub }}>Zone Sud-Est · Gabon</div>
+            </div>
+          </div>
+          {showEditedDate && (
+            <div style={{ textAlign: "right", fontSize: 11, color: C.sub }}>
+              Édité le {new Date().toLocaleDateString("fr-FR")} à {new Date().toLocaleTimeString("fr-FR")}
+            </div>
+          )}
+        </div>
+        <h2 style={{ margin: "0 0 2px", fontSize: 16, color: C.navy }}>{title}</h2>
+        {period && <div style={{ fontSize: 12.5, color: C.orange, fontWeight: 600 }}>{period}</div>}
+      </div>
+    </>
   );
 }
 
@@ -2962,7 +2971,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div className="somip-panel" style={{ flex: "2 1 520px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Sites externalisés ({sites.length})</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Factory size={15} color={C.blue} />Sites externalisés ({sites.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Capacités et stocks initiaux : à vérifier et ajuster selon vos valeurs réelles.</p>
         <table className="somip-table">
           <thead><tr><th>Code</th><th>Site</th><th style={{ textAlign: "right" }}>Capacité (L)</th><th style={{ textAlign: "right" }}>Stock actuel (L)</th><th>Statut</th><th></th></tr></thead>
@@ -3008,7 +3017,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Ajouter un site</h3>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} color={C.blue} />Ajouter un site</h3>
         <Field label="Nom du site"><input className="somip-input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ex : Dépôt Moanda, ou FK253AA" /></Field>
         <Field label="Code (court)"><input className="somip-input" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value })} placeholder="Ex : DPM, ou FK253AA" /></Field>
         <Field label="Capacité (L)"><input type="number" className="somip-input" value={form.capacity} onChange={(e) => setForm({ ...form, capacity: e.target.value })} placeholder="30000" /></Field>
@@ -3023,7 +3032,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Lubrifiants (Prehomo / Okouma)</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Lubrifiants (Prehomo / Okouma)</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Capacité et stock initial par produit, en litres.</p>
         <Field label="Site">
           <select className="somip-select" value={lubSiteId} onChange={(e) => loadLubForEdit(e.target.value, lubProduct)}>
@@ -3047,7 +3056,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
 
       {trucks.length > 0 && (
         <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Affectation des camions</h3>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Truck size={15} color={C.blue} />Affectation des camions</h3>
           <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Quel camion travaille sur quelle station, avec l'historique des changements (panne, remplacement...).</p>
           <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}>
@@ -3088,7 +3097,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
       )}
 
       <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Compteurs par site</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Compteurs par site</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Ajoute ou retire un compteur si la configuration physique d'un site change. Sur un camion, ça sert aussi à définir des "postes" (ex. Poste 1 / Poste 2) quand la saisie se fait en deux temps dans la journée.</p>
         <Field label="Site">
           <select className="somip-select" value={meterSiteId} onChange={(e) => setMeterSiteId(e.target.value)}>
@@ -3122,7 +3131,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Cuves par site</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Factory size={15} color={C.blue} />Cuves par site</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Pour les inventaires officiels : un site peut avoir plusieurs cuves physiques, chacune relevée séparément.</p>
         <Field label="Site">
           <select className="somip-select" value={tankSiteId} onChange={(e) => setTankSiteId(e.target.value)}>
@@ -3148,7 +3157,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 300px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Compteurs de dépotage par site</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ArrowDownCircle size={15} color={C.blue} />Compteurs de dépotage par site</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Pour les inventaires officiels : un site peut avoir plusieurs compteurs de dépotage (livraison), chacun relevé séparément.</p>
         <Field label="Site">
           <select className="somip-select" value={depotageSiteId} onChange={(e) => setDepotageSiteId(e.target.value)}>
@@ -4180,8 +4189,8 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   return (
     <div className="somip-fade">
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-        {!isTotalEnergiesOnly && <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} onClick={() => setMainTab("rapide")}>Inventaire rapide</button>}
-        <button className={`somip-tab ${mainTab === "officiel" ? "active" : ""}`} onClick={() => setMainTab("officiel")}>Inventaire officiel (inopiné / mensuel)</button>
+        {!isTotalEnergiesOnly && <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("rapide")}><ClipboardList size={13} />Inventaire rapide</button>}
+        <button className={`somip-tab ${mainTab === "officiel" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("officiel")}><Pencil size={13} />Inventaire officiel (inopiné / mensuel)</button>
       </div>
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
@@ -4189,7 +4198,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
       <div style={{ display: "flex", flexDirection: "column", gap: 18, flex: "1 1 300px" }}>
         {canWrite && (
         <div className="somip-panel" style={{ padding: 18 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvel inventaire</h3>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} color={C.blue} />Nouvel inventaire</h3>
           <Field label="Site">
             <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
               {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -4261,7 +4270,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
 
         {canManage && (
         <div className="somip-panel" style={{ padding: 18 }}>
-          <h3 style={{ margin: "0 0 6px", fontSize: 14 }}>Objectif de freinte</h3>
+          <h3 style={{ margin: "0 0 6px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingDown size={15} color={C.blue} />Objectif de freinte</h3>
           <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>
             Seuil de tolérance appliqué aux pertes (taux de freinte). Standard SOMIP : 3 ‰ (3/1000). Modifiable si nécessaire.
           </p>
@@ -4277,7 +4286,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
 
       <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Historique des inventaires</h3>
+          <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><History size={15} color={C.blue} />Historique des inventaires</h3>
           <select className="somip-select" style={{ width: 200 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
             <option value="all">Tous les sites</option>
             {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -4419,7 +4428,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
     <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canWrite && (
         <div className="somip-panel" style={{ padding: 18, flex: "1 1 460px" }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Nouvel inventaire officiel</h3>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} color={C.blue} />Nouvel inventaire officiel</h3>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <button className={`somip-tab ${type === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setType("mensuel")}>Mensuel</button>
             <button className={`somip-tab ${type === "inopine" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setType("inopine")}>Inopiné</button>
@@ -4556,7 +4565,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
 
       <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Historique — Inventaires officiels</h3>
+          <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><History size={15} color={C.blue} />Historique — Inventaires officiels</h3>
           <select className="somip-select" style={{ width: 200 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
             <option value="all">Tous les sites</option>
             {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -4663,7 +4672,7 @@ function VcfView() {
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Volume ambiant → Température → Densité → Volume à 15°C</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Thermometer size={15} color={C.blue} />Volume ambiant → Température → Densité → Volume à 15°C</h3>
         <p style={{ margin: "0 0 16px", fontSize: 12.5, color: C.sub }}>
           Formule ASTM D1250 / API MPMS Chapitre 11.1 (Tables 53B/54B, produits pétroliers généralisés) — plage valide {VCF_MIN_DENSITY} à {VCF_MAX_DENSITY} kg/m³.
         </p>
@@ -4685,7 +4694,7 @@ function VcfView() {
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Résultat</h3>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Check size={15} color={C.blue} />Résultat</h3>
         {!result ? (
           <p style={{ fontSize: 13, color: C.sub }}>Renseignez le volume, la température et la densité pour lancer le calcul.</p>
         ) : (
@@ -4726,27 +4735,27 @@ function VcfView() {
 /* ------------------------------------------------------------------ */
 function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds }) {
   const CATEGORIES = [
-    { id: "expositions", label: "Expositions", show: canManage, tabs: [
+    { id: "expositions", label: "Expositions", icon: FileBarChart, show: canManage, tabs: [
         { id: "exposition", label: "Exposition" },
         { id: "exposition_comilog", label: "Suivi Stocks Comilog" },
       ] },
-    { id: "bons_cat", label: "Bon de livraison", show: canManage || isSiteRestricted, tabs: [
+    { id: "bons_cat", label: "Bon de livraison", icon: ClipboardList, show: canManage || isSiteRestricted, tabs: [
         { id: "bons", label: "Bons de livraison" },
       ] },
-    { id: "synthese_mois", label: "Synthèse journalières du mois", show: true, tabs: [
+    { id: "synthese_mois", label: "Synthèse journalières du mois", icon: TrendingUp, show: true, tabs: [
         { id: "synthese_mensuelle_site", label: "Gasoil" },
         { id: "synthese_mensuelle_site_15", label: "Gasoil — 15°C" },
         { id: "synthese_station_jour", label: "Station (site + camion)" },
         { id: "synthese_station_jour_15", label: "Station (site + camion) — 15°C" },
         { id: "synthese_mensuelle_lub", label: "Lubrifiants" },
       ] },
-    { id: "transferts_cat", label: "Transferts", show: canManage || isSiteRestricted, tabs: [
+    { id: "transferts_cat", label: "Transferts", icon: Truck, show: canManage || isSiteRestricted, tabs: [
         { id: "transferts", label: "Transferts entre sites" },
       ] },
-    { id: "bilan_cat", label: "Bilans matières", show: canManage || isSiteRestricted, tabs: [
+    { id: "bilan_cat", label: "Bilans matières", icon: Factory, show: canManage || isSiteRestricted, tabs: [
         { id: "bilan", label: "Bilan Matières" },
       ] },
-    { id: "ecart_cat", label: "Gain/Perte du mois", show: canManage || isSiteRestricted, tabs: [
+    { id: "ecart_cat", label: "Gain/Perte du mois", icon: TrendingDown, show: canManage || isSiteRestricted, tabs: [
         { id: "ecart_mensuel", label: "Gain/Perte du mois" },
       ] },
   ].filter((c) => c.show);
@@ -4769,7 +4778,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     <div className="somip-fade">
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
         {CATEGORIES.map((c) => (
-          <button key={c.id} className={`somip-tab ${category === c.id ? "active" : ""}`} onClick={() => selectCategory(c.id)}>{c.label}</button>
+          <button key={c.id} className={`somip-tab ${category === c.id ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => selectCategory(c.id)}><c.icon size={13} />{c.label}</button>
         ))}
       </div>
       {activeCategory && activeCategory.tabs.length > 1 && (
@@ -6919,7 +6928,7 @@ function BrandingView({ settings, updateTheme }) {
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Personnalisation</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Palette size={15} color={C.blue} />Personnalisation</h3>
         <p style={{ margin: "0 0 18px", fontSize: 12.5, color: C.sub }}>Logo et couleurs principales, appliqués à toute l'application et aux rapports (PDF/PowerPoint).</p>
 
         <Field label="Logo SOMIP">
@@ -7099,7 +7108,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div className="somip-panel" style={{ flex: "1 1 560px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Comptes ({profiles.length})</h3>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Users size={15} color={C.blue} />Comptes ({profiles.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>
           Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle et le site assigné ici à tout moment.
         </p>
@@ -7193,7 +7202,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
       </div>
 
       <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>Créer un compte</h3>
+        <h3 style={{ margin: "0 0 10px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} color={C.blue} />Créer un compte</h3>
         <Field label="Nom complet"><input className="somip-input" value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} placeholder="Ex : Jean Mabiala" /></Field>
         <Field label="Adresse e-mail professionnelle (si la personne en a une)"><input type="email" className="somip-input" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Ex : jean.mabiala@somip-sarl.ga" /></Field>
         {!form.email.trim() && (
@@ -7235,7 +7244,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
 function HistoryView({ audit }) {
   return (
     <div className="somip-fade somip-panel" style={{ padding: 18 }}>
-      <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Historique des modifications</h3>
+      <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><History size={15} color={C.blue} />Historique des modifications</h3>
       <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Les 300 dernières actions, les plus récentes en premier.</p>
       <table className="somip-table">
         <thead><tr><th>Date / heure</th><th>Utilisateur</th><th>Action</th><th>Détail</th></tr></thead>
