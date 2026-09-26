@@ -2572,6 +2572,17 @@ export default function App() {
               {new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
             </div>
             <div style={{ width: 1, height: 30, background: C.border, display: window.innerWidth > 640 ? "block" : "none" }} />
+            {!perms.isTotalEnergiesOnly && (
+              <button
+                onClick={() => setView(isSiteRestricted ? "accueil" : "dashboard")}
+                title="Alertes"
+                style={{ position: "relative", width: 36, height: 36, borderRadius: 10, border: `1px solid ${C.border}`, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", color: C.sub, transition: "background .15s ease, color .15s ease" }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = C.bg; e.currentTarget.style.color = C.orange; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "#fff"; e.currentTarget.style.color = C.sub; }}
+              >
+                <AlertTriangle size={16} />
+              </button>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
               <div style={{ width: 34, height: 34, borderRadius: "50%", background: `linear-gradient(135deg, ${C.blue}, ${C.blueDark})`, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13, flexShrink: 0 }}>
                 {currentUserName.trim().slice(0, 1).toUpperCase()}
@@ -2827,7 +2838,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Niveau de stock par site</h3>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Niveau de stock par site</h3>
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             {rows.map((r) => (
               <div key={r.id}>
@@ -2842,7 +2853,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         </div>
 
         <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18, minHeight: 320 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Stock actuel par site (L)</h3>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock actuel par site (L)</h3>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={rows} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
@@ -2858,7 +2869,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       </div>
 
       <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 12px", fontSize: 14 }}>Derniers mouvements</h3>
+        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements</h3>
         <table className="somip-table">
           <thead><tr><th>Date</th><th>Site</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
           <tbody>
@@ -3432,7 +3443,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canWrite && (
         <div className="somip-panel" style={{ flex: "1 1 340px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du jour</h3>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Saisie du jour</h3>
           <div style={{ display: "flex", gap: 8 }}>
             <div style={{ flex: 1 }}>
               <Field label="Site">
