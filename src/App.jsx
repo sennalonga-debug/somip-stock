@@ -2619,7 +2619,17 @@ export default function App() {
           </div>
         )}
 
-        <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px", background: `radial-gradient(circle at 100% 0%, rgba(0,113,189,0.05) 0%, transparent 42%), radial-gradient(circle at 0% 100%, rgba(241,107,22,0.04) 0%, transparent 38%), ${C.bg}` }}>
+        <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px", position: "relative", background: C.bg }}>
+          <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none" }}>
+            <div style={{ position: "absolute", top: "-10%", right: "-6%", width: 480, height: 480, borderRadius: "50%", background: `radial-gradient(circle, ${C.blue}14 0%, transparent 70%)` }} />
+            <div style={{ position: "absolute", top: "30%", left: "-8%", width: 380, height: 380, borderRadius: "50%", background: `radial-gradient(circle, ${C.orange}10 0%, transparent 70%)` }} />
+            <div style={{ position: "absolute", bottom: "-12%", right: "18%", width: 420, height: 420, borderRadius: "50%", background: `radial-gradient(circle, ${C.blue}0D 0%, transparent 70%)` }} />
+            <svg style={{ position: "absolute", left: 0, right: 0, bottom: 0, width: "100%", height: 220, opacity: 0.05 }} viewBox="0 0 1440 220" preserveAspectRatio="none">
+              <path d="M0,120 C200,180 320,60 520,100 C720,140 800,40 1020,80 C1220,116 1300,60 1440,100 L1440,220 L0,220 Z" fill={C.blue} />
+              <path d="M0,160 C220,110 380,190 600,150 C820,110 940,180 1160,150 C1300,130 1380,150 1440,160 L1440,220 L0,220 Z" fill={C.orange} />
+            </svg>
+          </div>
+          <div style={{ position: "relative", zIndex: 1 }}>
           {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} />}
@@ -2630,6 +2640,7 @@ export default function App() {
           {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
+          </div>
         </div>
       </div>
     </div>
