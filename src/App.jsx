@@ -4,6 +4,7 @@ import {
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
   FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus, Palette,
+  ChevronsLeft, ChevronsRight,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -19,16 +20,21 @@ import { supabase, SUPABASE_CONFIGURED } from "./supabaseClient.js";
 /* ------------------------------------------------------------------ */
 const C = {
   blue: "#0071BD",
+  blueDark: "#00588F",
   navy: "#0A1F33",
   navyLight: "#12304C",
   orange: "#F16B16",
   ink: "#16212D",
   sub: "#5B6B7A",
-  bg: "#F4F6F8",
-  border: "#E2E6EA",
+  bg: "#F3F5F8",
+  bgAlt: "#EDF1F5",
+  border: "#E4E8EC",
+  borderLight: "#EEF1F4",
   success: "#1E8A5F",
   danger: "#C63C3C",
   warning: "#D98B12",
+  cardShadow: "0 1px 2px rgba(16,30,45,0.04), 0 4px 16px rgba(16,30,45,0.05)",
+  cardShadowHover: "0 2px 6px rgba(16,30,45,0.06), 0 10px 28px rgba(16,30,45,0.09)",
 };
 // Applique les 2 couleurs principales personnalisées (Superviseur, page Réglages) à toute
 // l'application — C est un objet muté volontairement, pas remplacé, pour que chaque usage
@@ -1359,12 +1365,15 @@ function DemoBadge() {
 
 function StatCard({ label, value, unit, accent, icon: Icon }) {
   return (
-    <div className="somip-panel" style={{ padding: "16px 18px", borderLeft: `3px solid ${accent}`, flex: 1, minWidth: 190 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-        <span style={{ fontSize: 12.5, fontWeight: 600, color: C.sub }}>{label}</span>
-        <Icon size={16} color={accent} />
+    <div className="somip-panel somip-kpi-card" style={{ padding: "17px 18px", flex: 1, minWidth: 190, position: "relative", overflow: "hidden" }}>
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${accent}, ${accent}99)` }} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: C.sub, letterSpacing: ".01em" }}>{label}</span>
+        <div style={{ width: 30, height: 30, borderRadius: 9, background: `${accent}17`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+          <Icon size={15} color={accent} />
+        </div>
       </div>
-      <div className="somip-mono" style={{ fontSize: 24, fontWeight: 600, color: C.ink }}>
+      <div className="somip-mono" style={{ fontSize: 25, fontWeight: 700, color: C.ink, letterSpacing: "-0.01em" }}>
         {value}{unit && <span style={{ fontSize: 12.5, fontWeight: 500, color: C.sub, marginLeft: 5 }}>{unit}</span>}
       </div>
     </div>
@@ -1594,6 +1603,7 @@ export default function App() {
   const [settings, setSettings] = useState(SETTINGS_SEED);
   const [view, setView] = useState("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [notice, setNotice] = useState(null);
   const [noticeType, setNoticeType] = useState("success");
   const [syncStatus, setSyncStatus] = useState(SUPABASE_CONFIGURED ? "ok" : "unavailable");
@@ -2356,6 +2366,15 @@ export default function App() {
     { id: "historique", label: "Historique", icon: History, show: perms.canManage },
   ].filter((n) => n.show);
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
+  // Regroupement purement visuel de la même liste NAV, pour une barre latérale organisée par
+  // thème plutôt qu'une liste plate — aucune page ni fonctionnalité nouvelle, juste un
+  // classement plus clair (Accueil seul, puis Stocks, puis Sites/Rapports, puis Administration).
+  const NAV_GROUPS = [
+    { label: null, ids: ["accueil", "dashboard"] },
+    { label: "Stocks", ids: ["saisie", "inventaires", "vcf"] },
+    { label: null, ids: ["sites", "rapports"] },
+    { label: "Administration", ids: ["utilisateurs", "personnalisation", "historique"] },
+  ].map((g) => ({ ...g, items: g.ids.map((id) => NAV.find((n) => n.id === id)).filter(Boolean) })).filter((g) => g.items.length > 0);
   useEffect(() => { if (perms.isTotalEnergiesOnly && view === "dashboard") setView("inventaires"); }, [perms.isTotalEnergiesOnly]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (isSiteRestricted && view === "dashboard") setView("accueil"); }, [isSiteRestricted]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2414,42 +2433,53 @@ export default function App() {
   return (
     <div className="somip-app" style={{ display: "flex", height: "100%", minHeight: 640, background: C.bg }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@500;600&display=swap');
         .somip-app * { box-sizing: border-box; }
         .somip-app { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: ${C.ink}; }
         .somip-mono { font-family: 'IBM Plex Mono', 'SFMono-Regular', Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
         .somip-scroll { overflow-y: auto; }
         .somip-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
         .somip-scroll::-webkit-scrollbar-thumb { background: #C7CED6; border-radius: 4px; }
-        .somip-nav-item { display:flex; align-items:center; gap:10px; padding:9px 14px; border-radius:8px; color:#AEBBC8; cursor:pointer; font-size:13px; font-weight:500; transition: background .15s, color .15s; border:none; background:transparent; width:100%; text-align:left; }
-        .somip-nav-item:hover { background: rgba(255,255,255,0.07); color:#fff; }
-        .somip-nav-item.active { background:${C.blue}; color:#fff; }
-        .somip-btn { display:inline-flex; align-items:center; gap:6px; padding:9px 16px; border-radius:7px; font-size:13.5px; font-weight:600; cursor:pointer; border:1px solid transparent; transition:opacity .15s, background .15s; }
-        .somip-btn:hover { opacity:0.9; }
+        .somip-nav-section { color:#5C7288; font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; padding:16px 14px 6px; }
+        .somip-nav-item { display:flex; align-items:center; gap:10px; padding:9px 12px; border-radius:9px; color:#AEBBC8; cursor:pointer; font-size:13.5px; font-weight:500; transition: background .16s ease, color .16s ease, transform .1s ease; border:none; background:transparent; width:100%; text-align:left; position:relative; }
+        .somip-nav-item:hover { background: rgba(255,255,255,0.08); color:#fff; }
+        .somip-nav-item:active { transform: scale(0.98); }
+        .somip-nav-item.active { background: linear-gradient(90deg, ${C.blue}, ${C.blueDark}); color:#fff; box-shadow: 0 2px 10px rgba(0,113,189,0.35); }
+        .somip-nav-item.active::before { content:''; position:absolute; left:-14px; top:50%; transform:translateY(-50%); width:3px; height:18px; background:${C.orange}; border-radius:0 3px 3px 0; }
+        .somip-btn { display:inline-flex; align-items:center; gap:6px; padding:9px 16px; border-radius:9px; font-size:13.5px; font-weight:600; cursor:pointer; border:1px solid transparent; transition:opacity .15s ease, background .15s ease, transform .08s ease, box-shadow .15s ease; }
+        .somip-btn:hover { opacity:0.92; }
+        .somip-btn:active { transform: scale(0.98); }
         .somip-btn:disabled { opacity:0.45; cursor:not-allowed; }
-        .somip-btn-primary { background:${C.blue}; color:#fff; }
-        .somip-btn-secondary { background:${C.orange}; color:#fff; }
+        .somip-btn-primary { background: linear-gradient(135deg, ${C.blue}, ${C.blueDark}); color:#fff; box-shadow: 0 2px 8px rgba(0,113,189,0.28); }
+        .somip-btn-secondary { background: linear-gradient(135deg, ${C.orange}, #D85A0C); color:#fff; box-shadow: 0 2px 8px rgba(241,107,22,0.28); }
         .somip-btn-ghost { background:#fff; color:${C.ink}; border-color:${C.border}; }
         .somip-btn-ghost:hover { background:${C.bg}; opacity:1; }
-        .somip-input, .somip-select, .somip-textarea { width:100%; padding:9px 11px; border-radius:7px; border:1px solid ${C.border}; font-size:13.5px; font-family:inherit; color:${C.ink}; background:#fff; }
-        .somip-input:focus, .somip-select:focus, .somip-textarea:focus { outline:none; border-color:${C.blue}; box-shadow:0 0 0 3px rgba(0,113,189,0.12); }
+        .somip-input, .somip-select, .somip-textarea { width:100%; padding:9px 11px; border-radius:8px; border:1.5px solid ${C.border}; font-size:13.5px; font-family:inherit; color:${C.ink}; background:#fff; transition: border-color .15s ease, box-shadow .15s ease; }
+        .somip-input:focus, .somip-select:focus, .somip-textarea:focus { outline:none; border-color:${C.blue}; box-shadow:0 0 0 3.5px rgba(0,113,189,0.12); }
         .somip-label { font-size:12px; font-weight:600; color:${C.sub}; margin-bottom:5px; display:block; }
         .somip-table { width:100%; border-collapse:collapse; }
-        .somip-table th { text-align:left; font-size:11px; font-weight:600; color:${C.sub}; padding:9px 12px; border-bottom:1px solid ${C.border}; white-space:nowrap; }
-        .somip-table td { padding:11px 12px; font-size:13px; border-bottom:1px solid #EEF1F3; }
-        .somip-table tr:hover td { background:#FAFBFC; }
-        .somip-panel { background:#fff; border:1px solid ${C.border}; border-radius:10px; }
-        .somip-tab { padding:8px 16px; border-radius:7px; font-size:13px; font-weight:600; cursor:pointer; border:1px solid ${C.border}; background:#fff; color:${C.sub}; }
+        .somip-table th { text-align:left; font-size:10.5px; font-weight:700; letter-spacing:.03em; text-transform:uppercase; color:${C.sub}; padding:11px 12px; border-bottom:1.5px solid ${C.border}; white-space:nowrap; background:${C.bgAlt}; }
+        .somip-table th:first-child { border-top-left-radius:10px; }
+        .somip-table th:last-child { border-top-right-radius:10px; }
+        .somip-table td { padding:11px 12px; font-size:13px; border-bottom:1px solid ${C.borderLight}; transition: background .1s ease; }
+        .somip-table tr:hover td { background:#FAFBFD; }
+        .somip-table tr:last-child td { border-bottom:none; }
+        .somip-panel { background:#fff; border:1px solid ${C.border}; border-radius:14px; box-shadow: ${C.cardShadow}; }
+        .somip-tab { padding:8px 16px; border-radius:20px; font-size:13px; font-weight:600; cursor:pointer; border:1.5px solid ${C.border}; background:#fff; color:${C.sub}; transition: background .15s ease, color .15s ease, border-color .15s ease; }
+        .somip-tab:hover { border-color:${C.blue}; color:${C.blue}; }
         .somip-tab.active { background:${C.ink}; color:#fff; border-color:${C.ink}; }
-        .somip-fade { animation: somipFade .2s ease; }
-        @keyframes somipFade { from { opacity:0; transform:translateY(3px);} to {opacity:1; transform:none;} }
+        .somip-fade { animation: somipFade .25s ease; }
+        @keyframes somipFade { from { opacity:0; transform:translateY(4px);} to {opacity:1; transform:none;} }
         @keyframes somipSpin { to { transform: rotate(360deg); } }
         .somip-print-only { display: none; }
         .somip-mobile-toggle { display: none; }
-        .somip-mobile-backdrop { position: fixed; inset: 0; background: rgba(10,20,30,0.5); z-index: 35; }
+        .somip-mobile-backdrop { position: fixed; inset: 0; background: rgba(6,15,25,0.55); backdrop-filter: blur(1px); z-index: 35; }
+        .somip-kpi-card { transition: transform .18s ease, box-shadow .18s ease; }
+        .somip-kpi-card:hover { transform: translateY(-2px); box-shadow: ${C.cardShadowHover}; }
         @media (max-width: 860px) {
           .somip-mobile-toggle { display: inline-flex !important; }
-          .somip-sidebar { position: fixed !important; top: 0; left: 0; bottom: 0; z-index: 40; transform: translateX(-105%); transition: transform .22s ease; box-shadow: 6px 0 28px rgba(0,0,0,0.28); }
+          .somip-mobile-toggle-desktop { display: none !important; }
+          .somip-sidebar { position: fixed !important; top: 0; left: 0; bottom: 0; width: 226px !important; z-index: 40; transform: translateX(-105%); transition: transform .22s ease; box-shadow: 6px 0 28px rgba(0,0,0,0.28); }
           .somip-sidebar.open { transform: translateX(0); }
           .somip-header { padding: 12px 14px !important; }
           .somip-scroll { padding: 14px !important; }
@@ -2459,53 +2489,69 @@ export default function App() {
           .somip-print-only { display: block !important; }
           .somip-scroll { overflow: visible !important; height: auto !important; padding: 0 !important; }
           body, .somip-app { background: #fff !important; }
-          .somip-panel { border: none !important; }
+          .somip-panel { border: none !important; box-shadow: none !important; }
         }
       `}</style>
 
       {mobileNavOpen && <div className="somip-mobile-backdrop" onClick={() => setMobileNavOpen(false)} />}
 
       {/* Sidebar */}
-      <aside className={`somip-sidebar ${mobileNavOpen ? "open" : ""}`} style={{ width: 226, background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 6px 22px" }}>
+      <aside className={`somip-sidebar ${mobileNavOpen ? "open" : ""}`} style={{ width: sidebarCollapsed ? 76 : 226, transition: "width .18s ease", background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0, position: "relative" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 6px 22px", overflow: "hidden" }}>
           {settings.logoUrl ? (
-            <img src={settings.logoUrl} alt="Logo" style={{ width: 32, height: 32, borderRadius: 8, objectFit: "cover" }} />
+            <img src={settings.logoUrl} alt="Logo" style={{ width: 32, height: 32, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
           ) : (
-            <div style={{ width: 32, height: 32, borderRadius: 8, background: C.blue, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 32, height: 32, borderRadius: 8, background: `linear-gradient(135deg, ${C.blue}, ${C.blueDark})`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
               <Fuel size={17} color="#fff" />
             </div>
           )}
-          <div>
-            <div style={{ color: "#fff", fontWeight: 700, fontSize: 14.5, letterSpacing: 0.2 }}>SOMIP</div>
-            <div style={{ color: "#8CA0B4", fontSize: 10.5, fontWeight: 500 }}>Stock Gasoil</div>
-          </div>
+          {!sidebarCollapsed && (
+            <div style={{ whiteSpace: "nowrap" }}>
+              <div style={{ color: "#fff", fontWeight: 800, fontSize: 14.5, letterSpacing: 0.2 }}>SOMIP</div>
+              <div style={{ color: "#8CA0B4", fontSize: 10, fontWeight: 500 }}>La technologie des fluides</div>
+            </div>
+          )}
           <button className="somip-mobile-toggle" onClick={() => setMobileNavOpen(false)} style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", color: "#fff" }}>
             <X size={20} />
           </button>
         </div>
-        <nav style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          {NAV.map((n) => (
-            <button key={n.id} className={`somip-nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }}>
-              <n.icon size={16} />{n.label}
-            </button>
+        <nav className="somip-scroll" style={{ display: "flex", flexDirection: "column", gap: 3, overflowX: "hidden" }}>
+          {NAV_GROUPS.map((g, gi) => (
+            <React.Fragment key={gi}>
+              {g.label && !sidebarCollapsed && <div className="somip-nav-section">{g.label}</div>}
+              {g.label && sidebarCollapsed && <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 8px" }} />}
+              {g.items.map((n) => (
+                <button key={n.id} className={`somip-nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }} title={sidebarCollapsed ? n.label : undefined} style={sidebarCollapsed ? { justifyContent: "center" } : undefined}>
+                  <n.icon size={16} />{!sidebarCollapsed && n.label}
+                </button>
+              ))}
+            </React.Fragment>
           ))}
         </nav>
         <div style={{ flex: 1 }} />
-        <button className="somip-nav-item" onClick={signOut}>
-          <LogOut size={16} /> Se déconnecter
+        <button className="somip-nav-item" onClick={signOut} title={sidebarCollapsed ? "Se déconnecter" : undefined} style={sidebarCollapsed ? { justifyContent: "center" } : undefined}>
+          <LogOut size={16} /> {!sidebarCollapsed && "Se déconnecter"}
         </button>
-        <div style={{ color: "#5C7288", fontSize: 10.5, padding: "10px 6px 0" }}>Zone Sud-Est · Gabon</div>
+        <button
+          className="somip-mobile-toggle-desktop"
+          onClick={() => setSidebarCollapsed((v) => !v)}
+          title={sidebarCollapsed ? "Déplier le menu" : "Réduire le menu"}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 10, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.04)", borderRadius: 9, color: "#8CA0B4", cursor: "pointer", padding: "7px 12px", fontSize: 12 }}
+        >
+          {sidebarCollapsed ? <ChevronsRight size={15} /> : <><ChevronsLeft size={15} /> Réduire</>}
+        </button>
+        {!sidebarCollapsed && <div style={{ color: "#5C7288", fontSize: 10.5, padding: "10px 6px 0" }}>SOMIP — technologie des fluides</div>}
       </aside>
 
       {/* Main */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        <header className="somip-header" style={{ padding: "16px 28px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fff", gap: 16, flexWrap: "wrap" }}>
+        <header className="somip-header" style={{ padding: "16px 28px", borderBottom: `1px solid ${C.border}`, boxShadow: "0 1px 0 rgba(16,30,45,0.02), 0 2px 10px rgba(16,30,45,0.03)", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fff", gap: 16, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <button className="somip-mobile-toggle" onClick={() => setMobileNavOpen(true)} style={{ border: "none", background: "none", cursor: "pointer", padding: 4, color: C.ink }}>
               <Menu size={22} />
             </button>
             <div>
-              <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>{viewTitle}</h1>
+              <h1 style={{ margin: 0, fontSize: 18, fontWeight: 800 }}>{viewTitle}</h1>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <SyncIndicator status={syncStatus} lastSync={lastSync} />
                 {isOfflineStart && (
@@ -2522,12 +2568,18 @@ export default function App() {
             </div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <div style={{ fontSize: 12, color: C.sub, textAlign: "right" }}>
-              <div style={{ fontWeight: 700, color: C.ink }}>{currentUserName}</div>
-              <Badge color={C.blue}>{ROLE_LABELS[currentRole]}</Badge>
-            </div>
-            <div style={{ fontSize: 12.5, color: C.sub, textAlign: "right" }}>
+            <div style={{ fontSize: 12.5, color: C.sub, textAlign: "right", display: window.innerWidth > 640 ? "block" : "none" }}>
               {new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+            </div>
+            <div style={{ width: 1, height: 30, background: C.border, display: window.innerWidth > 640 ? "block" : "none" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <div style={{ width: 34, height: 34, borderRadius: "50%", background: `linear-gradient(135deg, ${C.blue}, ${C.blueDark})`, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 13, flexShrink: 0 }}>
+                {currentUserName.trim().slice(0, 1).toUpperCase()}
+              </div>
+              <div style={{ fontSize: 12, textAlign: "left" }}>
+                <div style={{ fontWeight: 700, color: C.ink }}>{currentUserName}</div>
+                <Badge color={C.blue}>{ROLE_LABELS[currentRole]}</Badge>
+              </div>
             </div>
           </div>
         </header>
@@ -2547,7 +2599,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px" }}>
+        <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px", background: `radial-gradient(circle at 100% 0%, rgba(0,113,189,0.05) 0%, transparent 42%), radial-gradient(circle at 0% 100%, rgba(241,107,22,0.04) 0%, transparent 38%), ${C.bg}` }}>
           {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} />}
