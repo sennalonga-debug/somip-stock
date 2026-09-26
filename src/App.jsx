@@ -4733,7 +4733,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     { id: "bons_cat", label: "Bon de livraison", show: canManage || isSiteRestricted, tabs: [
         { id: "bons", label: "Bons de livraison" },
       ] },
-    { id: "synthese_mois", label: "Synthèse journalières du mois", show: !isSiteRestricted, tabs: [
+    { id: "synthese_mois", label: "Synthèse journalières du mois", show: true, tabs: [
         { id: "synthese_mensuelle_site", label: "Gasoil" },
         { id: "synthese_mensuelle_site_15", label: "Gasoil — 15°C" },
         { id: "synthese_station_jour", label: "Station (site + camion)" },
@@ -4746,7 +4746,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
     { id: "bilan_cat", label: "Bilans matières", show: canManage || isSiteRestricted, tabs: [
         { id: "bilan", label: "Bilan Matières" },
       ] },
-    { id: "ecart_cat", label: "Gain/Perte du mois", show: canManage, tabs: [
+    { id: "ecart_cat", label: "Gain/Perte du mois", show: canManage || isSiteRestricted, tabs: [
         { id: "ecart_mensuel", label: "Gain/Perte du mois" },
       ] },
   ].filter((c) => c.show);
@@ -4780,24 +4780,25 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
         </div>
       )}
       {activeCategory && activeCategory.tabs.length === 1 && <div style={{ marginBottom: 4 }} />}
-      {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} />}
-      {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} />}
-      {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} />}
-      {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
-      {tab === "synthese_station_jour_15" && <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} />}
+      {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />}
+      {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />}
+      {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} assignedSiteIds={assignedSiteIds} />}
+      {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />}
+      {tab === "synthese_station_jour_15" && <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />}
       {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
       {tab === "bons" && (canManage || isSiteRestricted) && <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} />}
       {tab === "bilan" && (canManage || isSiteRestricted) && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} />}
-      {tab === "ecart_mensuel" && canManage && <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} />}
+      {tab === "ecart_mensuel" && (canManage || isSiteRestricted) && <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />}
       {tab === "transferts" && (canManage || isSiteRestricted) && <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} />}
     </div>
   );
 }
 
 /* ---- Synthèse journalière du mois, par site (esprit Excel : une ligne par jour) ---- */
-function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
-  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteIds }) {
+  const selectableSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+  const [siteId, setSiteId] = useState(selectableSites[0]?.id || "");
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
   const isTruck = !!site?.isMobile;
@@ -4879,7 +4880,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
         <Field label="Site">
           <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
+            {selectableSites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
           </select>
         </Field>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
@@ -4953,8 +4954,9 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires }) {
 }
 
 /* ---- Synthèse journalière du mois, par site — Base 15°C ---- */
-function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
-  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSiteIds }) {
+  const selectableSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+  const [siteId, setSiteId] = useState(selectableSites[0]?.id || "");
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
   const isTruck = !!site?.isMobile;
@@ -5015,7 +5017,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires }) {
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
         <Field label="Site">
           <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
+            {selectableSites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
           </select>
         </Field>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
@@ -5837,8 +5839,9 @@ function truckIntervalsForStation(assignments, stationId, boundsStart, boundsEnd
 }
 
 /* ---- Synthèse journalière — Station (site fixe + camion(s) rattaché(s), une ligne par jour) ---- */
-function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignments }) {
-  const stations = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignments, assignedSiteIds }) {
+  const stationsAll = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+  const stations = assignedSiteIds?.length ? stationsAll.filter((s) => assignedSiteIds.includes(s.id)) : stationsAll;
   const [stationId, setStationId] = useState(stations[0]?.id || "");
   const [month, setMonth] = useState(currentMonth());
   const station = sites.find((s) => s.id === stationId);
@@ -6022,8 +6025,9 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
 }
 
 /* ---- Synthèse journalière — Station (site + camion) — 15°C ---- */
-function StationDailyLedgerReport15({ sites, movements, inventaires, truckAssignments }) {
-  const stations = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+function StationDailyLedgerReport15({ sites, movements, inventaires, truckAssignments, assignedSiteIds }) {
+  const stationsAll = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+  const stations = assignedSiteIds?.length ? stationsAll.filter((s) => assignedSiteIds.includes(s.id)) : stationsAll;
   const [stationId, setStationId] = useState(stations[0]?.id || "");
   const [month, setMonth] = useState(currentMonth());
   const station = sites.find((s) => s.id === stationId);
@@ -6525,12 +6529,13 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
 }
 
 /* ---- Gain/Perte du mois — sites et camions (ex-Tableau de bord) ---- */
-function EcartMensuelReport({ sites, movements, inventaires }) {
+function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) {
   const [month, setMonth] = useState(currentMonth());
   const monthStartD = `${month}-01`;
   const [endDate, setEndDate] = useState(todayStr());
+  const scopedSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
 
-  const ecartRows = sites.map((s) => {
+  const ecartRows = scopedSites.map((s) => {
     let cur = new Date(monthStartD);
     const end = new Date(endDate);
     let ecartCumule = 0, daysWithJauge = 0;
@@ -6763,8 +6768,9 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
 }
 
 /* ---- Synthèse journalière du mois — Lubrifiants (une ligne par jour, esprit Excel) ---- */
-function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productStocks }) {
-  const [siteId, setSiteId] = useState(LUBRICANT_SITE_IDS[0]);
+function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productStocks, assignedSiteIds }) {
+  const selectableLubSiteIds = assignedSiteIds?.length ? LUBRICANT_SITE_IDS.filter((id) => assignedSiteIds.includes(id)) : LUBRICANT_SITE_IDS;
+  const [siteId, setSiteId] = useState(selectableLubSiteIds[0]);
   const [productId, setProductId] = useState(LUBRICANTS[0].id);
   const [month, setMonth] = useState(currentMonth());
   const site = sites.find((s) => s.id === siteId);
@@ -6815,7 +6821,7 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
       <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
         <Field label="Site">
           <select className="somip-select" style={{ maxWidth: 200 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {LUBRICANT_SITE_IDS.map((id) => <option key={id} value={id}>{sites.find((s) => s.id === id)?.name || id}</option>)}
+            {selectableLubSiteIds.map((id) => <option key={id} value={id}>{sites.find((s) => s.id === id)?.name || id}</option>)}
           </select>
         </Field>
         <Field label="Produit">
