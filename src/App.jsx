@@ -3265,7 +3265,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const receptionN = receptions.reduce((a, r) => a + (Number(r.quantite) || 0), 0);
   const retourN = (isLub || isMobileSite) ? 0 : (isLubSite ? retoursCuve.reduce((a, r) => a + (Number(r.quantite) || 0), 0) : (Number(retourQty) || 0));
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
-  const isMultiCompteurEntry = meters.length > 1 && !isLub;
+  // Tout site gasoil (fixe ou camion) passe par la liste répétable de compteurs — même avec un
+  // seul compteur configuré, ça permet d'en ajouter un second directement depuis la Saisie
+  // journalière, sans devoir d'abord le configurer sur la page Sites. Les lubrifiants restent à
+  // part (index simple, pas de notion de plusieurs postes).
+  const isMultiCompteurEntry = !isLub;
   const readingFlows = compteurReadings.map((r) => ({
     ...r,
     flow: r.indexAvant !== "" && r.indexApres !== "" ? Number(r.indexApres) - Number(r.indexAvant) : 0,
@@ -3625,14 +3629,15 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
               {compteurReadings.map((r, idx) => {
                 const lastIdx = r.compteur ? lastIndexForMeter(r.compteur) : undefined;
                 const mismatch = lastIdx !== undefined && r.indexAvant !== "" && Number(r.indexAvant) !== lastIdx;
+                const meterOptions = Array.from(new Set([...meters, ...compteurReadings.map((row) => row.compteur)]));
                 return (
                   <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                      {meters.length > 1 && (
+                      {compteurReadings.length > 1 && (
                         <div style={{ flex: 1 }}>
                           <Field label={isMobileSite ? "Poste" : "Compteur"}>
                             <select className="somip-select" value={r.compteur} onChange={(e) => setCompteurReadings((prev) => prev.map((row, i) => (i === idx ? { ...row, compteur: e.target.value } : row)))}>
-                              {meters.map((m) => <option key={m} value={m}>{m}</option>)}
+                              {meterOptions.map((m) => <option key={m} value={m}>{m}</option>)}
                             </select>
                           </Field>
                         </div>
@@ -3653,10 +3658,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                   </div>
                 );
               })}
-              {compteurReadings.length < meters.length && (
+              {compteurReadings.length < Math.max(meters.length, 6) && (
                 <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => {
                   const used = compteurReadings.map((r) => r.compteur);
-                  const next = meters.find((m) => !used.includes(m)) || meters[0];
+                  const next = meters.find((m) => !used.includes(m)) || `Compteur ${compteurReadings.length + 1}`;
                   setCompteurReadings((prev) => [...prev, { compteur: next, indexAvant: "", indexApres: "" }]);
                 }}>
                   <Plus size={13} /> Ajouter un 2e compteur (même journée)
