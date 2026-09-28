@@ -7974,11 +7974,16 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
     .sort((a, b) => (a.date < b.date ? 1 : (a.date > b.date ? -1 : (a.createdAt || "").localeCompare(b.createdAt || ""))));
 
   const productLabel = (m) => PRODUCTS.find((p) => p.id === (m.product || "gasoil"))?.label || m.product;
+  // Température et densité saisies avec la réception (absentes pour les lubrifiants ou si non saisies).
+  const hasVal = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
+  const fmtTemp = (v) => (hasVal(v) ? `${Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} °C` : "—");
+  const fmtDens = (v) => (hasVal(v) ? Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 4 }) : "—");
 
   const doExcel = () => exportToExcel(`SOMIP_Bons_Livraison.xlsx`, [{
     name: "Bons de livraison", rows: rows.map((m) => ({
       Date: m.date, Site: sites.find((s) => s.id === m.siteId)?.name || m.siteId, Produit: productLabel(m),
       "N° Bon": m.ref || "", "Quantité (L)": Math.round(m.quantity), "Quantité 15°C (L)": m.volumeCorrige15 ? Math.round(m.volumeCorrige15) : "",
+      "Température (°C)": hasVal(m.temperatureC) ? Number(m.temperatureC) : "", "Densité observée": hasVal(m.densiteObservee) ? Number(m.densiteObservee) : "",
     })),
   }]);
 
@@ -7986,10 +7991,11 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
     filename: "SOMIP_Bons_Livraison.pdf",
     title: "Registre des bons de livraison",
     period: start || end ? `Du ${start || "…"} au ${end || "…"}` : "Toutes les réceptions",
-    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C"],
+    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C", "Température", "Densité observée"],
     rows: rows.map((m) => [
       m.date, sites.find((s) => s.id === m.siteId)?.name || m.siteId, productLabel(m),
       m.ref || "—", `+${fmt(m.quantity)} L`, m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—",
+      fmtTemp(m.temperatureC), fmtDens(m.densiteObservee),
     ]),
   });
 
@@ -8011,9 +8017,9 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th></tr></thead>
+            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température</th><th style={{ textAlign: "right" }}>Densité observée</th></tr></thead>
             <tbody>
-              {rows.length === 0 && <EmptyRow colSpan={6} text="Aucune réception trouvée." />}
+              {rows.length === 0 && <EmptyRow colSpan={8} text="Aucune réception trouvée." />}
               {rows.map((m) => (
                 <tr key={m.id}>
                   <td className="somip-mono">{m.date}</td>
@@ -8022,13 +8028,15 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
                   <td className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{m.ref || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+{fmt(m.quantity)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmtTemp(m.temperatureC)}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmtDens(m.densiteObservee)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          {rows.length} bon(s) listé(s). Les "Chargements" créés automatiquement côté camion (miroir d'une sortie vers camion) apparaissent aussi ici — repérables par leur mention "Chargement automatique depuis...".
+          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : celles saisies avec la réception ; « — » si elles n'ont pas été renseignées.
         </p>
       </div>
     </div>
