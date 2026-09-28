@@ -11,7 +11,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import pptxgen from "pptxgenjs";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine, Legend,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine, Legend, AreaChart, Area,
 } from "recharts";
 import { supabase, SUPABASE_CONFIGURED } from "./supabaseClient.js";
 
@@ -862,17 +862,37 @@ async function exportInventaireOfficielToPdf(inv, site) {
 
 // Envoie une ou plusieurs photos vers Supabase Storage (bucket "somip-photos") et renvoie
 // leurs URLs publiques. Utilisé pour justifier une perte (Stock fin) ou illustrer un Bilan Matières.
-async function uploadPhotos(files, folder) {
+async function uploadPhotos(files, folder, options = {}) {
   const urls = [];
   for (const file of files) {
     const ext = (file.name.split(".").pop() || "jpg").toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
     const path = `${folder}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const { error } = await supabase.storage.from("somip-photos").upload(path, file, { cacheControl: "3600", upsert: false });
+    const { error } = await supabase.storage.from("somip-photos").upload(path, file, { cacheControl: options.cacheControl || "3600", upsert: false });
     if (error) throw new Error(`Échec de l'envoi de la photo "${file.name}" : ${error.message}`);
     const { data } = supabase.storage.from("somip-photos").getPublicUrl(path);
     urls.push(data.publicUrl);
   }
   return urls;
+}
+// Réduit une photo avant envoi (max ~1400 px, JPEG) : une photo de téléphone pèse plusieurs Mo,
+// et chaque ouverture de la page d'accueil la retélécharge — on garde donc ~150-300 Ko pour ne
+// pas peser sur le quota de bande passante Supabase.
+async function resizeImageFile(file, maxSide = 1400, quality = 0.8) {
+  if (!file || !String(file.type).startsWith("image/")) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * scale);
+    const h = Math.round(bitmap.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, w, h);
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+    if (!blob) return file;
+    return new File([blob], `${(file.name || "photo").replace(/\.[^.]+$/, "")}.jpg`, { type: "image/jpeg" });
+  } catch (e) {
+    return file;
+  }
 }
 function dataUrlToFile(dataUrl, filename) {
   const [header, base64] = dataUrl.split(",");
@@ -1205,7 +1225,7 @@ function permsFor(role) {
 /* ------------------------------------------------------------------ */
 const numOrUndef = (v) => (v === null || v === undefined ? undefined : Number(v));
 
-const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile, active: r.active !== false, enginsEnabled: !!r.engins_enabled, enginsSourceId: r.engins_source_id || null });
+const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile, active: r.active !== false, enginsEnabled: !!r.engins_enabled, enginsSourceId: r.engins_source_id || null, photoUrl: r.photo_url || null });
 const siteToRow = (s) => ({ id: s.id, code: s.code, name: s.name, capacity: s.capacity, stock_initial: s.stockInitial, is_mobile: !!s.isMobile });
 const rowToSiteEngin = (r) => ({ id: r.id, siteId: r.site_id, name: r.name, code: r.code || "", type: r.type || "" });
 const siteEnginToRow = (e) => ({ site_id: e.siteId, name: e.name, code: e.code || null, type: e.type || null });
@@ -1621,6 +1641,7 @@ export default function App() {
   const [view, setView] = useState("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [siteDashId, setSiteDashId] = useState("");
   const [notice, setNotice] = useState(null);
   const [noticeType, setNoticeType] = useState("success");
   const [syncStatus, setSyncStatus] = useState(SUPABASE_CONFIGURED ? "ok" : "unavailable");
@@ -2388,6 +2409,30 @@ export default function App() {
     appendAudit(active ? "Réactivation site" : "Désactivation site", target?.name || "");
     flash(active ? "Site réactivé." : "Site désactivé.");
   });
+  // Photo d'un site (file = nouvelle photo, null = retirer). Réservé au Superviseur (droit d'écriture sur sites).
+  const setSitePhoto = (siteId, file) => withSync(async () => {
+    const target = sites.find((s) => s.id === siteId);
+    let url = null;
+    if (file) {
+      const small = await resizeImageFile(file);
+      // Nom unique à chaque envoi -> on peut laisser les navigateurs la garder en cache longtemps.
+      [url] = await uploadPhotos([small], `sites/${siteId}`, { cacheControl: "31536000" });
+    }
+    const { error } = await supabase.from("sites").update({ photo_url: url }).eq("id", siteId);
+    if (error) throw error;
+    const oldUrl = target?.photoUrl;
+    setSites((prev) => prev.map((s) => (s.id === siteId ? { ...s, photoUrl: url } : s)));
+    // Ménage : on supprime l'ancien fichier s'il en existait un (sans bloquer si ça échoue).
+    if (oldUrl && oldUrl !== url) {
+      try {
+        const marker = "/somip-photos/";
+        const path = decodeURIComponent(oldUrl.slice(oldUrl.indexOf(marker) + marker.length));
+        await supabase.storage.from("somip-photos").remove([path]);
+      } catch (e) { /* pas grave */ }
+    }
+    appendAudit(url ? "Photo de site" : "Retrait photo de site", target?.name || "");
+    flash(url ? "Photo du site enregistrée." : "Photo du site retirée.");
+  });
   const toggleSiteEnginsEnabled = (siteId, enabled) => withSync(async () => {
     const { error } = await supabase.from("sites").update({ engins_enabled: enabled }).eq("id", siteId);
     if (error) throw error;
@@ -2473,9 +2518,13 @@ export default function App() {
     flash("Saisie supprimée.");
   });
 
+  // Ouvre le tableau de bord détaillé d'un site précis (depuis l'accueil ou le tableau de bord général).
+  const openSiteDashboard = (id) => { setSiteDashId(id); setView("dashboard_site"); setMobileNavOpen(false); };
+
   const NAV = [
     { id: "accueil", label: "Accueil", icon: LayoutDashboard, show: isSiteRestricted },
     { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
+    { id: "dashboard_site", label: "Tableau de bord par site", icon: Factory, show: !perms.isTotalEnergiesOnly },
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
     { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
     { id: "engins", label: "Saisie par engins", icon: Truck, show: !perms.isTotalEnergiesOnly && sites.some((s) => s.enginsEnabled && s.active !== false && (!(profile?.assignedSiteIds || []).length || (profile?.assignedSiteIds || []).includes(s.id))) },
@@ -2493,7 +2542,7 @@ export default function App() {
   // thème plutôt qu'une liste plate — aucune page ni fonctionnalité nouvelle, juste un
   // classement plus clair : Opérations, Documents & suivis, Rapports, Administration.
   const NAV_GROUPS = [
-    { label: "Opérations", ids: ["accueil", "dashboard", "saisie", "engins", "inventaires", "vcf"] },
+    { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "saisie", "engins", "inventaires", "vcf"] },
     { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_lubrifiants"] },
     { label: null, ids: ["rapports"] },
     { label: "Administration", ids: ["sites", "utilisateurs", "personnalisation", "historique"] },
@@ -2745,9 +2794,10 @@ export default function App() {
             </svg>
           </div>
           <div style={{ position: "relative", zIndex: 1 }}>
-          {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} />}
-          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} />}
+          {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} onOpenSite={openSiteDashboard} />}
+          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} onOpenSite={openSiteDashboard} />}
+          {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} />}
@@ -2767,8 +2817,80 @@ export default function App() {
 /* ------------------------------------------------------------------ */
 /* Dashboard                                                            */
 /* ------------------------------------------------------------------ */
+/* ---- Bandeau d'accueil : diaporama des photos de sites (ou bandeau SOMIP à défaut) ---- */
+function SitesHero({ sites, stockOf, canManage, onOpenSite }) {
+  const [failed, setFailed] = useState({});
+  const withPhoto = sites.filter((s) => s.photoUrl && s.active !== false && !failed[s.photoUrl]);
+  const [idx, setIdx] = useState(0);
+  const reducedMotion = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  useEffect(() => {
+    if (withPhoto.length < 2 || reducedMotion) return undefined;
+    const t = setInterval(() => setIdx((i) => i + 1), 6500);
+    return () => clearInterval(t);
+  }, [withPhoto.length, reducedMotion]);
+
+  const wrap = { position: "relative", borderRadius: 16, overflow: "hidden", marginBottom: 20, boxShadow: C.cardShadow };
+
+  if (withPhoto.length === 0) {
+    return (
+      <div className="somip-no-print" style={{ ...wrap, padding: "26px 28px", background: `linear-gradient(120deg, ${C.navy}, ${C.blue})`, color: "#fff" }}>
+        <div style={{ position: "absolute", top: -50, right: -30, width: 200, height: 200, borderRadius: "50%", background: "rgba(255,255,255,0.07)" }} />
+        <div style={{ position: "relative" }}>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>Gestion de Stock SOMIP</div>
+          <div style={{ fontSize: 13.5, opacity: 0.85, marginTop: 4 }}>La technologie des fluides.</div>
+          {canManage && <div style={{ fontSize: 12, opacity: 0.7, marginTop: 10 }}>Astuce : ajoute une photo à chaque site depuis la page Sites (icône image) pour animer cette page.</div>}
+        </div>
+      </div>
+    );
+  }
+
+  const n = withPhoto.length;
+  const current = withPhoto[((idx % n) + n) % n];
+  const stock = stockOf ? stockOf(current.id, "gasoil") : null;
+  const fill = stock !== null && current.capacity ? Math.round((stock / current.capacity) * 100) : null;
+  const go = (delta) => setIdx((i) => i + delta);
+  const arrow = { position: "absolute", top: "50%", transform: "translateY(-50%)", width: 32, height: 32, borderRadius: "50%", border: "none", background: "rgba(10,31,51,0.45)", color: "#fff", cursor: "pointer", fontSize: 18, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" };
+
+  return (
+    <div className="somip-no-print" style={{ ...wrap, height: "clamp(150px, 24vw, 240px)", background: C.navy }}>
+      <img
+        key={current.photoUrl}
+        src={current.photoUrl}
+        alt={current.name}
+        onError={() => setFailed((f) => ({ ...f, [current.photoUrl]: true }))}
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", animation: "somipFade .7s ease" }}
+      />
+      <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(6,20,34,0.05) 35%, rgba(6,20,34,0.78) 100%)" }} />
+      <div style={{ position: "absolute", left: 20, right: 20, bottom: 14, color: "#fff", display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: "clamp(16px, 2.4vw, 22px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>{current.name}</div>
+          {stock !== null && (
+            <div className="somip-mono" style={{ fontSize: 12.5, opacity: 0.92, marginTop: 2 }}>
+              Stock actuel : {fmt(stock)} L{fill !== null ? ` (${fill} %)` : ""}
+            </div>
+          )}
+          {onOpenSite && (
+            <button onClick={() => onOpenSite(current.id)} style={{ marginTop: 8, padding: "5px 12px", borderRadius: 16, border: "1px solid rgba(255,255,255,0.55)", background: "rgba(255,255,255,0.14)", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              Voir le tableau de bord du site →
+            </button>
+          )}
+        </div>
+        {n > 1 && (
+          <div style={{ display: "flex", gap: 6 }}>
+            {withPhoto.map((s, i) => (
+              <button key={s.id} onClick={() => setIdx(i)} aria-label={s.name} style={{ width: i === ((idx % n) + n) % n ? 20 : 8, height: 8, borderRadius: 4, border: "none", cursor: "pointer", background: i === ((idx % n) + n) % n ? "#fff" : "rgba(255,255,255,0.5)", transition: "width .2s ease" }} />
+            ))}
+          </div>
+        )}
+      </div>
+      {n > 1 && <button onClick={() => go(-1)} aria-label="Photo précédente" style={{ ...arrow, left: 10 }}>‹</button>}
+      {n > 1 && <button onClick={() => go(1)} aria-label="Photo suivante" style={{ ...arrow, right: 10 }}>›</button>}
+    </div>
+  );
+}
+
 /* ---- Accueil — vue simplifiée pour un compte limité à un ou plusieurs sites ---- */
-function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds }) {
+function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds, onOpenSite }) {
   const mySites = sites.filter((s) => assignedSiteIds.includes(s.id));
   const today = todayStr();
   const yesterday = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
@@ -2802,6 +2924,7 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds 
 
   return (
     <div className="somip-fade">
+      <SitesHero sites={mySites} stockOf={stockOf} canManage={false} onOpenSite={onOpenSite} />
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12, marginBottom: 18 }}>
         {rows.map((r) => (
           <StatCard key={r.site.id} label={r.site.name} value={fmt(r.stock)} unit="L" accent={C.blue} icon={r.site.isMobile ? Truck : Factory} />
@@ -2828,7 +2951,7 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds 
         <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>{mySites.length > 1 ? "Mes sites" : "Mon site"}</h3>
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {rows.map((r) => (
-            <div key={r.site.id} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
+            <div key={r.site.id} onClick={onOpenSite ? () => onOpenSite(r.site.id) : undefined} title={onOpenSite ? "Ouvrir le tableau de bord de ce site" : undefined} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14, cursor: onOpenSite ? "pointer" : "default" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                 <span style={{ fontWeight: 700 }}>{r.site.name} {!r.site.isMobile && <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span>}</span>
                 <span className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{fmt(r.stock)} L{r.fillPct !== null ? ` (${r.fillPct}%)` : ""}</span>
@@ -2845,7 +2968,187 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds 
   );
 }
 
-function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments }) {
+/* ---- Tableau de bord d'un site (ou d'un camion) : vue détaillée, en plus du tableau de bord général ---- */
+function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssignments, assignedSiteIds, siteId, onSelectSite }) {
+  const accessible = sites.filter((s) => s.active !== false && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
+  const site = accessible.find((s) => s.id === siteId) || accessible[0] || null;
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => { setImgFailed(false); }, [site?.id, site?.photoUrl]);
+
+  // Calculs regroupés et mémorisés : la synchronisation périodique re-rend souvent la page.
+  const d = useMemo(() => {
+    if (!site) return null;
+    const month = currentMonth();
+    const monthStartD = `${month}-01`;
+    const todayD = todayStr();
+    const gas = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil");
+    const inMonth = gas.filter((m) => m.date.startsWith(month));
+    const receptionsMonth = sumQty(inMonth, ["reception"]);
+    const ventesMonth = sumQty(inMonth, ["sortie"]);
+    const chargementsMonth = site.isMobile ? 0 : sumQty(inMonth, ["sortie_camion"]);
+
+    // Gain/Perte cumulé du mois : exactement le calcul du Tableau de bord général et des Rapports.
+    let ecartCumule = 0, daysWithJauge = 0;
+    let cur = new Date(monthStartD);
+    const end = new Date(todayD);
+    while (cur <= end) {
+      const day = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+      const stockDebut = stockBeforeDate(site, movements, day, inventaires);
+      const dayMovs = gas.filter((m) => m.date === day);
+      const reception = sumQty(dayMovs, ["reception"]);
+      const ventes = sumQty(dayMovs, ["sortie"]);
+      const chargement = site.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
+      const retourCamions = site.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
+      const theorique = stockDebut + reception + retourCamions - ventes - chargement;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === day));
+      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    // Courbe du stock en fin de journée sur 30 jours (stock au début du lendemain).
+    const trend = [];
+    for (let k = 29; k >= 0; k--) {
+      const day = new Date(); day.setDate(day.getDate() - k);
+      const next = new Date(day); next.setDate(next.getDate() + 1);
+      const nextStr = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
+      trend.push({ label: `${pad2(day.getDate())}/${pad2(day.getMonth() + 1)}`, stock: Math.round(stockBeforeDate(site, movements, nextStr, inventaires)) });
+    }
+
+    const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil"));
+    const yest = new Date(); yest.setDate(yest.getDate() - 1);
+    const yestStr = `${yest.getFullYear()}-${pad2(yest.getMonth() + 1)}-${pad2(yest.getDate())}`;
+    const hasYesterdayJauge = inventaires.some((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === yestStr);
+    const recent = movements.filter((m) => m.siteId === site.id).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || "").localeCompare(a.createdAt || ""))).slice(0, 10);
+    const trucksToday = site.isMobile ? [] : trucksAssignedAt(truckAssignments || [], site.id, todayD).map((id) => sites.find((s) => s.id === id)).filter(Boolean);
+    return { receptionsMonth, ventesMonth, chargementsMonth, ecartCumule, daysWithJauge, trend, lastInv, hasYesterdayJauge, recent, trucksToday };
+  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites]);
+
+  if (!site || !d) {
+    return (
+      <div className="somip-fade somip-panel" style={{ padding: 22 }}>
+        <p style={{ margin: 0, fontSize: 13, color: C.sub }}>Aucun site disponible pour ce compte.</p>
+      </div>
+    );
+  }
+
+  const stock = stockOf(site.id, "gasoil");
+  const pct = site.capacity ? (stock / site.capacity) * 100 : 0;
+  const level = pct < 20 ? C.danger : pct < 35 ? C.warning : C.blue;
+  const fixed = accessible.filter((s) => !s.isMobile);
+  const trucks = accessible.filter((s) => s.isMobile);
+  const HeroIcon = site.isMobile ? Truck : Factory;
+
+  return (
+    <div className="somip-fade">
+      <div className="somip-no-print" style={{ position: "relative", borderRadius: 16, overflow: "hidden", marginBottom: 18, minHeight: "clamp(150px, 22vw, 210px)", background: `linear-gradient(120deg, ${C.navy}, ${C.blue})`, boxShadow: C.cardShadow }}>
+        {site.photoUrl && !imgFailed ? (
+          <img src={site.photoUrl} alt={site.name} onError={() => setImgFailed(true)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+        ) : (
+          <HeroIcon size={120} color="rgba(255,255,255,0.10)" style={{ position: "absolute", right: 24, bottom: 10 }} />
+        )}
+        <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(6,20,34,0.15) 20%, rgba(6,20,34,0.82) 100%)" }} />
+        <div style={{ position: "relative", padding: "16px 20px", minHeight: "inherit", display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 24, color: "#fff" }}>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <select className="somip-select" style={{ width: "auto", maxWidth: 260 }} value={site.id} onChange={(e) => onSelectSite && onSelectSite(e.target.value)} aria-label="Choisir un site">
+              {fixed.length > 0 && <optgroup label="Sites">{fixed.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>}
+              {trucks.length > 0 && <optgroup label="Camions">{trucks.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</optgroup>}
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "clamp(18px, 2.8vw, 26px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>{site.name}</div>
+              <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{site.isMobile ? "Camion" : `Site ${site.code}`} · capacité {fmt(site.capacity)} L</div>
+            </div>
+            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Stock actuel<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(stock)} L</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+        <StatCard label="Taux de remplissage" value={Math.round(pct)} unit="%" accent={level} icon={Fuel} />
+        <StatCard label="Réceptions (mois)" value={fmt(d.receptionsMonth)} unit="L" accent={C.success} icon={ArrowDownCircle} />
+        <StatCard label={site.isMobile ? "Sorties (mois)" : "Ventes (mois)"} value={fmt(d.ventesMonth)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
+        {!site.isMobile && d.chargementsMonth > 0 && <StatCard label="Chargements camions (mois)" value={fmt(d.chargementsMonth)} unit="L" accent={C.blue} icon={Truck} />}
+        <StatCard
+          label="Gain/Perte (mois)"
+          value={d.daysWithJauge > 0 ? `${d.ecartCumule >= 0 ? "+" : ""}${fmt(d.ecartCumule)}` : "—"}
+          unit={d.daysWithJauge > 0 ? "L" : ""}
+          accent={d.daysWithJauge === 0 ? C.sub : d.ecartCumule < 0 ? C.danger : d.ecartCumule > 0 ? C.success : C.sub}
+          icon={TrendingDown}
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18, minHeight: 320 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock en fin de journée — 30 derniers jours</h3>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Stock théorique reconstitué à partir des mouvements et des jauges saisies.</p>
+          <ResponsiveContainer width="100%" height={250}>
+            <AreaChart data={d.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
+              <defs>
+                <linearGradient id="siteStockFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={C.blue} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={C.blue} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} interval={4} />
+              <YAxis tick={{ fontSize: 10.5, fill: C.sub }} axisLine={false} tickLine={false} domain={[0, Math.max(site.capacity || 0, ...d.trend.map((t) => t.stock), 1)]} tickFormatter={(v) => fmt(v)} />
+              <Tooltip formatter={(v) => [`${fmt(v)} L`, "Stock"]} contentStyle={{ fontSize: 12.5, borderRadius: 8, border: `1px solid ${C.border}` }} />
+              <Area type="monotone" dataKey="stock" stroke={C.blue} strokeWidth={2} fill="url(#siteStockFill)" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
+          <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Situation</h3>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 12.5 }}>
+            <span style={{ fontWeight: 600 }}>Remplissage</span>
+            <span className="somip-mono" style={{ color: C.sub }}>{fmt(stock)} / {fmt(site.capacity)} L</span>
+          </div>
+          <GaugeBar pct={pct} color={level} />
+          <div style={{ marginTop: 14, fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
+            <div>Dernière jauge : {d.lastInv ? <strong style={{ color: C.ink }}>{fmt(d.lastInv.stockPhysique)} L — {d.lastInv.date}</strong> : <strong style={{ color: C.ink }}>aucune</strong>}</div>
+            {!d.hasYesterdayJauge && <div style={{ color: C.warning, fontWeight: 600 }}>⚠ Stock fin de la veille pas encore saisi.</div>}
+          </div>
+          {d.trucksToday.length > 0 && (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><Truck size={13} color={C.blue} />Camions rattachés aujourd'hui</div>
+              {d.trucksToday.map((t) => (
+                <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "4px 0" }}>
+                  <span style={{ fontWeight: 600 }}>{t.name}</span>
+                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockOf(t.id, "gasoil"))} L</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
+        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements — {site.name}</h3>
+        <table className="somip-table">
+          <thead><tr><th>Date</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
+          <tbody>
+            {d.recent.length === 0 && <EmptyRow colSpan={3} text="Aucun mouvement enregistré pour ce site." />}
+            {d.recent.map((m) => {
+              const meta = TYPE_META[m.type];
+              if (!meta) return null;
+              return (
+                <tr key={m.id}>
+                  <td className="somip-mono">{m.date}</td>
+                  <td><Badge color={meta.color}>{meta.label}</Badge>{m.isDemo && <DemoBadge />}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>{meta.sign} {fmt(m.quantity)} L</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments, onOpenSite }) {
   const month = currentMonth();
   const rows = sites.map((s) => {
     const stock = stockOf(s.id);
@@ -2870,7 +3173,6 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   // à chacun, indépendant — comme demandé, tout dans un même tableau).
   const monthStartD = `${month}-01`;
   const todayD = todayStr();
-  const bigLosses = [];
   const ecartRows = sites.map((s) => {
     let cur = new Date(monthStartD);
     const end = new Date(todayD);
@@ -2888,15 +3190,12 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       if (inv) {
         const dayEcart = inv.stockPhysique - theorique;
         ecartCumule += dayEcart; daysWithJauge++;
-        // Alerte perte > 500 L en une seule journée (site ou camion).
-        if (dayEcart <= -500) bigLosses.push({ site: s, date: d, ecart: dayEcart });
       }
       cur.setDate(cur.getDate() + 1);
     }
     return { site: s, ecartCumule, daysWithJauge };
   }).sort((a, b) => a.ecartCumule - b.ecartCumule);
   const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
-  bigLosses.sort((a, b) => a.ecart - b.ecart);
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
   // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
@@ -2920,6 +3219,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 
   return (
     <div className="somip-fade">
+      <SitesHero sites={sites} stockOf={stockOf} canManage={canManage} onOpenSite={onOpenSite} />
       <p style={{ marginTop: -8, marginBottom: 14, fontSize: 13, color: C.sub }}>
         Vos données sont sauvegardées automatiquement et restent disponibles après fermeture ou actualisation de la page.
         Les capacités et stocks initiaux des sites restent des valeurs à vérifier/ajuster depuis la page Sites.
@@ -2956,23 +3256,6 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Gain/Perte réseau (mois)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
       </div>
 
-      {bigLosses.length > 0 && (
-        <div className="somip-panel" style={{ marginBottom: 18, padding: 18, borderLeft: `4px solid ${C.danger}` }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14, color: C.danger, display: "flex", alignItems: "center", gap: 8 }}>
-            <AlertTriangle size={17} /> Perte de plus de 500 L en une journée
-          </h3>
-          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Mois en cours — à vérifier en priorité.</p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {bigLosses.map((b, i) => (
-              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.bg, borderRadius: 6, padding: "8px 12px", fontSize: 13 }}>
-                <span><strong>{b.site.name}</strong> {!b.site.isMobile && <span style={{ color: C.sub }}>({b.site.code})</span>} — {b.date}</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: C.danger }}>{fmt(b.ecart)} L</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
           <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Niveau de stock par site</h3>
@@ -2980,7 +3263,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
             {rows.map((r) => (
               <div key={r.id}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 12.5 }}>
-                  <span style={{ fontWeight: 600 }}>{r.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.code})</span></span>
+                  <span onClick={onOpenSite ? () => onOpenSite(r.id) : undefined} title={onOpenSite ? "Ouvrir le tableau de bord de ce site" : undefined} style={{ fontWeight: 600, cursor: onOpenSite ? "pointer" : "default", color: onOpenSite ? C.blue : undefined }}>{r.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.code})</span>{onOpenSite ? " ›" : ""}</span>
                   <span className="somip-mono" style={{ color: C.sub }}>{fmt(r.stock)} / {fmt(r.capacity)} L</span>
                 </div>
                 <GaugeBar pct={r.pct} color={statusColor[r.status]} />
@@ -3033,7 +3316,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter, toggleSiteEnginsEnabled, setSiteEnginsSource, applyEnginsGroup, siteEngins, addSiteEngin, importSiteEngins, removeSiteEngin }) {
+function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter, toggleSiteEnginsEnabled, setSiteEnginsSource, applyEnginsGroup, siteEngins, addSiteEngin, importSiteEngins, removeSiteEngin, setSitePhoto }) {
   const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -3181,12 +3464,28 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
                   ) : (
                     <>
                       <td style={{ fontWeight: 700, color: C.blue }}>{s.code}</td>
-                      <td>{s.name}{s.isMobile && <span style={{ marginLeft: 6 }}><Badge color={C.orange}>Camion</Badge></span>}</td>
+                      <td>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {s.photoUrl ? (
+                            <img src={s.photoUrl} alt="" loading="lazy" style={{ width: 34, height: 26, objectFit: "cover", borderRadius: 5, border: `1px solid ${C.border}`, flexShrink: 0 }} />
+                          ) : (
+                            <div style={{ width: 34, height: 26, borderRadius: 5, background: C.bgAlt, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}><ImagePlus size={13} color={C.sub} /></div>
+                          )}
+                          <span>{s.name}{s.isMobile && <span style={{ marginLeft: 6 }}><Badge color={C.orange}>Camion</Badge></span>}</span>
+                        </div>
+                      </td>
                       <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(s.capacity)}</td>
                       <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(stock)}</td>
                       <td>{s.active === false ? <Badge color={C.danger}>Désactivé</Badge> : <Badge color={C.success}>Actif</Badge>}</td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
                         <button onClick={() => startEdit(s)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
+                        <label title={s.photoUrl ? "Changer la photo du site" : "Ajouter une photo du site"} style={{ display: "inline-flex", cursor: "pointer", padding: 5 }}>
+                          <ImagePlus size={14} color={C.blue} />
+                          <input type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ""; if (f) setSitePhoto(s.id, f); }} />
+                        </label>
+                        {s.photoUrl && (
+                          <button title="Retirer la photo du site" onClick={() => { if (window.confirm(`Retirer la photo de ${s.name} ?`)) setSitePhoto(s.id, null); }} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><X size={14} color={C.sub} /></button>
+                        )}
                         <button onClick={() => toggleSiteActive(s.id, s.active === false)} title={s.active === false ? "Réactiver" : "Désactiver"} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
                           {s.active === false ? <CheckCircle2 size={14} color={C.success} /> : <CloudOff size={14} color={C.warning} />}
                         </button>
@@ -7290,10 +7589,14 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [search, setSearch] = useState("");
-  const selectableSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+  // Un bon de livraison concerne la réception de carburant d'un SITE ; les camions n'en ont pas
+  // (leur « réception » est un simple chargement à une station), ils sont donc exclus ici.
+  const fixedSiteIds = new Set(sites.filter((s) => !s.isMobile).map((s) => s.id));
+  const selectableSites = sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
 
   const rows = movements
-    .filter((m) => m.type === "reception")
+    .filter((m) => m.type === "reception" && fixedSiteIds.has(m.siteId))
+    .filter((m) => !assignedSiteIds?.length || assignedSiteIds.includes(m.siteId))
     .filter((m) => filterSite === "all" || m.siteId === filterSite)
     .filter((m) => (!start || m.date >= start) && (!end || m.date <= end))
     .filter((m) => !search.trim() || (m.ref || "").toLowerCase().includes(search.trim().toLowerCase()))
