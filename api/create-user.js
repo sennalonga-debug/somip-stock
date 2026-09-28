@@ -42,7 +42,7 @@ export default async function handler(req, res) {
     return;
   }
   const { data: requesterProfile, error: profErr } = await admin
-    .from("profiles").select("role").eq("id", userData.user.id).maybeSingle();
+    .from("profiles").select("*").eq("id", userData.user.id).maybeSingle();
   const detectedRole = requesterProfile?.role ? String(requesterProfile.role).trim().toLowerCase() : null;
   if (profErr) {
     res.status(500).json({ error: `Erreur de lecture du profil : ${profErr.message}` });
@@ -60,6 +60,11 @@ export default async function handler(req, res) {
   }
   if (!VALID_ROLES.includes(role)) {
     res.status(400).json({ error: "Rôle invalide." });
+    return;
+  }
+  // Créer un compte Superviseur est réservé aux Administrateurs.
+  if (role === "superviseur" && !requesterProfile?.is_admin) {
+    res.status(403).json({ error: "Seul un Administrateur peut créer un compte Superviseur." });
     return;
   }
   const pw = String(password);
