@@ -1642,6 +1642,7 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [siteDashId, setSiteDashId] = useState("");
+  const [lubDashSiteId, setLubDashSiteId] = useState("");
   const [notice, setNotice] = useState(null);
   const [noticeType, setNoticeType] = useState("success");
   const [syncStatus, setSyncStatus] = useState(SUPABASE_CONFIGURED ? "ok" : "unavailable");
@@ -2525,6 +2526,7 @@ export default function App() {
     { id: "accueil", label: "Accueil", icon: LayoutDashboard, show: isSiteRestricted },
     { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "dashboard_site", label: "Tableau de bord par site", icon: Factory, show: !perms.isTotalEnergiesOnly },
+    { id: "dashboard_lub", label: "Tableau de bord lubrifiants", icon: Fuel, show: !perms.isTotalEnergiesOnly && sites.some((s) => LUBRICANT_SITE_IDS.includes(s.id) && s.active !== false && (!(profile?.assignedSiteIds || []).length || (profile?.assignedSiteIds || []).includes(s.id))) },
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
     { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
     { id: "engins", label: "Saisie par engins", icon: Truck, show: !perms.isTotalEnergiesOnly && sites.some((s) => s.enginsEnabled && s.active !== false && (!(profile?.assignedSiteIds || []).length || (profile?.assignedSiteIds || []).includes(s.id))) },
@@ -2542,7 +2544,7 @@ export default function App() {
   // thème plutôt qu'une liste plate — aucune page ni fonctionnalité nouvelle, juste un
   // classement plus clair : Opérations, Documents & suivis, Rapports, Administration.
   const NAV_GROUPS = [
-    { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "saisie", "engins", "inventaires", "vcf"] },
+    { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "dashboard_lub", "saisie", "engins", "inventaires", "vcf"] },
     { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_lubrifiants"] },
     { label: null, ids: ["rapports"] },
     { label: "Administration", ids: ["sites", "utilisateurs", "personnalisation", "historique"] },
@@ -2796,6 +2798,7 @@ export default function App() {
           <div style={{ position: "relative", zIndex: 1 }}>
           {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} onOpenSite={openSiteDashboard} />}
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} onOpenSite={openSiteDashboard} />}
+          {view === "dashboard_lub" && <LubricantsDashboardView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} siteId={lubDashSiteId} onSelectSite={setLubDashSiteId} />}
           {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
@@ -3150,7 +3153,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18, minHeight: 320 }}>
           <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock en fin de journée — 30 derniers jours</h3>
-          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Stock théorique reconstitué à partir des mouvements et des jauges saisies.</p>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point peut différer du « stock actuel » affiché, qui cumule les mouvements depuis le stock initial.</p>
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={d.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
               <defs>
@@ -3269,6 +3272,236 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
           <tbody>
             {d.recent.length === 0 && <EmptyRow colSpan={3} text="Aucun mouvement enregistré pour ce site." />}
             {d.recent.map((m) => {
+              const meta = TYPE_META[m.type];
+              if (!meta) return null;
+              return (
+                <tr key={m.id}>
+                  <td className="somip-mono">{m.date}</td>
+                  <td><Badge color={meta.color}>{meta.label}</Badge>{m.isDemo && <DemoBadge />}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>{meta.sign} {fmt(m.quantity)} L</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Tableau de bord lubrifiants (Prehomo / Okouma) : mêmes règles que la Synthèse journalière — Lubrifiants ---- */
+function LubricantsDashboardView({ sites, movements, inventaires, productStocks, stockOf, assignedSiteIds, siteId, onSelectSite }) {
+  const lubSites = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter((s) => s && s.active !== false && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
+  const lubSiteIds = lubSites.map((s) => s.id);
+  const lubSiteKey = lubSiteIds.join(",");
+  const site = lubSites.find((s) => s.id === siteId) || lubSites[0] || null;
+  const [productId, setProductId] = useState(LUBRICANTS[0].id);
+  const [imgFailed, setImgFailed] = useState(false);
+  useEffect(() => { setImgFailed(false); }, [site?.id, site?.photoUrl]);
+
+  // Chiffres du mois pour chaque site x lubrifiant (mémorisés : la synchronisation re-rend souvent la page).
+  const agg = useMemo(() => {
+    const out = {};
+    const month = currentMonth();
+    const monthStartD = `${month}-01`;
+    const todayD = todayStr();
+    for (const sid of lubSiteIds) {
+      out[sid] = {};
+      for (const p of LUBRICANTS) {
+        const ps = productStocks.find((x) => x.siteId === sid && x.product === p.id);
+        const mv = movements.filter((m) => m.siteId === sid && (m.product || "gasoil") === p.id);
+        let ecart = 0, jaugeDays = 0;
+        let cur = new Date(monthStartD);
+        const end = new Date(todayD);
+        while (cur <= end) {
+          const day = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+          const stockDebut = stockBeforeDateProduct(ps?.stockInitial || 0, movements, sid, p.id, day, inventaires);
+          const dayMovs = mv.filter((m) => m.date === day);
+          const theorique = stockDebut + sumQty(dayMovs, ["reception"]) - sumQty(dayMovs, ["sortie"]);
+          const inv = pickLatestInv(inventaires.filter((i) => i.siteId === sid && (i.product || "gasoil") === p.id && i.date === day));
+          if (inv) { ecart += inv.stockPhysique - theorique; jaugeDays++; }
+          cur.setDate(cur.getDate() + 1);
+        }
+        const inMonth = mv.filter((m) => m.date.startsWith(month));
+        const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === sid && (i.product || "gasoil") === p.id));
+        out[sid][p.id] = { receptionsMonth: sumQty(inMonth, ["reception"]), ventesMonth: sumQty(inMonth, ["sortie"]), ecart, jaugeDays, lastInv };
+      }
+    }
+    return out;
+  }, [lubSiteKey, movements, inventaires, productStocks]);
+
+  // Courbe 30 jours et derniers mouvements du lubrifiant sélectionné.
+  const detail = useMemo(() => {
+    if (!site) return null;
+    const ps = productStocks.find((x) => x.siteId === site.id && x.product === productId);
+    const trend = [];
+    for (let k = 29; k >= 0; k--) {
+      const dd = new Date(); dd.setDate(dd.getDate() - k);
+      const nx = new Date(dd); nx.setDate(nx.getDate() + 1);
+      const nextStr = `${nx.getFullYear()}-${pad2(nx.getMonth() + 1)}-${pad2(nx.getDate())}`;
+      trend.push({ label: `${pad2(dd.getDate())}/${pad2(dd.getMonth() + 1)}`, stock: Math.round(stockBeforeDateProduct(ps?.stockInitial || 0, movements, site.id, productId, nextStr, inventaires)) });
+    }
+    const recent = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === productId)
+      .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || "").localeCompare(a.createdAt || ""))).slice(0, 10);
+    return { trend, recent };
+  }, [site?.id, productId, movements, inventaires, productStocks]);
+
+  if (!site || !detail) {
+    return (
+      <div className="somip-fade somip-panel" style={{ padding: 22 }}>
+        <p style={{ margin: 0, fontSize: 13, color: C.sub }}>Aucun site à lubrifiants (Prehomo, Okouma) disponible pour ce compte.</p>
+      </div>
+    );
+  }
+
+  const signed = (v) => `${v >= 0 ? "+" : ""}${fmt(v)}`;
+  const ecartColor = (v) => (v < 0 ? C.danger : v > 0 ? C.success : C.sub);
+  const rows = LUBRICANTS.map((p) => {
+    const a = agg[site.id]?.[p.id] || { receptionsMonth: 0, ventesMonth: 0, ecart: 0, jaugeDays: 0, lastInv: null };
+    const ps = productStocks.find((x) => x.siteId === site.id && x.product === p.id);
+    const stockL = stockOf(site.id, p.id);
+    const cap = ps?.capacity || 0;
+    return { p, ...a, stockL, kg: stockL * p.densite, cap, pct: cap ? (stockL / cap) * 100 : null };
+  });
+  const totals = rows.reduce((t, r) => ({ stockL: t.stockL + r.stockL, kg: t.kg + r.kg, rec: t.rec + r.receptionsMonth, ven: t.ven + r.ventesMonth, ecart: t.ecart + r.ecart, hasJauge: t.hasJauge || r.jaugeDays > 0 }), { stockL: 0, kg: 0, rec: 0, ven: 0, ecart: 0, hasJauge: false });
+  const sel = rows.find((r) => r.p.id === productId) || rows[0];
+  const level = (pct) => (pct === null ? C.blue : pct < 20 ? C.danger : pct < 35 ? C.warning : C.blue);
+  const netRows = lubSites.length > 1 ? LUBRICANTS.map((p) => {
+    const perSite = lubSites.map((s) => stockOf(s.id, p.id));
+    const l = perSite.reduce((a, v) => a + v, 0);
+    const ventes = lubSites.reduce((a, s) => a + (agg[s.id]?.[p.id]?.ventesMonth || 0), 0);
+    return { p, perSite, l, kg: l * p.densite, ventes };
+  }) : [];
+
+  return (
+    <div className="somip-fade">
+      <div className="somip-no-print" style={{ position: "relative", borderRadius: 16, overflow: "hidden", marginBottom: 18, minHeight: "clamp(150px, 22vw, 210px)", background: `linear-gradient(120deg, ${C.navy}, ${C.blue})`, boxShadow: C.cardShadow }}>
+        {site.photoUrl && !imgFailed ? (
+          <img src={site.photoUrl} alt={site.name} onError={() => setImgFailed(true)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
+        ) : (
+          <Fuel size={120} color="rgba(255,255,255,0.10)" style={{ position: "absolute", right: 24, bottom: 10 }} />
+        )}
+        <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(6,20,34,0.15) 20%, rgba(6,20,34,0.82) 100%)" }} />
+        <div style={{ position: "relative", padding: "16px 20px", minHeight: "inherit", display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 24, color: "#fff" }}>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <select className="somip-select" style={{ width: "auto", maxWidth: 260 }} value={site.id} onChange={(e) => onSelectSite && onSelectSite(e.target.value)} aria-label="Choisir un site">
+              {lubSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: "clamp(18px, 2.8vw, 26px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>Lubrifiants — {site.name}</div>
+              <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{LUBRICANTS.map((l) => l.label).join(" · ")}</div>
+            </div>
+            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Stock total<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(totals.stockL)} L</span><span style={{ marginLeft: 8, opacity: 0.85 }}>≈ {fmt(totals.kg)} kg</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
+        <StatCard label="Stock total lubrifiants" value={fmt(totals.stockL)} unit="L" accent={C.blue} icon={Fuel} />
+        <StatCard label="Poids total estimé" value={fmt(totals.kg)} unit="kg" accent={C.sub} icon={Factory} />
+        <StatCard label="Réceptions (mois)" value={fmt(totals.rec)} unit="L" accent={C.success} icon={ArrowDownCircle} />
+        <StatCard label="Ventes (mois)" value={fmt(totals.ven)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
+        <StatCard label="Gain/Perte (mois)" value={totals.hasJauge ? signed(totals.ecart) : "—"} unit={totals.hasJauge ? "L" : ""} accent={totals.hasJauge ? ecartColor(totals.ecart) : C.sub} icon={TrendingDown} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 14, marginBottom: 20 }}>
+        {rows.map((r) => (
+          <div key={r.p.id} className="somip-panel somip-kpi-card" onClick={() => setProductId(r.p.id)} title="Voir le détail de ce lubrifiant" style={{ padding: 16, cursor: "pointer", borderColor: r.p.id === productId ? C.blue : C.border, boxShadow: r.p.id === productId ? `0 0 0 2px ${C.blue}33` : undefined }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <span style={{ fontWeight: 800, fontSize: 14.5 }}>{r.p.label}</span>
+              <span style={{ fontSize: 11, color: C.sub }}>densité {r.p.densite}</span>
+            </div>
+            <div className="somip-mono" style={{ fontSize: 22, fontWeight: 700, color: C.ink }}>{fmt(r.stockL)} <span style={{ fontSize: 12, fontWeight: 500, color: C.sub }}>L</span></div>
+            <div className="somip-mono" style={{ fontSize: 12, color: C.sub, marginBottom: 8 }}>≈ {fmt(r.kg)} kg</div>
+            {r.pct !== null ? (
+              <>
+                <GaugeBar pct={r.pct} color={level(r.pct)} />
+                <div style={{ fontSize: 11, color: C.sub, marginTop: 4 }}>{Math.round(r.pct)} % de {fmt(r.cap)} L</div>
+              </>
+            ) : (
+              <div style={{ fontSize: 11, color: C.warning }}>Capacité non renseignée (page Sites → Lubrifiants)</div>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: C.sub, marginTop: 10, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+              <span>+{fmt(r.receptionsMonth)} reçus</span>
+              <span>−{fmt(r.ventesMonth)} vendus</span>
+              <span style={{ fontWeight: 700, color: r.jaugeDays > 0 ? ecartColor(r.ecart) : C.sub }}>{r.jaugeDays > 0 ? `${signed(r.ecart)} L` : "—"}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18, minHeight: 320 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />{sel.p.label} — stock en fin de journée, 30 derniers jours</h3>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point peut différer du stock actuel affiché, qui cumule les mouvements depuis le stock initial. Clique sur un autre lubrifiant pour changer.</p>
+          <ResponsiveContainer width="100%" height={250}>
+            <AreaChart data={detail.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
+              <defs>
+                <linearGradient id="lubStockFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={C.orange} stopOpacity={0.35} />
+                  <stop offset="100%" stopColor={C.orange} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
+              <XAxis dataKey="label" tick={{ fontSize: 10.5, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} interval={4} />
+              <YAxis tick={{ fontSize: 10.5, fill: C.sub }} axisLine={false} tickLine={false} domain={[0, Math.max(sel.cap || 0, ...detail.trend.map((t) => t.stock), 1)]} tickFormatter={(v) => fmt(v)} />
+              <Tooltip formatter={(v) => [`${fmt(v)} L (≈ ${fmt(v * sel.p.densite)} kg)`, "Stock"]} contentStyle={{ fontSize: 12.5, borderRadius: 8, border: `1px solid ${C.border}` }} />
+              <Area type="monotone" dataKey="stock" stroke={C.orange} strokeWidth={2} fill="url(#lubStockFill)" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
+          <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Situation — {sel.p.label}</h3>
+          <div style={{ fontSize: 12.5, color: C.sub, lineHeight: 1.7 }}>
+            <div>Stock actuel : <strong style={{ color: C.ink }}>{fmt(sel.stockL)} L</strong> (≈ {fmt(sel.kg)} kg)</div>
+            <div>Dernière jauge : {sel.lastInv ? <strong style={{ color: C.ink }}>{fmt(sel.lastInv.stockPhysique)} L — {sel.lastInv.date}</strong> : <strong style={{ color: C.ink }}>aucune</strong>}</div>
+            <div>Réceptions du mois : <strong style={{ color: C.ink }}>{fmt(sel.receptionsMonth)} L</strong></div>
+            <div>Ventes du mois : <strong style={{ color: C.ink }}>{fmt(sel.ventesMonth)} L</strong></div>
+            <div>Gain/Perte du mois : <strong style={{ color: sel.jaugeDays > 0 ? ecartColor(sel.ecart) : C.sub }}>{sel.jaugeDays > 0 ? `${signed(sel.ecart)} L` : "—"}</strong></div>
+          </div>
+        </div>
+      </div>
+
+      {netRows.length > 0 && (
+        <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Factory size={15} color={C.blue} />{lubSites.map((s) => s.name).join(" + ")}</h3>
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Stock de chaque lubrifiant sur l'ensemble des sites à lubrifiants.</p>
+          <div style={{ overflowX: "auto" }}>
+            <table className="somip-table">
+              <thead><tr><th>Lubrifiant</th>{lubSites.map((s) => <th key={s.id} style={{ textAlign: "right" }}>{s.name}</th>)}<th style={{ textAlign: "right" }}>Total (L)</th><th style={{ textAlign: "right" }}>Total (kg)</th><th style={{ textAlign: "right" }}>Ventes du mois (L)</th></tr></thead>
+              <tbody>
+                {netRows.map((r) => (
+                  <tr key={r.p.id}>
+                    <td style={{ fontWeight: 600 }}>{r.p.label}</td>
+                    {r.perSite.map((v, i) => <td key={lubSites[i].id} className="somip-mono" style={{ textAlign: "right" }}>{fmt(v)} L</td>)}
+                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.l)} L</td>
+                    <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{fmt(r.kg)} kg</td>
+                    <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.ventes)} L</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td style={{ fontWeight: 700 }}>Total</td>
+                  {lubSites.map((s, i) => <td key={s.id} className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(netRows.reduce((a, r) => a + r.perSite[i], 0))} L</td>)}
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.blue }}>{fmt(netRows.reduce((a, r) => a + r.l, 0))} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(netRows.reduce((a, r) => a + r.kg, 0))} kg</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(netRows.reduce((a, r) => a + r.ventes, 0))} L</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
+        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements — {sel.p.label} · {site.name}</h3>
+        <table className="somip-table">
+          <thead><tr><th>Date</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
+          <tbody>
+            {detail.recent.length === 0 && <EmptyRow colSpan={3} text="Aucun mouvement pour ce lubrifiant sur ce site." />}
+            {detail.recent.map((m) => {
               const meta = TYPE_META[m.type];
               if (!meta) return null;
               return (
