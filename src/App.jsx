@@ -2482,6 +2482,8 @@ export default function App() {
     { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted },
     { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: !perms.isTotalEnergiesOnly },
+    // « Documents & suivis » : mêmes droits que les anciens onglets de Rapports.
+    ...Object.entries(DOC_PAGES).map(([id, p]) => ({ id, label: p.label, icon: p.icon, show: !perms.isTotalEnergiesOnly && p.allowed({ canManage: perms.canManage, isSiteRestricted }) })),
     { id: "utilisateurs", label: "Utilisateurs", icon: Users, show: perms.canManage },
     { id: "personnalisation", label: "Personnalisation", icon: Palette, show: perms.canManage },
     { id: "historique", label: "Historique", icon: History, show: perms.canManage },
@@ -2489,12 +2491,12 @@ export default function App() {
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
   // Regroupement purement visuel de la même liste NAV, pour une barre latérale organisée par
   // thème plutôt qu'une liste plate — aucune page ni fonctionnalité nouvelle, juste un
-  // classement plus clair (Accueil seul, puis Stocks, puis Sites/Rapports, puis Administration).
+  // classement plus clair : Opérations, Documents & suivis, Rapports, Administration.
   const NAV_GROUPS = [
-    { label: null, ids: ["accueil", "dashboard"] },
-    { label: "Stocks", ids: ["saisie", "engins", "inventaires", "vcf"] },
-    { label: null, ids: ["sites", "rapports"] },
-    { label: "Administration", ids: ["utilisateurs", "personnalisation", "historique"] },
+    { label: "Opérations", ids: ["accueil", "dashboard", "saisie", "engins", "inventaires", "vcf"] },
+    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_lubrifiants"] },
+    { label: null, ids: ["rapports"] },
+    { label: "Administration", ids: ["sites", "utilisateurs", "personnalisation", "historique"] },
   ].map((g) => ({ ...g, items: g.ids.map((id) => NAV.find((n) => n.id === id)).filter(Boolean) })).filter((g) => g.items.length > 0);
   useEffect(() => { if (perms.isTotalEnergiesOnly && view === "dashboard") setView("inventaires"); }, [perms.isTotalEnergiesOnly]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (isSiteRestricted && view === "dashboard") setView("accueil"); }, [isSiteRestricted]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2641,6 +2643,7 @@ export default function App() {
             <React.Fragment key={gi}>
               {g.label && !sidebarCollapsed && <div className="somip-nav-section">{g.label}</div>}
               {g.label && sidebarCollapsed && <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "10px 8px" }} />}
+              {!g.label && gi > 0 && <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: sidebarCollapsed ? "10px 8px" : "10px 6px" }} />}
               {g.items.map((n) => (
                 <button key={n.id} className={`somip-nav-item ${view === n.id ? "active" : ""}`} onClick={() => { setView(n.id); setMobileNavOpen(false); }} title={sidebarCollapsed ? n.label : undefined} style={sidebarCollapsed ? { justifyContent: "center" } : undefined}>
                   <n.icon size={16} />{!sidebarCollapsed && n.label}
@@ -2749,6 +2752,7 @@ export default function App() {
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} />}
           {view === "vcf" && <VcfView />}
+          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
@@ -5166,28 +5170,89 @@ function VcfView() {
 /* ------------------------------------------------------------------ */
 /* Rapports                                                              */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Contenu des rapports — partagé par la page Rapports et par les pages  */
+/* du menu « Documents & suivis » : un seul endroit, donc exactement le   */
+/* même contenu, les mêmes filtres et les mêmes exports partout.          */
+/* ------------------------------------------------------------------ */
+function renderReportTab(tab, ctx) {
+  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds } = ctx;
+  const canSee = canManage || isSiteRestricted;
+  switch (tab) {
+    case "synthese_mensuelle_site": return <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
+    case "synthese_mensuelle_site_15": return <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
+    case "synthese_mensuelle_lub": return <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} assignedSiteIds={assignedSiteIds} />;
+    case "synthese_station_jour": return <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
+    case "synthese_station_jour_15": return <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
+    case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
+    case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
+    case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
+    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} /> : null;
+    case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
+    case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
+    case "retours_chargements": return canSee ? <RetoursChargementsReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
+    default: return null;
+  }
+}
+
+/* Pages du menu « Documents & suivis » : une page par entrée, qui reprend le contenu de
+   l'ancien onglet correspondant de Rapports. `allowed` reprend exactement les droits qui
+   s'appliquaient à cet onglet (Superviseur, ou opérateur/chauffeur limité à ses sites ;
+   Lubrifiants restait ouvert à tous les profils ayant accès à Rapports). */
+const DOC_PAGES = {
+  doc_expositions: {
+    label: "Expositions", icon: FileBarChart, allowed: ({ canManage }) => canManage,
+    tabs: [{ id: "exposition", label: "Exposition" }, { id: "exposition_comilog", label: "Suivi Stocks Comilog" }],
+  },
+  doc_bons: {
+    label: "Bons de livraison", icon: ClipboardList, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    tabs: [{ id: "bons", label: "Bons de livraison" }],
+  },
+  doc_transferts: {
+    label: "Transferts", icon: Truck, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    tabs: [{ id: "transferts", label: "Transferts entre sites" }, { id: "retours_chargements", label: "Retours cuve & Chargements" }],
+  },
+  doc_bilans: {
+    label: "Bilans matières", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    tabs: [{ id: "bilan", label: "Bilan Matières" }],
+  },
+  doc_lubrifiants: {
+    label: "Lubrifiants", icon: Fuel, allowed: () => true,
+    tabs: [{ id: "synthese_mensuelle_lub", label: "Lubrifiants" }],
+  },
+};
+
+function DocumentsPage({ page, ...ctx }) {
+  const cfg = DOC_PAGES[page];
+  const [tab, setTab] = useState(cfg?.tabs[0]?.id);
+  if (!cfg || !cfg.allowed(ctx)) {
+    return (
+      <div className="somip-fade somip-panel" style={{ padding: 22 }}>
+        <p style={{ margin: 0, fontSize: 13, color: C.sub }}>Tu n'as pas accès à cette page avec ton profil actuel.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="somip-fade">
+      {cfg.tabs.length > 1 && (
+        <div className="somip-no-print" style={{ display: "flex", gap: 6, marginBottom: 18, flexWrap: "wrap", paddingLeft: 4, borderLeft: `3px solid ${C.border}` }}>
+          {cfg.tabs.map((t) => (
+            <button key={t.id} className={`somip-tab ${tab === t.id ? "active" : ""}`} style={{ fontSize: 12.5, padding: "6px 12px" }} onClick={() => setTab(t.id)}>{t.label}</button>
+          ))}
+        </div>
+      )}
+      {renderReportTab(tab, ctx)}
+    </div>
+  );
+}
+
 function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds }) {
   const CATEGORIES = [
-    { id: "expositions", label: "Expositions", icon: FileBarChart, show: canManage, tabs: [
-        { id: "exposition", label: "Exposition" },
-        { id: "exposition_comilog", label: "Suivi Stocks Comilog" },
-      ] },
-    { id: "bons_cat", label: "Bon de livraison", icon: ClipboardList, show: canManage || isSiteRestricted, tabs: [
-        { id: "bons", label: "Bons de livraison" },
-      ] },
-    { id: "synthese_mois", label: "Synthèse journalières du mois", icon: TrendingUp, show: true, tabs: [
+    { id: "synthese_mois", label: "Synthèse journalière du mois", icon: TrendingUp, show: true, tabs: [
         { id: "synthese_mensuelle_site", label: "Gasoil" },
-        { id: "synthese_mensuelle_site_15", label: "Gasoil — 15°C" },
-        { id: "synthese_station_jour", label: "Station (site + camion)" },
-        { id: "synthese_station_jour_15", label: "Station (site + camion) — 15°C" },
-        { id: "synthese_mensuelle_lub", label: "Lubrifiants" },
-      ] },
-    { id: "transferts_cat", label: "Transferts", icon: Truck, show: canManage || isSiteRestricted, tabs: [
-        { id: "transferts", label: "Transferts entre sites" },
-        { id: "retours_chargements", label: "Retours cuve & Chargements" },
-      ] },
-    { id: "bilan_cat", label: "Bilans matières", icon: Factory, show: canManage || isSiteRestricted, tabs: [
-        { id: "bilan", label: "Bilan Matières" },
+        { id: "synthese_mensuelle_site_15", label: "Gasoil 15°C" },
+        { id: "synthese_station_jour", label: "Station + camion" },
+        { id: "synthese_station_jour_15", label: "Station + camion 15°C" },
       ] },
     { id: "ecart_cat", label: "Gain/Perte du mois", icon: TrendingDown, show: canManage || isSiteRestricted, tabs: [
         { id: "ecart_mensuel", label: "Gain/Perte du mois" },
@@ -5223,18 +5288,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
         </div>
       )}
       {activeCategory && activeCategory.tabs.length === 1 && <div style={{ marginBottom: 4 }} />}
-      {tab === "synthese_mensuelle_site" && <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />}
-      {tab === "synthese_mensuelle_site_15" && <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />}
-      {tab === "synthese_mensuelle_lub" && <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} assignedSiteIds={assignedSiteIds} />}
-      {tab === "synthese_station_jour" && <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />}
-      {tab === "synthese_station_jour_15" && <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />}
-      {tab === "exposition" && canManage && <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
-      {tab === "exposition_comilog" && canManage && <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} />}
-      {tab === "bons" && (canManage || isSiteRestricted) && <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} />}
-      {tab === "bilan" && (canManage || isSiteRestricted) && <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} />}
-      {tab === "ecart_mensuel" && (canManage || isSiteRestricted) && <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />}
-      {tab === "transferts" && (canManage || isSiteRestricted) && <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} />}
-      {tab === "retours_chargements" && (canManage || isSiteRestricted) && <RetoursChargementsReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} />}
+      {renderReportTab(tab, { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds })}
     </div>
   );
 }
