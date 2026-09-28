@@ -1205,8 +1205,12 @@ function permsFor(role) {
 /* ------------------------------------------------------------------ */
 const numOrUndef = (v) => (v === null || v === undefined ? undefined : Number(v));
 
-const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile, active: r.active !== false });
+const rowToSite = (r) => ({ id: r.id, code: r.code, name: r.name, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), isMobile: !!r.is_mobile, active: r.active !== false, enginsEnabled: !!r.engins_enabled, enginsSourceId: r.engins_source_id || null });
 const siteToRow = (s) => ({ id: s.id, code: s.code, name: s.name, capacity: s.capacity, stock_initial: s.stockInitial, is_mobile: !!s.isMobile });
+const rowToSiteEngin = (r) => ({ id: r.id, siteId: r.site_id, name: r.name, code: r.code || "", type: r.type || "" });
+const siteEnginToRow = (e) => ({ site_id: e.siteId, name: e.name, code: e.code || null, type: e.type || null });
+const rowToEnginEntry = (r) => ({ id: r.id, siteId: r.site_id, enginId: r.engin_id, date: r.date, quantity: Number(r.quantity), commentaire: r.commentaire || "", createdBy: r.created_by, createdAt: r.created_at });
+const enginEntryToRow = (e) => ({ site_id: e.siteId, engin_id: e.enginId, date: e.date, quantity: e.quantity, commentaire: e.commentaire || null, created_by: e.createdBy ?? null });
 
 const rowToMovement = (r) => ({
   id: r.id, siteId: r.site_id, type: r.type, date: r.date, quantity: Number(r.quantity), delta: Number(r.delta),
@@ -1291,7 +1295,7 @@ const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, 
 
 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
-const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [], active: r.active !== false });
+const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [], active: r.active !== false, isAdmin: !!r.is_admin });
 
 async function fetchTable(table, mapper, orderCol, ascending) {
   if (!SUPABASE_CONFIGURED) return [];
@@ -1608,6 +1612,8 @@ export default function App() {
   const [inventairesOfficiels, setInventairesOfficiels] = useState([]);
   const [siteTanks, setSiteTanks] = useState([]);
   const [siteDepotageMeters, setSiteDepotageMeters] = useState([]);
+  const [siteEngins, setSiteEngins] = useState([]);
+  const [enginEntries, setEnginEntries] = useState([]);
   const [truckAssignments, setTruckAssignments] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [audit, setAudit] = useState([]);
@@ -1735,6 +1741,7 @@ export default function App() {
   const currentUserName = profile?.name || session?.user?.email || "Utilisateur";
   const currentRole = profile?.role || "lecture";
   const perms = permsFor(currentRole);
+  const isAdmin = currentRole === "superviseur" && !!profile?.isAdmin;
   // Un opérateur ou chauffeur avec un/des site(s) attribué(s) est limité à une vue simplifiée,
   // centrée sur son propre site — le Superviseur et les comptes sans site attribué gardent
   // l'accès complet, sans changement.
@@ -1763,6 +1770,8 @@ export default function App() {
           setInventairesOfficiels(cached.invOffData || []);
           setSiteTanks(cached.siteTanksData || []);
           setSiteDepotageMeters(cached.siteDepotageMetersData || []);
+          setSiteEngins(cached.siteEnginsData || []);
+          setEnginEntries(cached.enginEntriesData || []);
           setSettings(rowToSettings(cached.settingsRow));
           setLoadError(null);
           setLoading(false);
@@ -1776,7 +1785,7 @@ export default function App() {
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData] = await Promise.all([
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
             fetchTable("sites", rowToSite),
             fetchTable("movements", rowToMovement, "date"),
             fetchTable("inventaires", rowToInventaire, "date"),
@@ -1789,13 +1798,15 @@ export default function App() {
             fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
             fetchTable("site_tanks", rowToSiteTank, "name"),
             fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
+            fetchTable("site_engins", rowToSiteEngin, "name"),
+            fetchTable("engin_entries", rowToEnginEntry, "date"),
           ]);
           let settingsRow = null;
           try {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
@@ -1811,6 +1822,8 @@ export default function App() {
         setInventairesOfficiels(result.invOffData);
         setSiteTanks(result.siteTanksData);
         setSiteDepotageMeters(result.siteDepotageMetersData);
+        setSiteEngins(result.siteEnginsData);
+        setEnginEntries(result.enginEntriesData);
         setSettings(rowToSettings(result.settingsRow));
         setLastSync(new Date());
         setLoadError(null);
@@ -1837,6 +1850,8 @@ export default function App() {
             setInventairesOfficiels(cached.invOffData || []);
             setSiteTanks(cached.siteTanksData || []);
             setSiteDepotageMeters(cached.siteDepotageMetersData || []);
+            setSiteEngins(cached.siteEnginsData || []);
+            setEnginEntries(cached.enginEntriesData || []);
             setSettings(rowToSettings(cached.settingsRow));
             setLoadError(null);
             setLoading(false);
@@ -1865,16 +1880,17 @@ export default function App() {
       if (!navigator.onLine) return;
       try {
         await flushOfflineQueue();
-        const [m, i] = await Promise.all([
+        const [m, i, ee] = await Promise.all([
           fetchTable("movements", rowToMovement, "date"),
           fetchTable("inventaires", rowToInventaire, "date"),
+          fetchTable("engin_entries", rowToEnginEntry, "date"),
         ]);
-        setMovements(m); setInventaires(i);
+        setMovements(m); setInventaires(i); setEnginEntries(ee);
         setLastSync(new Date());
         setIsOfflineStart(false);
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
-          writeAppCache(session.user.id, { ...cached, movementsData: m, inventairesData: i, cachedAt: new Date().toISOString() });
+          writeAppCache(session.user.id, { ...cached, movementsData: m, inventairesData: i, enginEntriesData: ee, cachedAt: new Date().toISOString() });
         }
         // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
         const now = Date.now();
@@ -1891,7 +1907,7 @@ export default function App() {
     const slowTick = async () => {
       if (!navigator.onLine) return;
       try {
-        const [s, p, a, ps, ta, sm, bl, io, st, sdm] = await Promise.all([
+        const [s, p, a, ps, ta, sm, bl, io, st, sdm, se2] = await Promise.all([
           fetchTable("sites", rowToSite),
           fetchTable("profiles", rowToProfile),
           fetchTable("audit", rowToAudit, "ts", false),
@@ -1902,8 +1918,9 @@ export default function App() {
           fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
           fetchTable("site_tanks", rowToSiteTank, "name"),
           fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
+          fetchTable("site_engins", rowToSiteEngin, "name"),
         ]);
-        setSites(s); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm);
+        setSites(s); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm); setSiteEngins(se2);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
         if (session?.user?.id) {
@@ -1911,7 +1928,7 @@ export default function App() {
           writeAppCache(session.user.id, {
             ...cached, sitesData: s, profilesData: p, auditData: a, productStocksData: ps,
             assignmentsData: ta, siteMetersData: sm, bilansData: bl, invOffData: io,
-            siteTanksData: st, siteDepotageMetersData: sdm, settingsRow: se, cachedAt: new Date().toISOString(),
+            siteTanksData: st, siteDepotageMetersData: sdm, siteEnginsData: se2, settingsRow: se, cachedAt: new Date().toISOString(),
           });
         }
       } catch (e) {
@@ -2355,6 +2372,14 @@ export default function App() {
     appendAudit(active ? "Réactivation compte" : "Désactivation compte", target?.name || "");
     flash(active ? "Compte réactivé." : "Compte désactivé.");
   });
+  const toggleUserAdmin = (userId, makeAdmin) => withSync(async () => {
+    const { error } = await supabase.from("profiles").update({ is_admin: makeAdmin }).eq("id", userId);
+    if (error) throw error;
+    const target = profiles.find((u) => u.id === userId);
+    setProfiles((prev) => prev.map((u) => (u.id === userId ? { ...u, isAdmin: makeAdmin } : u)));
+    appendAudit(makeAdmin ? "Nomination administrateur" : "Retrait administrateur", target?.name || "");
+    flash(makeAdmin ? "Compte nommé administrateur." : "Statut administrateur retiré.");
+  });
   const toggleSiteActive = (siteId, active) => withSync(async () => {
     const { error } = await supabase.from("sites").update({ active }).eq("id", siteId);
     if (error) throw error;
@@ -2363,12 +2388,97 @@ export default function App() {
     appendAudit(active ? "Réactivation site" : "Désactivation site", target?.name || "");
     flash(active ? "Site réactivé." : "Site désactivé.");
   });
+  const toggleSiteEnginsEnabled = (siteId, enabled) => withSync(async () => {
+    const { error } = await supabase.from("sites").update({ engins_enabled: enabled }).eq("id", siteId);
+    if (error) throw error;
+    const target = sites.find((s) => s.id === siteId);
+    setSites((prev) => prev.map((s) => (s.id === siteId ? { ...s, enginsEnabled: enabled } : s)));
+    appendAudit(enabled ? "Activation saisie par engins" : "Désactivation saisie par engins", target?.name || "");
+    flash(enabled ? "Saisie par engins activée pour ce site." : "Saisie par engins désactivée pour ce site.");
+  });
+  // Utiliser la liste d'engins d'un autre site (sourceId) — ou la liste propre (sourceId vide).
+  const setSiteEnginsSource = (siteId, sourceId) => withSync(async () => {
+    const { error } = await supabase.from("sites").update({ engins_source_id: sourceId || null }).eq("id", siteId);
+    if (error) throw error;
+    setSites((prev) => prev.map((s) => (s.id === siteId ? { ...s, enginsSourceId: sourceId || null } : s)));
+    flash(sourceId ? "Ce site utilise désormais la liste d'engins partagée." : "Ce site utilise sa propre liste d'engins.");
+  });
+  // Configure d'un coup un groupe de sites/camions autour d'une liste de référence :
+  // la référence garde sa liste propre, tous les autres pointent vers elle, et la saisie
+  // par engins est activée partout.
+  const applyEnginsGroup = (refId, memberIds) => withSync(async () => {
+    const others = memberIds.filter((id) => id !== refId);
+    const { error: e1 } = await supabase.from("sites").update({ engins_enabled: true, engins_source_id: null }).eq("id", refId);
+    if (e1) throw e1;
+    if (others.length) {
+      const { error: e2 } = await supabase.from("sites").update({ engins_enabled: true, engins_source_id: refId }).in("id", others);
+      if (e2) throw e2;
+    }
+    setSites((prev) => prev.map((s) => (s.id === refId ? { ...s, enginsEnabled: true, enginsSourceId: null } : others.includes(s.id) ? { ...s, enginsEnabled: true, enginsSourceId: refId } : s)));
+    appendAudit("Groupe d'engins partagé", `${memberIds.length} site(s)/camion(s) — liste de ${sites.find((s) => s.id === refId)?.name || refId}`);
+    flash(`Liste d'engins partagée configurée pour ${memberIds.length} site(s)/camion(s).`);
+  });
+  /* ---- mutations : engins (référentiel par site, saisies indépendantes du compteur) ---- */
+  const addSiteEngin = ({ siteId, name, code, type }) => withSync(async () => {
+    const cleanName = (name || "").trim();
+    if (!cleanName) throw new Error("Le nom de l'engin ne peut pas être vide.");
+    const { data, error } = await supabase.from("site_engins").insert(siteEnginToRow({ siteId, name: cleanName, code, type })).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("L'engin n'a pas pu être confirmé par le serveur — réessaie.");
+    setSiteEngins((prev) => [...prev, rowToSiteEngin(data)]);
+    flash("Engin ajouté.");
+  });
+  // Import en masse depuis un fichier Excel : les lignes déjà présentes (même nom sur ce site)
+  // sont ignorées côté serveur (contrainte d'unicité site+nom), le reste est ajouté d'un coup.
+  const importSiteEngins = (siteId, rows) => withSync(async () => {
+    if (!rows.length) throw new Error("Aucune ligne à importer.");
+    const payload = rows.map((r) => siteEnginToRow({ siteId, name: r.name, code: r.code, type: r.type }));
+    const { data, error } = await supabase.from("site_engins").upsert(payload, { onConflict: "site_id,name", ignoreDuplicates: true }).select();
+    if (error) throw error;
+    const added = (data || []).map(rowToSiteEngin);
+    setSiteEngins((prev) => [...prev, ...added.filter((a) => !prev.some((p) => p.id === a.id))]);
+    appendAudit("Import engins (Excel)", `${added.length} engin(s) — ${sites.find((s) => s.id === siteId)?.name || siteId}`);
+    flash(`${added.length} engin(s) importé(s)${added.length < rows.length ? ` (${rows.length - added.length} déjà existants, ignorés)` : ""}.`);
+  });
+  const removeSiteEngin = (engin) => withSync(async () => {
+    const { data, error } = await supabase.from("site_engins").delete().eq("id", engin.id).select();
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données.");
+    setSiteEngins((prev) => prev.filter((e) => e.id !== engin.id));
+    flash("Engin supprimé.");
+  });
+  const addEnginEntry = ({ siteId, enginId, date, quantity, commentaire }) => withSync(async () => {
+    const record = { id: uid(), createdBy: currentUserName, createdAt: new Date().toISOString(), siteId, enginId, date, quantity: Number(quantity) || 0, commentaire };
+    const row = enginEntryToRow(record);
+    try {
+      const { data, error } = await supabase.from("engin_entries").insert(row).select().maybeSingle();
+      if (error) throw error;
+      const saved = data ? rowToEnginEntry(data) : record;
+      setEnginEntries((prev) => [...prev, saved]);
+    } catch (e) {
+      if (!isNetworkError(e)) throw e;
+      const q = readOfflineQueue();
+      q.push({ id: uid(), table: "engin_entries", row, createdAt: new Date().toISOString() });
+      writeOfflineQueue(q);
+      setOfflineQueueCount(q.length);
+      setEnginEntries((prev) => [...prev, record]);
+      flash("Pas de connexion — saisie engin enregistrée sur l'appareil, sera synchronisée automatiquement.");
+    }
+  });
+  const deleteEnginEntry = (entry) => withSync(async () => {
+    const { data, error } = await supabase.from("engin_entries").delete().eq("id", entry.id).select();
+    if (error) throw error;
+    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données.");
+    setEnginEntries((prev) => prev.filter((e) => e.id !== entry.id));
+    flash("Saisie supprimée.");
+  });
 
   const NAV = [
     { id: "accueil", label: "Accueil", icon: LayoutDashboard, show: isSiteRestricted },
     { id: "dashboard", label: "Tableau de bord", icon: LayoutDashboard, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
     { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
+    { id: "engins", label: "Saisie par engins", icon: Truck, show: !perms.isTotalEnergiesOnly && sites.some((s) => s.enginsEnabled && s.active !== false && (!(profile?.assignedSiteIds || []).length || (profile?.assignedSiteIds || []).includes(s.id))) },
     { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted },
     { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: !perms.isTotalEnergiesOnly },
@@ -2382,7 +2492,7 @@ export default function App() {
   // classement plus clair (Accueil seul, puis Stocks, puis Sites/Rapports, puis Administration).
   const NAV_GROUPS = [
     { label: null, ids: ["accueil", "dashboard"] },
-    { label: "Stocks", ids: ["saisie", "inventaires", "vcf"] },
+    { label: "Stocks", ids: ["saisie", "engins", "inventaires", "vcf"] },
     { label: null, ids: ["sites", "rapports"] },
     { label: "Administration", ids: ["utilisateurs", "personnalisation", "historique"] },
   ].map((g) => ({ ...g, items: g.ids.map((id) => NAV.find((n) => n.id === id)).filter(Boolean) })).filter((g) => g.items.length > 0);
@@ -2600,7 +2710,7 @@ export default function App() {
               </div>
               <div style={{ fontSize: 12, textAlign: "left" }}>
                 <div style={{ fontWeight: 700, color: C.ink }}>{currentUserName}</div>
-                <Badge color={C.blue}>{ROLE_LABELS[currentRole]}</Badge>
+                <Badge color={isAdmin ? C.orange : C.blue}>{isAdmin ? "Administrateur" : ROLE_LABELS[currentRole]}</Badge>
               </div>
             </div>
           </div>
@@ -2634,12 +2744,13 @@ export default function App() {
           <div style={{ position: "relative", zIndex: 1 }}>
           {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} />}
+          {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} />}
           {view === "vcf" && <VcfView />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
-          {view === "utilisateurs" && perms.canManage && <UsersView profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
+          {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
           </div>
@@ -2918,7 +3029,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter }) {
+function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter, toggleSiteEnginsEnabled, setSiteEnginsSource, applyEnginsGroup, siteEngins, addSiteEngin, importSiteEngins, removeSiteEngin }) {
   const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -2934,6 +3045,14 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   const [newTankName, setNewTankName] = useState("");
   const [depotageSiteId, setDepotageSiteId] = useState(stations[0]?.id || "");
   const [newDepotageName, setNewDepotageName] = useState("");
+  const [enginSiteId, setEnginSiteId] = useState(stations[0]?.id || "");
+  const [newEnginName, setNewEnginName] = useState("");
+  const [newEnginCode, setNewEnginCode] = useState("");
+  const [newEnginType, setNewEnginType] = useState("");
+  const [excelHeaders, setExcelHeaders] = useState([]);
+  const [excelRawRows, setExcelRawRows] = useState([]);
+  const [excelColMap, setExcelColMap] = useState({ name: "", code: "", type: "" });
+  const [excelFileName, setExcelFileName] = useState("");
 
   const submitAdd = () => {
     if (!form.name.trim() || !form.code.trim() || !form.capacity) return;
@@ -2979,6 +3098,55 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
     if (!newDepotageName.trim() || !depotageSiteId) return;
     addSiteDepotageMeter({ siteId: depotageSiteId, name: newDepotageName });
     setNewDepotageName("");
+  };
+
+  // ---- Engins (référentiel par site + import Excel) ----
+  const enginSite = sites.find((s) => s.id === enginSiteId);
+  // Si ce site utilise la liste d'un autre site, c'est CETTE liste qu'on consulte, complète
+  // et alimente par import — pas une copie propre au site.
+  const enginListSiteId = enginSite?.enginsSourceId || enginSiteId;
+  const enginListSite = sites.find((s) => s.id === enginListSiteId);
+  const currentEngins = siteEngins.filter((e) => e.siteId === enginListSiteId);
+  const COMILOG_CODES = ["CIM", "CMM", "OKM", "PRH", "GTR"];
+  const comilogGroupIds = sites.filter((s) => COMILOG_CODES.includes(s.code) || s.isMobile).map((s) => s.id);
+  const [enginRefId, setEnginRefId] = useState("");
+  const effectiveRefId = enginRefId || sites.find((s) => s.code === "PRH")?.id || comilogGroupIds[0] || "";
+  const submitEngin = () => {
+    if (!newEnginName.trim() || !enginSiteId) return;
+    addSiteEngin({ siteId: enginListSiteId, name: newEnginName, code: newEnginCode, type: newEnginType });
+    setNewEnginName(""); setNewEnginCode(""); setNewEnginType("");
+  };
+  const guessColumn = (headers, keywords) => headers.find((h) => keywords.some((k) => h.toLowerCase().includes(k))) || "";
+  const handleExcelFile = (file) => {
+    if (!file) return;
+    setExcelFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: "array" });
+        const sheet = wb.Sheets[wb.SheetNames[0]];
+        const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+        const headers = (raw[0] || []).map((h) => String(h).trim()).filter(Boolean);
+        const dataRows = raw.slice(1).filter((r) => r.some((c) => String(c).trim() !== ""));
+        const rowObjects = dataRows.map((r) => Object.fromEntries(headers.map((h, i) => [h, r[i] !== undefined ? String(r[i]).trim() : ""])));
+        setExcelHeaders(headers);
+        setExcelRawRows(rowObjects);
+        setExcelColMap({
+          name: guessColumn(headers, ["nom", "engin", "désignation", "designation", "libellé", "libelle"]) || headers[0] || "",
+          code: guessColumn(headers, ["code", "matricule", "immat", "n°", "numero", "numéro"]),
+          type: guessColumn(headers, ["type", "catégorie", "categorie", "marque"]),
+        });
+      } catch (err) {
+        window.alert("Impossible de lire ce fichier — vérifie qu'il s'agit bien d'un fichier Excel (.xlsx).");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  const excelPreviewRows = excelRawRows.map((r) => ({ name: excelColMap.name ? r[excelColMap.name] : "", code: excelColMap.code ? r[excelColMap.code] : "", type: excelColMap.type ? r[excelColMap.type] : "" })).filter((r) => r.name);
+  const confirmExcelImport = () => {
+    if (!enginSiteId || excelPreviewRows.length === 0) return;
+    importSiteEngins(enginListSiteId, excelPreviewRows);
+    setExcelHeaders([]); setExcelRawRows([]); setExcelColMap({ name: "", code: "", type: "" }); setExcelFileName("");
   };
 
   return (
@@ -3192,6 +3360,126 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
         <div style={{ display: "flex", gap: 8 }}>
           <input className="somip-input" style={{ flex: 1 }} value={newDepotageName} onChange={(e) => setNewDepotageName(e.target.value)} placeholder="Ex : Dépotage 1" />
           <button className="somip-btn somip-btn-primary" onClick={submitDepotageMeter} disabled={!newDepotageName.trim()}><Plus size={15} /></button>
+        </div>
+      </div>
+
+      <div className="somip-panel" style={{ flex: "1 1 460px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Truck size={15} color={C.blue} />Engins (saisie par engins client)</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Indépendant du compteur — un registre de traçabilité à part pour le carburant distribué à chaque engin. Jusqu'à 50 engins/jour possible.</p>
+        <div style={{ background: C.bg, borderRadius: 10, padding: 12, marginBottom: 16 }}>
+          <p style={{ margin: "0 0 4px", fontSize: 12.5, fontWeight: 700, color: C.ink }}>Groupe Comilog — une seule base d'engins partagée</p>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>CIM, CMM, Okouma, Prehomo, Gare Traction et tous les camions utilisent la même liste. Choisis le site qui porte la liste, puis applique : la saisie par engins est activée partout d'un coup.</p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <div style={{ flex: "1 1 200px" }}>
+              <Field label="Liste portée par">
+                <select className="somip-select" value={effectiveRefId} onChange={(e) => setEnginRefId(e.target.value)}>
+                  {sites.filter((s) => comilogGroupIds.includes(s.id) && !s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <button className="somip-btn somip-btn-primary" disabled={!effectiveRefId || comilogGroupIds.length === 0} onClick={() => { if (window.confirm(`Appliquer la liste partagée à ${comilogGroupIds.length} sites/camions (Comilog + camions) ?`)) applyEnginsGroup(effectiveRefId, comilogGroupIds); }}>
+              <Check size={14} /> Appliquer au groupe ({comilogGroupIds.length})
+            </button>
+          </div>
+        </div>
+
+        <Field label="Site ou camion">
+          <select className="somip-select" value={enginSiteId} onChange={(e) => setEnginSiteId(e.target.value)}>
+            <optgroup label="Sites fixes">
+              {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </optgroup>
+            <optgroup label="Camions">
+              {sites.filter((s) => s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </optgroup>
+          </select>
+        </Field>
+        {enginSite && (
+          <>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "4px 0 10px", cursor: "pointer", fontSize: 13, fontWeight: 600, color: enginSite.enginsEnabled ? C.success : C.sub }}>
+              <input type="checkbox" checked={!!enginSite.enginsEnabled} onChange={(e) => toggleSiteEnginsEnabled(enginSiteId, e.target.checked)} />
+              Activer la saisie par engins pour {enginSite.isMobile ? "ce camion" : "ce site"}
+            </label>
+            <Field label="Liste d'engins utilisée">
+              <select className="somip-select" value={enginSite.enginsSourceId || ""} onChange={(e) => setSiteEnginsSource(enginSiteId, e.target.value)}>
+                <option value="">Liste propre à {enginSite.name}</option>
+                {sites.filter((s) => !s.isMobile && s.id !== enginSiteId).map((s) => <option key={s.id} value={s.id}>Liste partagée de {s.name}</option>)}
+              </select>
+            </Field>
+            {enginSite.enginsSourceId && (
+              <p style={{ margin: "-4px 0 12px", fontSize: 12, color: C.orange, fontWeight: 600 }}>
+                La liste ci-dessous est celle de {enginListSite?.name} — l'ajouter ou l'importer ici la met à jour pour tous les sites qui la partagent.
+              </p>
+            )}
+          </>
+        )}
+
+        <table className="somip-table" style={{ marginBottom: 12 }}>
+          <thead><tr><th>Engin</th><th>Code</th><th>Type</th><th></th></tr></thead>
+          <tbody>
+            {currentEngins.length === 0 && <EmptyRow colSpan={4} text="Aucun engin enregistré pour ce site." />}
+            {currentEngins.map((e) => (
+              <tr key={e.id}>
+                <td style={{ fontWeight: 600 }}>{e.name}</td>
+                <td style={{ color: C.sub }}>{e.code || "—"}</td>
+                <td style={{ color: C.sub }}>{e.type || "—"}</td>
+                <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => removeSiteEngin(e)} /></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+          <input className="somip-input" style={{ flex: "1 1 140px" }} value={newEnginName} onChange={(e) => setNewEnginName(e.target.value)} placeholder="Nom de l'engin" />
+          <input className="somip-input" style={{ flex: "1 1 100px" }} value={newEnginCode} onChange={(e) => setNewEnginCode(e.target.value)} placeholder="Code (optionnel)" />
+          <input className="somip-input" style={{ flex: "1 1 100px" }} value={newEnginType} onChange={(e) => setNewEnginType(e.target.value)} placeholder="Type (optionnel)" />
+          <button className="somip-btn somip-btn-primary" onClick={submitEngin} disabled={!newEnginName.trim()}><Plus size={15} /></button>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 14 }}>
+          <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.ink }}>Importer une liste depuis un fichier Excel</p>
+          <input type="file" accept=".xlsx,.xls" onChange={(e) => handleExcelFile(e.target.files?.[0])} style={{ fontSize: 12.5, marginBottom: 10 }} />
+          {excelHeaders.length > 0 && (
+            <div style={{ background: C.bg, borderRadius: 8, padding: 12 }}>
+              <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Fichier : <strong>{excelFileName}</strong> — {excelRawRows.length} ligne(s) détectée(s). Vérifie la correspondance des colonnes ci-dessous :</p>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+                <Field label="Colonne → Nom de l'engin (obligatoire)">
+                  <select className="somip-select" value={excelColMap.name} onChange={(e) => setExcelColMap({ ...excelColMap, name: e.target.value })}>
+                    <option value="">— Choisir —</option>
+                    {excelHeaders.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </Field>
+                <Field label="Colonne → Code (optionnel)">
+                  <select className="somip-select" value={excelColMap.code} onChange={(e) => setExcelColMap({ ...excelColMap, code: e.target.value })}>
+                    <option value="">— Aucune —</option>
+                    {excelHeaders.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </Field>
+                <Field label="Colonne → Type (optionnel)">
+                  <select className="somip-select" value={excelColMap.type} onChange={(e) => setExcelColMap({ ...excelColMap, type: e.target.value })}>
+                    <option value="">— Aucune —</option>
+                    {excelHeaders.map((h) => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <p style={{ margin: "0 0 6px", fontSize: 11.5, fontWeight: 700, color: C.ink }}>Aperçu ({excelPreviewRows.length} engin(s) valide(s)) :</p>
+              <div style={{ maxHeight: 200, overflowY: "auto", marginBottom: 12 }}>
+                <table className="somip-table">
+                  <thead><tr><th>Nom</th><th>Code</th><th>Type</th></tr></thead>
+                  <tbody>
+                    {excelPreviewRows.slice(0, 20).map((r, i) => (
+                      <tr key={i}><td>{r.name}</td><td style={{ color: C.sub }}>{r.code || "—"}</td><td style={{ color: C.sub }}>{r.type || "—"}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+                {excelPreviewRows.length > 20 && <p style={{ fontSize: 11, color: C.sub, margin: "6px 0 0" }}>… et {excelPreviewRows.length - 20} de plus.</p>}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="somip-btn somip-btn-primary" onClick={confirmExcelImport} disabled={!excelColMap.name || excelPreviewRows.length === 0}>
+                  <Check size={14} /> Confirmer l'import de {excelPreviewRows.length} engin(s)
+                </button>
+                <button className="somip-btn somip-btn-ghost" onClick={() => { setExcelHeaders([]); setExcelRawRows([]); setExcelFileName(""); }}>Annuler</button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -3942,10 +4230,137 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           </tbody>
         </table>
       </div>
+
     </div>
   );
 }
 
+
+/* ---- Saisie par engins (page dédiée, indépendante du compteur et de la Saisie journalière) ---- */
+function EnginEntryView({ sites, siteEngins, enginEntries, addEnginEntry, deleteEnginEntry, canWrite, assignedSiteIds }) {
+  const availableSites = sites.filter((s) => s.enginsEnabled && s.active !== false && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
+  const [siteId, setSiteId] = useState(availableSites[0]?.id || "");
+  const [date, setDate] = useState(todayStr());
+  const [enginPickId, setEnginPickId] = useState("");
+  const [enginQty, setEnginQty] = useState("");
+  const [search, setSearch] = useState("");
+  const [dayFilter, setDayFilter] = useState("");
+  const searchRef = useRef(null);
+
+  useEffect(() => { if (!availableSites.some((s) => s.id === siteId)) setSiteId(availableSites[0]?.id || ""); }, [availableSites.map((s) => s.id).join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const site = sites.find((s) => s.id === siteId);
+  // Liste utilisée par ce site : la sienne, ou celle d'un autre site si elle est partagée.
+  const engins = siteEngins.filter((e) => e.siteId === (site?.enginsSourceId || siteId));
+  const q = search.trim().toLowerCase();
+  const filtered = q ? engins.filter((e) => e.name.toLowerCase().includes(q) || (e.code || "").toLowerCase().includes(q)) : engins;
+  const dayEntries = enginEntries.filter((en) => en.siteId === siteId && en.date === date);
+  const dayFilterQ = dayFilter.trim().toLowerCase();
+  const shownEntries = dayEntries
+    .map((en) => ({ en, engin: siteEngins.find((e) => e.id === en.enginId) }))
+    .filter(({ engin }) => !dayFilterQ || (engin?.name || "").toLowerCase().includes(dayFilterQ) || (engin?.code || "").toLowerCase().includes(dayFilterQ))
+    .sort((a, b) => (a.en.createdAt || "") < (b.en.createdAt || "") ? 1 : -1);
+  const total = dayEntries.reduce((a, en) => a + en.quantity, 0);
+
+  const submit = () => {
+    if (!enginPickId || !enginQty || Number(enginQty) <= 0) return;
+    addEnginEntry({ siteId, enginId: enginPickId, date, quantity: enginQty, commentaire: "" });
+    setEnginPickId(""); setEnginQty(""); setSearch("");
+    setTimeout(() => searchRef.current?.focus(), 0);
+  };
+  // Sélection automatique quand la recherche ne laisse qu'un seul engin : gagne un clic sur 50.
+  useEffect(() => { if (q && filtered.length === 1) setEnginPickId(filtered[0].id); }, [q, filtered.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (availableSites.length === 0) {
+    return (
+      <div className="somip-fade somip-panel" style={{ padding: 22 }}>
+        <h3 style={{ margin: "0 0 6px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Truck size={15} color={C.blue} />Saisie par engins</h3>
+        <p style={{ margin: 0, fontSize: 13, color: C.sub }}>Aucun site n'a la saisie par engins activée pour l'instant. Un Superviseur peut l'activer depuis Sites → Engins.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div className="somip-panel" style={{ flex: "1 1 340px", padding: 18 }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Truck size={15} color={C.blue} />Saisie par engins</h3>
+        <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>Registre de traçabilité, indépendant du compteur et de la Saisie journalière : il n'affecte aucun calcul de stock.</p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 160px" }}>
+            <Field label="Site">
+              <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+                {availableSites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ flex: "1 1 150px" }}>
+            <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+          </div>
+        </div>
+
+        {canWrite ? (
+          engins.length === 0 ? (
+            <p style={{ fontSize: 12.5, color: C.warning, margin: "6px 0 0" }}>Aucun engin dans la liste utilisée par ce site — un Superviseur peut l'alimenter depuis Sites → Engins (ajout manuel ou import Excel).</p>
+          ) : (
+            <>
+              <Field label={`Rechercher un engin (${engins.length} dans la liste)`}>
+                <input ref={searchRef} className="somip-input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Nom ou code..." autoFocus />
+              </Field>
+              <Field label={`Engin${q ? ` — ${filtered.length} résultat(s)` : ""}`}>
+                <select className="somip-select" value={enginPickId} onChange={(e) => setEnginPickId(e.target.value)}>
+                  <option value="">— Choisir un engin —</option>
+                  {filtered.slice(0, 300).map((e) => <option key={e.id} value={e.id}>{e.name}{e.code ? ` (${e.code})` : ""}{e.type ? ` — ${e.type}` : ""}</option>)}
+                </select>
+              </Field>
+              <Field label="Quantité (L)">
+                <input type="number" className="somip-input" value={enginQty} onChange={(e) => setEnginQty(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") submit(); }} placeholder="0" />
+              </Field>
+              <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!enginPickId || !enginQty || Number(enginQty) <= 0}>
+                <Plus size={15} /> Ajouter cette saisie
+              </button>
+              <p style={{ margin: "8px 0 0", fontSize: 11.5, color: C.sub }}>Astuce : tape le nom, saisis la quantité, puis Entrée — le curseur revient à la recherche pour l'engin suivant.</p>
+            </>
+          )
+        ) : (
+          <p style={{ fontSize: 12.5, color: C.sub, margin: "6px 0 0" }}>Ton compte est en consultation : tu peux voir les saisies mais pas en ajouter.</p>
+        )}
+      </div>
+
+      <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+          <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Saisies du {date} — {site?.name}</h3>
+          <div style={{ display: "flex", gap: 14, fontSize: 13 }}>
+            <span style={{ color: C.sub }}>{dayEntries.length} saisie(s)</span>
+            <span className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>Total {fmt(total)} L</span>
+          </div>
+        </div>
+        {dayEntries.length > 8 && (
+          <div style={{ marginBottom: 10, maxWidth: 260 }}>
+            <input className="somip-input" value={dayFilter} onChange={(e) => setDayFilter(e.target.value)} placeholder="Filtrer les saisies du jour..." />
+          </div>
+        )}
+        <div style={{ overflowX: "auto" }}>
+          <table className="somip-table">
+            <thead><tr><th>Heure</th><th>Engin</th><th>Code</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th>{canWrite && <th></th>}</tr></thead>
+            <tbody>
+              {shownEntries.length === 0 && <EmptyRow colSpan={canWrite ? 6 : 5} text="Aucune saisie par engin pour cette date." />}
+              {shownEntries.map(({ en, engin }) => (
+                <tr key={en.id}>
+                  <td className="somip-mono" style={{ color: C.sub }}>{en.createdAt ? new Date(en.createdAt).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "—"}</td>
+                  <td style={{ fontWeight: 600 }}>{engin?.name || "Engin supprimé"}</td>
+                  <td style={{ color: C.sub }}>{engin?.code || "—"}</td>
+                  <td style={{ color: C.sub }}>{engin?.type || "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(en.quantity)} L</td>
+                  {canWrite && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteEnginEntry(en)} /></td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ReceptionsView({ sites, movements, addMovement, deleteMovement, canWrite, canManage }) {
   const [form, setForm] = useState({ siteId: sites[0]?.id || "", date: todayStr(), quantity: "", ref: "", commentaire: "" });
@@ -7122,7 +7537,7 @@ function BrandingView({ settings, updateTheme }) {
 }
 
 
-function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive, sites, session }) {
+function UsersView({ isAdmin, toggleUserAdmin, profiles, updateUserRole, updateUserSites, toggleUserActive, sites, session }) {
   const [editingId, setEditingId] = useState(null);
   const [roleDraft, setRoleDraft] = useState("");
   const [siteDraft, setSiteDraft] = useState([]);
@@ -7132,9 +7547,15 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
   const [resetErr, setResetErr] = useState(null);
   const [resetMsg, setResetMsg] = useState(null);
   const [form, setForm] = useState({ fullName: "", username: "", email: "", password: "", role: "lecture", assignedSiteIds: [] });
+  const [adminDraft, setAdminDraft] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createErr, setCreateErr] = useState(null);
   const [createMsg, setCreateMsg] = useState(null);
+
+  // Les comptes Superviseur et Administrateur ne sont gérables que par un Administrateur.
+  const isPrivileged = (u) => u.role === "superviseur" || !!u.isAdmin;
+  const canManageUser = (u) => isAdmin || !isPrivileged(u);
+  const selectableRoles = isAdmin ? ROLE_VALUES : ROLE_VALUES.filter((r) => r !== "superviseur");
 
   const deleteAccount = async (userId) => {
     setDeletingErr(null);
@@ -7169,9 +7590,12 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
     }
   };
 
-  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); setSiteDraft(u.assignedSiteIds && u.assignedSiteIds.length ? u.assignedSiteIds : (u.assignedSiteId ? [u.assignedSiteId] : [])); };
+  const startEdit = (u) => { setEditingId(u.id); setRoleDraft(u.role); setAdminDraft(!!u.isAdmin); setSiteDraft(u.assignedSiteIds && u.assignedSiteIds.length ? u.assignedSiteIds : (u.assignedSiteId ? [u.assignedSiteId] : [])); };
   const saveEdit = () => {
-    updateUserRole(editingId, roleDraft);
+    const target = profiles.find((u) => u.id === editingId);
+    const nextAdmin = roleDraft === "superviseur" ? adminDraft : false;
+    if (target && target.role !== roleDraft) updateUserRole(editingId, roleDraft);
+    if (target && !!target.isAdmin !== nextAdmin) toggleUserAdmin(editingId, nextAdmin);
     updateUserSites(editingId, siteDraft);
     setEditingId(null);
   };
@@ -7226,7 +7650,8 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
       <div className="somip-panel" style={{ flex: "1 1 560px", padding: 18 }}>
         <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Users size={15} color={C.blue} />Comptes ({profiles.length})</h3>
         <p style={{ margin: "0 0 14px", fontSize: 12.5, color: C.sub }}>
-          Créés par toi ci-contre, ou par auto-inscription (rôle "Lecture" par défaut dans ce cas) — modifie le rôle et le site assigné ici à tout moment.
+          Modifie le rôle et le site assigné de chaque compte ici à tout moment.
+          {isAdmin ? " Tu es Administrateur : tu es le seul à pouvoir gérer les comptes Superviseur et Administrateur." : " Les comptes Superviseur et Administrateur ne peuvent être gérés que par un Administrateur (cadenas)."}
         </p>
         {deletingErr && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 10px" }}>{deletingErr}</p>}
         <table className="somip-table">
@@ -7242,8 +7667,13 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
                       <td style={{ fontWeight: 600 }}>{u.name}</td>
                       <td>
                         <select className="somip-select" value={roleDraft} onChange={(e) => setRoleDraft(e.target.value)}>
-                          {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+                          {(isAdmin ? ROLE_VALUES : selectableRoles).map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
                         </select>
+                        {isAdmin && roleDraft === "superviseur" && (
+                          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, fontSize: 12, fontWeight: 600, color: C.orange, cursor: "pointer" }}>
+                            <input type="checkbox" checked={adminDraft} onChange={(e) => setAdminDraft(e.target.checked)} /> Administrateur
+                          </label>
+                        )}
                       </td>
                       <td>
                         <div style={{ maxHeight: 110, overflowY: "auto", border: `1px solid ${C.border}`, borderRadius: 6, padding: 6, minWidth: 160 }}>
@@ -7266,7 +7696,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
                   ) : (
                     <>
                       <td style={{ fontWeight: 600 }}>{u.name}</td>
-                      <td><Badge color={C.blue}>{ROLE_LABELS[u.role] || u.role}</Badge></td>
+                      <td>{u.isAdmin ? <Badge color={C.orange}>Administrateur</Badge> : <Badge color={C.blue}>{ROLE_LABELS[u.role] || u.role}</Badge>}</td>
                       <td style={{ color: C.sub, fontSize: 12.5, maxWidth: 220 }}>{sitesLabel(u)}</td>
                       <td>
                         {isOnline(u) ? (
@@ -7281,16 +7711,19 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
                         {u.active === false ? <Badge color={C.danger}>Désactivé</Badge> : <Badge color={C.success}>Actif</Badge>}
                       </td>
                       <td style={{ whiteSpace: "nowrap", textAlign: "right" }}>
-                        <button onClick={() => startEdit(u)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>
-                        {u.id !== session?.user?.id && (
+                        {canManageUser(u) && <button onClick={() => startEdit(u)} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}><Pencil size={14} color={C.sub} /></button>}
+                        {!canManageUser(u) && <span title="Réservé aux administrateurs" style={{ display: "inline-flex", padding: 5 }}><Lock size={13} color={C.border} /></span>}
+                        {canManageUser(u) && u.id !== session?.user?.id && (
                           <button onClick={() => toggleUserActive(u.id, u.active === false)} title={u.active === false ? "Réactiver" : "Désactiver"} style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
                             {u.active === false ? <CheckCircle2 size={14} color={C.success} /> : <CloudOff size={14} color={C.warning} />}
                           </button>
                         )}
-                        <button onClick={() => { setResetForId(u.id); setResetPassword(""); setResetErr(null); setResetMsg(null); }} title="Réinitialiser le mot de passe" style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
-                          <Lock size={14} color={C.sub} />
-                        </button>
-                        {u.id !== session?.user?.id && <ConfirmIconButton onConfirm={() => deleteAccount(u.id)} />}
+                        {(canManageUser(u) || u.id === session?.user?.id) && (
+                          <button onClick={() => { setResetForId(u.id); setResetPassword(""); setResetErr(null); setResetMsg(null); }} title="Réinitialiser le mot de passe" style={{ border: "none", background: "none", cursor: "pointer", padding: 5 }}>
+                            <Lock size={14} color={C.sub} />
+                          </button>
+                        )}
+                        {canManageUser(u) && u.id !== session?.user?.id && <ConfirmIconButton onConfirm={() => deleteAccount(u.id)} />}
                       </td>
                     </>
                   )}
@@ -7327,7 +7760,7 @@ function UsersView({ profiles, updateUserRole, updateUserSites, toggleUserActive
         <Field label="Mot de passe provisoire"><input type="text" className="somip-input" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="8 caractères min., 1 majuscule" /></Field>
         <Field label="Rôle">
           <select className="somip-select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
-            {ROLE_VALUES.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+            {selectableRoles.map((r) => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
           </select>
         </Field>
         <Field label="Sites assignés (optionnel)">
