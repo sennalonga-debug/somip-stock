@@ -31,7 +31,7 @@ export default async function handler(req, res) {
     return;
   }
   const { data: requesterProfile, error: profErr } = await admin
-    .from("profiles").select("role").eq("id", userData.user.id).maybeSingle();
+    .from("profiles").select("*").eq("id", userData.user.id).maybeSingle();
   const detectedRole = requesterProfile?.role ? String(requesterProfile.role).trim().toLowerCase() : null;
   if (profErr) {
     res.status(500).json({ error: `Erreur de lecture du profil : ${profErr.message}` });
@@ -49,6 +49,16 @@ export default async function handler(req, res) {
   }
   if (userId === userData.user.id) {
     res.status(400).json({ error: "Tu ne peux pas supprimer ton propre compte." });
+    return;
+  }
+
+
+  // Les comptes Superviseur et Administrateur ne peuvent être gérés que par un Administrateur
+  // (sauf pour sa propre réinitialisation de mot de passe).
+  const { data: targetProfile } = await admin.from("profiles").select("*").eq("id", userId).maybeSingle();
+  const targetPrivileged = targetProfile && (String(targetProfile.role).trim().toLowerCase() === "superviseur" || targetProfile.is_admin);
+  if (targetPrivileged && !requesterProfile?.is_admin) {
+    res.status(403).json({ error: "Seul un Administrateur peut modifier un compte Superviseur ou Administrateur." });
     return;
   }
 
