@@ -1563,15 +1563,15 @@ function AuthScreen() {
 
   return (
     <div style={{ minHeight: "100%", width: "100%", background: "#F5F7FA", fontFamily: SYS_FONT, display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 16px" }}>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px 16px" }}>
         <div style={{ width: 400, maxWidth: "100%", background: "#fff", borderRadius: 12, boxShadow: "0 2px 10px rgba(20,30,45,0.07)", border: "1px solid #EAEDF1", padding: "34px 32px" }}>
 
           <div style={{ textAlign: "center", marginBottom: 26 }}>
             {logoUrl ? (
-              <img src={logoUrl} alt="Logo SOMIP" style={{ width: 52, height: 52, borderRadius: 10, objectFit: "cover", margin: "0 auto 12px", display: "block" }} />
+              <img src={logoUrl} alt="Logo SOMIP" style={{ width: 72, height: 72, borderRadius: 12, objectFit: "cover", margin: "0 auto 12px", display: "block" }} />
             ) : (
-              <div style={{ width: 52, height: 52, borderRadius: 10, background: C.blue, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Fuel size={26} color="#fff" />
+              <div style={{ width: 72, height: 72, borderRadius: 12, background: C.blue, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Fuel size={34} color="#fff" />
               </div>
             )}
             <div style={{ fontSize: 19, fontWeight: 700, color: "#1A2330" }}>SOMIP</div>
@@ -1643,14 +1643,13 @@ function AuthScreen() {
           </button>
           <style>{`@keyframes somipAuthSpin { to { transform: rotate(360deg); } }`}</style>
 
-          <p style={{ marginTop: 16, fontSize: 12, color: "#8893A1", textAlign: "center" }}>
+          <p style={{ marginTop: 16, fontSize: 12, color: C.sub, textAlign: "center" }}>
             Pas encore de compte ? Un Superviseur doit t'en créer un depuis la page Utilisateurs.
           </p>
         </div>
-      </div>
-
-      <div style={{ textAlign: "center", fontSize: 12, color: "#8893A1", padding: "14px 12px" }}>
-        © 2026 SOMIP — Sites externalisés
+        <div style={{ width: 400, maxWidth: "100%", textAlign: "center", fontSize: 12, color: C.sub, marginTop: 16 }}>
+          © 2026 SOMIP — Sites externalisés
+        </div>
       </div>
     </div>
   );
