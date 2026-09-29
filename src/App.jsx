@@ -4,7 +4,7 @@ import {
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
   FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus, Palette,
-  ChevronsLeft, ChevronsRight,
+  ChevronsLeft, ChevronsRight, Eye, EyeOff,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -312,6 +312,16 @@ function sumQty15(list, types) {
 }
 // Retourne l'inventaire le plus récent d'une liste (date la plus tardive, puis heure de
 // saisie la plus tardive en cas d'égalité) — "la dernière jauge saisie" pour cette journée.
+// Réunit tous les relevés d'index (compteur/poste) d'une journée en une seule ligne lisible —
+// contrairement à un simple "premier avant / dernier après", ceci n'en perd aucun quand la
+// journée a été saisie sur plusieurs postes/compteurs.
+function indexPairsLabel(dayMovs, types) {
+  const withIndex = dayMovs
+    .filter((m) => types.includes(m.type) && m.indexAvant !== undefined && m.indexApres !== undefined)
+    .sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+  if (withIndex.length === 0) return null;
+  return withIndex.map((m) => `${m.compteur ? m.compteur + " : " : ""}${fmt(m.indexAvant)} → ${fmt(m.indexApres)}`).join("  ·  ");
+}
 function pickLatestInv(list) {
   return list.reduce((best, cur) => {
     if (!best) return cur;
@@ -486,7 +496,6 @@ async function exportToPdf({ filename, title, period, columns, rows, totalsRow, 
     doc.setFont("helvetica", "normal");
     doc.setFontSize(8);
     doc.setTextColor(150, 158, 165);
-    doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, marginX, pageHeight - 18);
     doc.text(`Page ${i} / ${pageCount}`, pageWidth - marginX, pageHeight - 18, { align: "right" });
   }
 
@@ -625,11 +634,6 @@ async function exportExpositionModelPdf({ dateStr, decadeNum, monthLabel, gasoil
   cell(3, 3, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalVentes), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
   cell(4, 11, ry, rowHData, { fill: [255, 255, 255] });
   ry += rowHData;
-
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(8);
-  doc.setTextColor(150, 158, 165);
-  doc.text(`Édité le ${new Date().toLocaleDateString("fr-FR")} à ${new Date().toLocaleTimeString("fr-FR")}`, marginX, pageHeight - 16);
 
   doc.save(filename);
 }
@@ -1016,7 +1020,6 @@ async function exportBilanToPptx(history, periodType, siteName) {
   }
   s1.addText(`SOMIP — Bilan Matières${siteName ? ` — ${siteName}` : ""}`, { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 26, bold: true, color: BLUE });
   s1.addText(PERIOD_LABEL[periodType] || "Synthèse", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
-  s1.addText(`Édité le ${new Date().toLocaleDateString("fr-FR")}`, { x: 0.5, y: 3.2, w: 9, h: 0.4, fontSize: 11, color: SUB });
 
   // Diapositive tableau.
   const s2 = pptx.addSlide();
@@ -1086,7 +1089,6 @@ async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
   }
   s1.addText("SOMIP — Bilan Matières — Tous les sites", { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 24, bold: true, color: BLUE });
   s1.addText(`${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`, { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
-  s1.addText(`Édité le ${new Date().toLocaleDateString("fr-FR")}`, { x: 0.5, y: 3.2, w: 9, h: 0.4, fontSize: 11, color: SUB });
 
   const s2 = pptx.addSlide();
   s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
@@ -1172,11 +1174,6 @@ function ReportHeader({ title, period, showEditedDate = true }) {
               <div style={{ fontSize: 11, color: C.sub }}>Zone Sud-Est · Gabon</div>
             </div>
           </div>
-          {showEditedDate && (
-            <div style={{ textAlign: "right", fontSize: 11, color: C.sub }}>
-              Édité le {new Date().toLocaleDateString("fr-FR")} à {new Date().toLocaleTimeString("fr-FR")}
-            </div>
-          )}
         </div>
         <h2 style={{ margin: "0 0 2px", fontSize: 16, color: C.navy }}>{title}</h2>
         {period && <div style={{ fontSize: 12.5, color: C.orange, fontWeight: 600 }}>{period}</div>}
@@ -1505,13 +1502,14 @@ function SyncIndicator({ status, lastSync }) {
 /* Écran de connexion / inscription                                     */
 /* ------------------------------------------------------------------ */
 function AuthScreen() {
-  const [mode, setMode] = useState("login"); // "login" | "signup"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [fullName, setFullName] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(true);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resetBusy, setResetBusy] = useState(false);
   const [logoUrl, setLogoUrl] = useState(null);
   const [loginBgUrl, setLoginBgUrl] = useState(null);
 
@@ -1524,25 +1522,45 @@ function AuthScreen() {
       .catch(() => {});
   }, []);
 
+  // "Se souvenir de moi" : la session Supabase est de toute façon conservée sur l'appareil par
+  // défaut (comportement existant, non modifié) — la case reflète simplement ce choix à l'écran,
+  // sans toucher à la logique d'authentification elle-même.
   const submit = async () => {
     setError(""); setInfo("");
     if (!email || !password) { setError("Adresse e-mail et mot de passe requis."); return; }
     setBusy(true);
     const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-    if (err) setError("Connexion impossible : " + err.message);
+    if (err) {
+      const msg = String(err.message || "");
+      if (/invalid login credentials/i.test(msg)) setError("E-mail ou mot de passe incorrect.");
+      else if (/disabled|banned/i.test(msg)) setError("Compte désactivé, contactez un Superviseur.");
+      else setError("Connexion impossible : " + msg);
+    }
     setBusy(false);
+  };
+  const onKeyDown = (e) => { if (e.key === "Enter" && !busy) submit(); };
+
+  const forgotPassword = async () => {
+    setError(""); setInfo("");
+    if (!email) { setError("Renseigne d'abord ton adresse e-mail ci-dessus, puis clique de nouveau sur ce lien."); return; }
+    setResetBusy(true);
+    const { error: err } = await supabase.auth.resetPasswordForEmail(email);
+    setResetBusy(false);
+    if (err) setError("Envoi impossible : " + err.message);
+    else setInfo("E-mail de réinitialisation envoyé, si ce compte existe. Vérifie ta boîte de réception.");
   };
 
   return (
-    <div style={{ minHeight: "100%", fontFamily: "'Inter', -apple-system, sans-serif" }}>
+    <div style={{ minHeight: "100%", fontFamily: "'Inter', -apple-system, sans-serif", display: "flex", flexDirection: "column" }}>
       <style>{`
-        .somip-auth-wrap { min-height: 100%; display: flex; flex-direction: row; }
-        .somip-auth-illustration { flex: 1 1 46%; min-height: 260px; position: relative; overflow: hidden; }
-        .somip-auth-form-side { flex: 1 1 54%; display: flex; align-items: center; justify-content: center; padding: 24px; background: #fff; }
+        .somip-auth-wrap { flex: 1; min-height: 100%; display: flex; flex-direction: row; }
+        .somip-auth-illustration { flex: 0 0 42%; width: 42%; min-height: 100vh; position: relative; overflow: hidden; }
+        .somip-auth-form-side { flex: 1; display: flex; align-items: center; justify-content: center; padding: 24px; background: #fff; }
         @media (max-width: 760px) {
           .somip-auth-wrap { flex-direction: column; }
-          .somip-auth-illustration { flex: none; height: 230px; }
+          .somip-auth-illustration { width: 100%; flex: none; min-height: 0; height: 148px; }
         }
+        @keyframes somipAuthSpin { to { transform: rotate(360deg); } }
       `}</style>
       <div className="somip-auth-wrap">
         <div
@@ -1560,11 +1578,20 @@ function AuthScreen() {
             </>
           )}
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", padding: "28px 28px 34px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+              {logoUrl ? (
+                <img src={logoUrl} alt="Logo SOMIP" style={{ width: 46, height: 46, borderRadius: 11, objectFit: "cover", boxShadow: "0 2px 10px rgba(0,0,0,0.3)" }} />
+              ) : (
+                <div style={{ width: 46, height: 46, borderRadius: 11, background: "rgba(255,255,255,0.14)", border: "1px solid rgba(255,255,255,0.35)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Fuel size={24} color="#fff" />
+                </div>
+              )}
+            </div>
             <div style={{ fontWeight: 800, fontSize: "clamp(24px, 3.2vw, 32px)", color: "#fff", textShadow: "0 2px 10px rgba(0,0,0,0.35)", maxWidth: 380 }}>
               Gestion de Stock SOMIP
             </div>
             <div style={{ fontSize: 14, color: "rgba(255,255,255,0.92)", textShadow: "0 1px 6px rgba(0,0,0,0.35)", marginTop: 6, maxWidth: 340 }}>
-              SOMIP — La technologie des fluides.
+              La technologie des fluides.
             </div>
           </div>
         </div>
@@ -1586,18 +1613,33 @@ function AuthScreen() {
             </div>
 
             <Field label="E-mail ou identifiant">
-              <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="prenom.nom@somip-sarl.ga" />
+              <input type="email" className="somip-input" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={onKeyDown} placeholder="prenom.nom@somip-sarl.ga" autoComplete="username" />
             </Field>
             <Field label="Mot de passe">
-              <input type="password" className="somip-input" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" />
+              <div style={{ position: "relative" }}>
+                <input type={showPassword ? "text" : "password"} className="somip-input" style={{ paddingRight: 38 }} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={onKeyDown} placeholder="••••••••" autoComplete="current-password" />
+                <button type="button" onClick={() => setShowPassword((v) => !v)} title={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"} style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", border: "none", background: "none", cursor: "pointer", padding: 4, color: C.sub, display: "flex" }}>
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </Field>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "-2px 0 16px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: C.sub, cursor: "pointer" }}>
+                <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} />
+                Se souvenir de moi
+              </label>
+              <button type="button" onClick={forgotPassword} disabled={resetBusy} style={{ border: "none", background: "none", cursor: "pointer", fontSize: 12.5, color: C.blue, fontWeight: 600, padding: 0 }}>
+                Mot de passe oublié ?
+              </button>
+            </div>
 
             {error && <p style={{ color: C.danger, fontSize: 12.5, margin: "0 0 12px" }}>{error}</p>}
             {info && <p style={{ color: C.success, fontSize: 12.5, margin: "0 0 12px" }}>{info}</p>}
 
             <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={busy}>
-              <Lock size={15} />
-              Se connecter
+              {busy ? <Loader2 size={15} style={{ animation: "somipAuthSpin .8s linear infinite" }} /> : <Lock size={15} />}
+              {busy ? "Connexion…" : "Se connecter"}
             </button>
 
             <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
@@ -1605,6 +1647,9 @@ function AuthScreen() {
             </p>
           </div>
         </div>
+      </div>
+      <div style={{ textAlign: "center", fontSize: 11, color: C.sub, padding: "10px 12px", background: "#fff" }}>
+        © 2026 SOMIP — Sites externalisés
       </div>
     </div>
   );
@@ -5975,12 +6020,10 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
       const retourCuve = isTruck ? sumQty(dayMovs, ["retour_cuve_camion"]) : 0;
       const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw; // affichage : vente terrain nette
       const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
-      const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-      const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
-      const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+      const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       const stockJauge = inv ? inv.stockPhysique : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -6005,7 +6048,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
       Date: d.date, "Stock début (L)": Math.round(d.stockDebut), [`${receptionLabel} (L)`]: Math.round(d.reception), [`${ventesLabel} (L)`]: Math.round(d.ventes),
       ...(isLubSite ? { "Chargement laitiers (L)": Math.round(d.chargementLaitiers) } : {}),
       ...(isTruck ? { "Retour Cuve (L)": Math.round(d.retourCuve) } : {}),
-      "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
+      "Index (compteurs)": d.indexLabel || "",
       "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
     })),
@@ -6018,13 +6061,13 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
     columns: [
       "Date", "Stock début", receptionLabel, ventesLabel,
       ...(isLubSite ? ["Chargement laitiers"] : []), ...(isTruck ? ["Retour Cuve"] : []),
-      "Index avant", "Index après", "Stock théorique", "Stock jauge", "Gain/Perte",
+      "Index (compteurs)", "Stock théorique", "Stock jauge", "Gain/Perte",
     ],
     rows: days.map((d) => [
       d.date, `${fmt(d.stockDebut)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventes ? `${fmt(d.ventes)} L` : "—",
       ...(isLubSite ? [d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"] : []),
       ...(isTruck ? [d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"] : []),
-      d.indexAvant !== null ? fmt(d.indexAvant) : "—", d.indexApres !== null ? fmt(d.indexApres) : "—",
+      d.indexLabel || "—",
       `${fmt(d.stockTheorique)} L`, d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—",
       d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
     ]),
@@ -6069,13 +6112,13 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
                 <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
                 {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
                 {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
-                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th>Index (compteurs)</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 10 : 9} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 9 : 8} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
@@ -6084,8 +6127,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
                   {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
@@ -6133,12 +6175,10 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSite
       const retourCuve = isTruck ? sumQty15(dayMovs, ["retour_cuve_camion"]) : 0;
       const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw;
       const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
-      const sortWithIndex = dayMovs.filter((m) => (m.type === "sortie" || m.type === "sortie_camion") && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-      const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
-      const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+      const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
       const stockJauge = inv ? inv.stockPhysique15 : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexAvant, indexApres, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -6161,7 +6201,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSite
       Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), [`${receptionLabel} 15°C (L)`]: Math.round(d.reception), [`${ventesLabel} 15°C (L)`]: Math.round(d.ventes),
       ...(isLubSite ? { "Chargement laitiers 15°C (L)": Math.round(d.chargementLaitiers) } : {}),
       ...(isTruck ? { "Retour Cuve 15°C (L)": Math.round(d.retourCuve) } : {}),
-      "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
+      "Index (compteurs)": d.indexLabel || "",
       "Stock théorique 15°C (L)": Math.round(d.stockTheorique), "Stock jauge 15°C (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte 15°C (L)": d.ecart !== null ? Math.round(d.ecart) : "",
     })),
@@ -6205,13 +6245,13 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSite
                 <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
                 {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
                 {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
-                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th>Index (compteurs)</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 10 : 9} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 9 : 8} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
@@ -6220,8 +6260,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSite
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
                   {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
@@ -8052,12 +8091,10 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
       const reception = sumQty(dayMovs, ["reception"]);
       const ventes = sumQty(dayMovs, ["sortie"]);
       const stockTheorique = stockDebut + reception - ventes;
-      const sortWithIndex = dayMovs.filter((m) => m.type === "sortie" && m.indexAvant !== undefined && m.indexApres !== undefined).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-      const indexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
-      const indexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
+      const indexLabel = indexPairsLabel(dayMovs, ["sortie"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === productId && i.date === d));
       const stockJauge = inv ? inv.stockPhysique : null;
-      days.push({ date: d, stockDebut, reception, ventes, indexAvant, indexApres, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, indexLabel, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -8073,7 +8110,7 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
   const doExcel = () => exportToExcel(`SOMIP_Synthese_${lub?.label || ""}_${site?.code || ""}_${month}.xlsx`, [{
     name: "Synthèse", rows: days.map((d) => ({
       Date: d.date, "Stock début (L)": Math.round(d.stockDebut), "Réception (L)": Math.round(d.reception), "Ventes (L)": Math.round(d.ventes),
-      "Index avant": d.indexAvant ?? "", "Index après": d.indexApres ?? "",
+      "Index (compteur)": d.indexLabel || "",
       "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
     })),
@@ -8119,21 +8156,20 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
               <tr>
                 <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
                 <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th>
-                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
+                <th>Index (compteur)</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne un site et un produit." />}
+              {days.length === 0 && <EmptyRow colSpan={8} text="Sélectionne un site et un produit." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
                   <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexAvant !== null ? fmt(d.indexAvant) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.indexApres !== null ? fmt(d.indexApres) : "—"}</td>
+                  <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
