@@ -3363,7 +3363,8 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
     const cap = ps?.capacity || 0;
     return { p, ...a, stockL, kg: stockL * p.densite, cap, pct: cap ? (stockL / cap) * 100 : null };
   });
-  const totals = rows.reduce((t, r) => ({ stockL: t.stockL + r.stockL, kg: t.kg + r.kg, rec: t.rec + r.receptionsMonth, ven: t.ven + r.ventesMonth, ecart: t.ecart + r.ecart, hasJauge: t.hasJauge || r.jaugeDays > 0 }), { stockL: 0, kg: 0, rec: 0, ven: 0, ecart: 0, hasJauge: false });
+  // Pas de cumul entre lubrifiants différents (AC30, AC50, SW10, Rubia Tir7400 sont des produits
+  // distincts) : chaque carte ci-dessous reste indépendante, aucun total « tous lubrifiants ».
   const sel = rows.find((r) => r.p.id === productId) || rows[0];
   const level = (pct) => (pct === null ? C.blue : pct < 20 ? C.danger : pct < 35 ? C.warning : C.blue);
   const netRows = lubSites.length > 1 ? LUBRICANTS.map((p) => {
@@ -3393,19 +3394,12 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
               <div style={{ fontSize: "clamp(18px, 2.8vw, 26px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>Lubrifiants — {site.name}</div>
               <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{LUBRICANTS.map((l) => l.label).join(" · ")}</div>
             </div>
-            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Stock total<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(totals.stockL)} L</span><span style={{ marginLeft: 8, opacity: 0.85 }}>≈ {fmt(totals.kg)} kg</span></div>
+            <div style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Lubrifiants suivis<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{LUBRICANTS.length}</span></div>
           </div>
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 20 }}>
-        <StatCard label="Stock total lubrifiants" value={fmt(totals.stockL)} unit="L" accent={C.blue} icon={Fuel} />
-        <StatCard label="Poids total estimé" value={fmt(totals.kg)} unit="kg" accent={C.sub} icon={Factory} />
-        <StatCard label="Réceptions (mois)" value={fmt(totals.rec)} unit="L" accent={C.success} icon={ArrowDownCircle} />
-        <StatCard label="Ventes (mois)" value={fmt(totals.ven)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
-        <StatCard label="Gain/Perte (mois)" value={totals.hasJauge ? signed(totals.ecart) : "—"} unit={totals.hasJauge ? "L" : ""} accent={totals.hasJauge ? ecartColor(totals.ecart) : C.sub} icon={TrendingDown} />
-      </div>
-
+      <p className="somip-no-print" style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Chaque lubrifiant est un produit distinct : pas de total commun entre eux, chiffres et jauge propres à chacun ci-dessous.</p>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 14, marginBottom: 20 }}>
         {rows.map((r) => (
           <div key={r.p.id} className="somip-panel somip-kpi-card" onClick={() => setProductId(r.p.id)} title="Voir le détail de ce lubrifiant" style={{ padding: 16, cursor: "pointer", borderColor: r.p.id === productId ? C.blue : C.border, boxShadow: r.p.id === productId ? `0 0 0 2px ${C.blue}33` : undefined }}>
@@ -3468,7 +3462,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
       {netRows.length > 0 && (
         <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
           <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Factory size={15} color={C.blue} />{lubSites.map((s) => s.name).join(" + ")}</h3>
-          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Stock de chaque lubrifiant sur l'ensemble des sites à lubrifiants.</p>
+          <p style={{ margin: "0 0 12px", fontSize: 12, color: C.sub }}>Chaque lubrifiant comparé entre les deux sites (« Total » = ce même produit cumulé sur Prehomo + Okouma — jamais entre produits différents).</p>
           <div style={{ overflowX: "auto" }}>
             <table className="somip-table">
               <thead><tr><th>Lubrifiant</th>{lubSites.map((s) => <th key={s.id} style={{ textAlign: "right" }}>{s.name}</th>)}<th style={{ textAlign: "right" }}>Total (L)</th><th style={{ textAlign: "right" }}>Total (kg)</th><th style={{ textAlign: "right" }}>Ventes du mois (L)</th></tr></thead>
@@ -3482,13 +3476,6 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
                     <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.ventes)} L</td>
                   </tr>
                 ))}
-                <tr>
-                  <td style={{ fontWeight: 700 }}>Total</td>
-                  {lubSites.map((s, i) => <td key={s.id} className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(netRows.reduce((a, r) => a + r.perSite[i], 0))} L</td>)}
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.blue }}>{fmt(netRows.reduce((a, r) => a + r.l, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(netRows.reduce((a, r) => a + r.kg, 0))} kg</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(netRows.reduce((a, r) => a + r.ventes, 0))} L</td>
-                </tr>
               </tbody>
             </table>
           </div>
