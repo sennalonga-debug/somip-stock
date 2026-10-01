@@ -1202,7 +1202,7 @@ const ROLE_VALUES = ["superviseur", "operateur", "chauffeur", "lecture", "totale
 const ROLE_LABELS = { superviseur: "Superviseur", operateur: "Opérateur", chauffeur: "Chauffeur", lecture: "Lecture", totalenergies: "TotalEnergies" };
 const PERIOD_TYPE_LABELS = { mensuel: "Mensuel", trimestriel: "Trimestriel", decadaire: "Décadaire" };
 const TYPE_INVENTAIRE_LABELS = { inopine: "Inopiné", mensuel: "Mensuel" };
-const PRODUIT_INVENTAIRE_LABELS = { gasoil: "Gasoil", lubrifiant_vrac: "Lubrifiant vrac" };
+const PRODUIT_INVENTAIRE_LABELS = { gasoil: "Gasoil", ...Object.fromEntries(LUBRICANTS.map((l) => [l.id, l.label])) };
 // canManage : sites, utilisateurs, réglages, modification/suppression, historique.
 // canWrite  : peut ajouter des réceptions/sorties/inventaires (saisie).
 function permsFor(role) {
@@ -5607,7 +5607,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
               <Field label="Produit">
                 <select className="somip-select" value={produit} onChange={(e) => setProduit(e.target.value)}>
                   <option value="gasoil">Gasoil</option>
-                  <option value="lubrifiant_vrac">Lubrifiant vrac</option>
+                  {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
                 </select>
               </Field>
             </div>
