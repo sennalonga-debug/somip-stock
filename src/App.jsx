@@ -5746,23 +5746,49 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   const addIndexRow = () => setIndexReadings((prev) => [...prev, emptyIndex(`Compteur ${prev.length + 1}`)]);
   const removeIndexRow = (idx) => setIndexReadings((prev) => prev.filter((_, i) => i !== idx));
 
-  const canSubmit = siteId && date && cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "");
+  const isLubTous = produit === "lubrifiants_tous";
+  const emptyLubBlock = (l) => ({ produit: l.id, label: l.label, cuve: `Cuve ${l.label}`, hauteur: "", stockAmbiant: "", indexFin: "" });
+  const [lubBlocks, setLubBlocks] = useState(() => LUBRICANTS.map(emptyLubBlock));
+  useEffect(() => { setLubBlocks(LUBRICANTS.map(emptyLubBlock)); }, [siteId, date]); // eslint-disable-line react-hooks/exhaustive-deps
+  const updateLubBlock = (idx, field, value) => setLubBlocks((prev) => prev.map((b, i) => (i === idx ? { ...b, [field]: value } : b)));
+  const lubBlocksFilled = lubBlocks.filter((b) => b.stockAmbiant !== "");
+  const lubBlocksKg = (b) => { const d = LUBRICANTS.find((l) => l.id === b.produit)?.densite; return d && b.stockAmbiant !== "" ? (Number(b.stockAmbiant) || 0) * d : null; };
+
+  const canSubmit = siteId && date && (isLubTous ? lubBlocksFilled.length > 0 : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")));
 
   const submit = () => {
     if (!canSubmit) return;
-    addInventaireOfficiel({
-      siteId, date, type, produit, inventoriste, operateur,
-      cuves: cuveReadings.map((c) => ({
-        cuve: c.cuve, hauteur: c.hauteur === "" ? null : Number(c.hauteur), densite: c.densite === "" ? null : Number(c.densite),
-        temperatureC: c.temperatureC === "" ? null : Number(c.temperatureC), eau: !!c.eau, stockAmbiant: Number(c.stockAmbiant) || 0,
-      })),
-      depotage: depotageReadings.map((d) => ({ compteur: d.compteur, indexFin: d.indexFin === "" ? null : Number(d.indexFin) })),
-      indexCompteurs: indexReadings.map((d) => ({ compteur: d.compteur, indexFin: d.indexFin === "" ? null : Number(d.indexFin) })),
-      commentaire,
-    });
-    setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
-    setDepotageReadings(depotageMetersForSite.length ? depotageMetersForSite.map((m) => emptyDepotage(m.name)) : []);
-    setIndexReadings(salesMetersForSite.map((name) => emptyIndex(name)));
+    if (isLubTous) {
+      // Les 4 lubrifiants saisis ensemble, dans la même action : un enregistrement par huile
+      // renseignée (une huile à zéro ce mois-ci peut rester vide), tous avec le même site, la
+      // même date, le même type et les mêmes Inventoriste/Opérateur/Commentaire. Comme ils
+      // partagent ces mêmes site/date/type, le bouton "PDF combiné" les regroupera automatiquement
+      // dans l'historique une fois enregistrés.
+      lubBlocksFilled.forEach((b) => {
+        addInventaireOfficiel({
+          siteId, date, type, produit: b.produit, inventoriste, operateur,
+          cuves: [{ cuve: b.cuve, hauteur: b.hauteur === "" ? null : Number(b.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(b.stockAmbiant) || 0 }],
+          depotage: [],
+          indexCompteurs: b.indexFin === "" ? [] : [{ compteur: `Compteur ${b.label}`, indexFin: Number(b.indexFin) }],
+          commentaire,
+        });
+      });
+      setLubBlocks(LUBRICANTS.map(emptyLubBlock));
+    } else {
+      addInventaireOfficiel({
+        siteId, date, type, produit, inventoriste, operateur,
+        cuves: cuveReadings.map((c) => ({
+          cuve: c.cuve, hauteur: c.hauteur === "" ? null : Number(c.hauteur), densite: c.densite === "" ? null : Number(c.densite),
+          temperatureC: c.temperatureC === "" ? null : Number(c.temperatureC), eau: !!c.eau, stockAmbiant: Number(c.stockAmbiant) || 0,
+        })),
+        depotage: depotageReadings.map((d) => ({ compteur: d.compteur, indexFin: d.indexFin === "" ? null : Number(d.indexFin) })),
+        indexCompteurs: indexReadings.map((d) => ({ compteur: d.compteur, indexFin: d.indexFin === "" ? null : Number(d.indexFin) })),
+        commentaire,
+      });
+      setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
+      setDepotageReadings(depotageMetersForSite.length ? depotageMetersForSite.map((m) => emptyDepotage(m.name)) : []);
+      setIndexReadings(salesMetersForSite.map((name) => emptyIndex(name)));
+    }
     setInventoriste(""); setOperateur(""); setCommentaire("");
   };
 
@@ -5800,7 +5826,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
               <Field label="Produit">
                 <select className="somip-select" value={produit} onChange={(e) => setProduit(e.target.value)}>
                   <option value="gasoil">Gasoil</option>
-                  {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+                  <option value="lubrifiants_tous">Lubrifiants — les 4 ensemble (AC30, AC50, SW10, Rubia Tir7400)</option>
                 </select>
               </Field>
             </div>
@@ -5810,6 +5836,8 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
             <div style={{ flex: 1 }}><Field label="Opérateur"><input className="somip-input" value={operateur} onChange={(e) => setOperateur(e.target.value)} placeholder="Nom" /></Field></div>
           </div>
 
+          {!isLubTous && (
+            <>
           <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Relevé cuve par cuve</p>
           {tanksForSite.length === 0 && (
             <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.warning }}>Aucune cuve configurée pour ce site — ajoute-les depuis la page Sites, ou saisis-les directement ci-dessous.</p>
@@ -5905,23 +5933,65 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
           <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 12 }} onClick={addDepotageRow}>
             <Plus size={13} /> Ajouter un compteur de dépotage
           </button>
+            </>
+          )}
+          {isLubTous && (
+            <>
+              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Les 4 lubrifiants, saisis ensemble</p>
+              <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.sub }}>Renseigne le stock (L) d'au moins une huile pour pouvoir enregistrer — une huile à zéro ce mois-ci peut rester vide. Les 4 partageront le même site, la même date et le même type, et pourront ensuite être réunies en un seul PDF depuis l'historique.</p>
+              {lubBlocks.map((b, idx) => (
+                <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                  <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
+                  <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                    <div style={{ flex: 1.3 }}>
+                      <Field label="Contenant"><input className="somip-input" value={b.cuve} onChange={(e) => updateLubBlock(idx, "cuve", e.target.value)} placeholder={`Cuve ${b.label}`} /></Field>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={b.hauteur} onChange={(e) => updateLubBlock(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <Field label="Index du compteur"><input type="number" className="somip-input" value={b.indexFin} onChange={(e) => updateLubBlock(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                    <div style={{ flex: 1 }}>
+                      <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.stockAmbiant} onChange={(e) => updateLubBlock(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
+                    </div>
+                    <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
+                      <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Conversion en kg</span>
+                      <span className="somip-mono" style={{ fontWeight: 700, color: lubBlocksKg(b) !== null ? C.orange : C.sub }}>{lubBlocksKg(b) !== null ? `${fmt(lubBlocksKg(b))} kg` : "—"}</span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
 
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaire} onChange={(e) => setCommentaire(e.target.value)} /></Field>
 
-          <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <span style={{ color: C.sub, fontWeight: 600 }}>Stock total ambiant</span>
-              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockAmbiantTotal)} L</span>
+          {isLubTous ? (
+            <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
+              <p style={{ margin: "0 0 8px", fontWeight: 700, color: C.ink }}>Récapitulatif — un lubrifiant par ligne, jamais de total commun entre produits différents</p>
+              {lubBlocksFilled.length === 0 && <p style={{ margin: 0, color: C.sub }}>Aucune huile renseignée pour l'instant.</p>}
+              {lubBlocksFilled.map((b) => (
+                <div key={b.produit} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                  <span style={{ color: C.sub }}>{b.label}</span>
+                  <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(Number(b.stockAmbiant) || 0)} L{lubBlocksKg(b) !== null ? ` — ${fmt(lubBlocksKg(b))} kg` : ""}</span>
+                </div>
+              ))}
             </div>
-            <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: C.sub, fontWeight: 600 }}>{isLubProduit ? "Stock total en kg" : "Stock total à 15°C"}</span>
-              {isLubProduit ? (
-                <span className="somip-mono" style={{ fontWeight: 700, color: kgTotal !== null ? C.orange : C.sub }}>{kgTotal !== null ? `${fmt(kgTotal)} kg` : "—"}</span>
-              ) : (
+          ) : (
+            <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ color: C.sub, fontWeight: 600 }}>Stock total ambiant</span>
+                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockAmbiantTotal)} L</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: C.sub, fontWeight: 600 }}>Stock total à 15°C</span>
                 <span className="somip-mono" style={{ fontWeight: 700, color: stock15Total !== null ? C.blue : C.sub }}>{stock15Total !== null ? `${fmt(stock15Total)} L` : "— (densité/température manquantes sur au moins une cuve)"}</span>
-              )}
+              </div>
             </div>
-          </div>
+          )}
 
           <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={!canSubmit}>
             <Plus size={15} /> Enregistrer l'inventaire officiel
