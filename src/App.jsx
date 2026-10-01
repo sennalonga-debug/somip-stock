@@ -865,6 +865,185 @@ async function exportInventaireOfficielToPdf(inv, site) {
   doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || inv.siteId}_${inv.date}.pdf`);
 }
 
+// Un seul PDF pour les 4 lubrifiants d'un même site, à une même date et un même type
+// (mensuel/inopiné) — plutôt que 4 documents séparés. "records" doit contenir un inventaire
+// officiel par lubrifiant (même site, même date, même type), déjà filtré par l'appelant.
+async function exportInventaireOfficielLubCombinedPdf(records, site) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const [pR, pG, pB] = hexToRgb(C.blue), [aR, aG, aB] = hexToRgb(C.orange);
+  const marginX = 40;
+  const fullWidth = pageWidth - marginX * 2;
+  const ref = records[0];
+
+  doc.setFillColor(pR, pG, pB);
+  doc.rect(0, 0, pageWidth * 0.6, 7, "F");
+  doc.setFillColor(aR, aG, aB);
+  doc.rect(pageWidth * 0.6, 0, pageWidth * 0.4, 7, "F");
+
+  let textX = marginX;
+  if (CURRENT_LOGO_URL) {
+    try {
+      const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
+      const fmtImg = dataUrl.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrl, fmtImg, marginX, 20, 32, 32);
+      textX = marginX + 42;
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(pR, pG, pB);
+  doc.text("SOMIP", textX, 34);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9.5);
+  doc.setTextColor(110, 120, 130);
+  doc.text("Sites externalisés — Zone Sud-Est · Gabon", textX, 48);
+
+  if (CURRENT_LOGO_TOTAL_URL) {
+    try {
+      const dataUrlT = await loadImageDataUrl(CURRENT_LOGO_TOTAL_URL);
+      const fmtT = dataUrlT.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrlT, fmtT, pageWidth - marginX - 60, 18, 60, 34);
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+
+  doc.setDrawColor(226, 230, 234);
+  doc.setLineWidth(0.75);
+  doc.line(marginX, 66, pageWidth - marginX, 66);
+
+  const titre = ref.type === "mensuel"
+    ? `Inventaire Lubrifiants fin ${FRENCH_MONTHS[Number(ref.date.slice(5, 7)) - 1]}`
+    : "Inventaire Lubrifiants Inopiné";
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(17);
+  doc.setTextColor(20, 30, 40);
+  doc.text(titre, pageWidth / 2, 92, { align: "center" });
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11.5);
+  doc.setTextColor(aR, aG, aB);
+  doc.text(`${site?.name || ref.siteId} — ${formatDateLong(ref.date)}`, pageWidth / 2, 110, { align: "center" });
+
+  let y = 138;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9);
+  doc.setTextColor(110, 120, 130);
+  doc.text("INVENTORISTE", marginX, y);
+  doc.text("OPÉRATEUR", marginX + fullWidth / 2, y);
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11.5);
+  doc.setTextColor(20, 30, 40);
+  doc.text(ref.inventoriste || "—", marginX, y + 15);
+  doc.text(ref.operateur || "—", marginX + fullWidth / 2, y + 15);
+  y += 34;
+  doc.setDrawColor(226, 230, 234);
+  doc.line(marginX, y - 14, pageWidth - marginX, y - 14);
+  y += 6;
+
+  const drawBanner = (text) => {
+    doc.setFillColor(pR, pG, pB);
+    doc.roundedRect(marginX, y, fullWidth, 22, 3, 3, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text(text, marginX + 10, y + 15);
+    y += 22 + 8;
+  };
+
+  // Résumé : un lubrifiant par ligne — jamais de total entre produits différents, puisque ce
+  // sont des produits distincts (même principe que le Tableau de bord lubrifiants).
+  drawBanner("RÉSUMÉ — UN LUBRIFIANT PAR LIGNE, SANS TOTAL COMMUN");
+  autoTable(doc, {
+    startY: y,
+    head: [["Lubrifiant", "Contenant(s)", "Stock (L)", "Stock (kg)"]],
+    body: records.map((r) => [
+      PRODUIT_INVENTAIRE_LABELS[r.produit] || r.produit,
+      (r.cuves || []).map((c) => c.cuve).join(", ") || "—",
+      `${fmt(r.stockAmbiant)} L`,
+      (() => { const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite; return d ? `${fmt(r.stockAmbiant * d)} kg` : "—"; })(),
+    ]),
+    theme: "grid",
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 9, cellPadding: 7 },
+    bodyStyles: { fontSize: 10, cellPadding: 7, textColor: [40, 48, 56] },
+    alternateRowStyles: { fillColor: [249, 250, 251] },
+    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
+    columnStyles: { 0: { halign: "left", fontStyle: "bold" }, 1: { halign: "left" } },
+    margin: { left: marginX, right: marginX },
+  });
+  y = doc.lastAutoTable.finalY + 20;
+
+  // Détail contenant par contenant, pour chaque lubrifiant.
+  for (const r of records) {
+    if (y > pageHeight - 160) { doc.addPage(); y = 50; }
+    drawBanner(`DÉTAIL — ${(PRODUIT_INVENTAIRE_LABELS[r.produit] || r.produit).toUpperCase()}`);
+    const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
+    autoTable(doc, {
+      startY: y,
+      head: [["Contenant", "Stock (L, ambiant)", "Stock (kg)"]],
+      body: (r.cuves || []).map((c) => [c.cuve, `${fmt(c.stockAmbiant)} L`, d ? `${fmt(c.stockAmbiant * d)} kg` : "—"]),
+      theme: "grid",
+      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 9.5, cellPadding: 6 },
+      bodyStyles: { fontSize: 9.5, cellPadding: 6, textColor: [40, 48, 56] },
+      alternateRowStyles: { fillColor: [249, 250, 251] },
+      styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
+      columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+      margin: { left: marginX, right: marginX },
+      tableWidth: fullWidth * 0.7,
+    });
+    y = doc.lastAutoTable.finalY + 18;
+    if (r.commentaire) {
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(9);
+      doc.setTextColor(90, 100, 110);
+      const lines = doc.splitTextToSize(`Commentaire (${PRODUIT_INVENTAIRE_LABELS[r.produit]}) : ${r.commentaire}`, fullWidth);
+      doc.text(lines, marginX, y);
+      y += lines.length * 12 + 10;
+    }
+  }
+
+  // Signatures partagées : une seule case par rôle pour les 4 lubrifiants — on prend la
+  // première signature trouvée parmi les 4 inventaires pour chaque rôle, s'il y en a une.
+  const pick = (field) => records.map((r) => r[field]).find(Boolean) || null;
+  if (y > pageHeight - 150) { doc.addPage(); y = 50; }
+  const sigY = Math.max(y + 20, pageHeight - 150);
+  const sigW = (fullWidth - 32) / 3;
+  const sigSlots = [
+    { label: "SOMIP", url: pick("signatureSomipUrl"), by: pick("signatureSomipBy"), at: pick("signatureSomipAt") },
+    { label: "Opérateur", url: pick("signatureOperateurUrl"), by: pick("signatureOperateurBy"), at: pick("signatureOperateurAt") },
+    { label: "TotalEnergies Marketing", url: pick("signatureTotalUrl"), by: pick("signatureTotalBy"), at: pick("signatureTotalAt") },
+  ];
+  for (let i = 0; i < sigSlots.length; i++) {
+    const slot = sigSlots[i];
+    const x = marginX + i * (sigW + 16);
+    doc.setDrawColor(180, 188, 195);
+    doc.setLineWidth(0.75);
+    doc.rect(x, sigY, sigW, 90);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9.5);
+    doc.setTextColor(20, 30, 40);
+    doc.text(slot.label.toUpperCase(), x + sigW / 2, sigY + 14, { align: "center" });
+    if (slot.url) {
+      try {
+        const sigDataUrl = await loadImageDataUrl(slot.url);
+        const sigFmt = sigDataUrl.includes("image/png") ? "PNG" : "JPEG";
+        doc.addImage(sigDataUrl, sigFmt, x + 10, sigY + 20, sigW - 20, 45, undefined, "FAST");
+      } catch (e) { /* signature indisponible : on continue sans */ }
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7);
+      doc.setTextColor(110, 120, 130);
+      const dateLabel = slot.at ? new Date(slot.at).toLocaleDateString("fr-FR") : "";
+      doc.text(`${slot.by || ""}${dateLabel ? " — " + dateLabel : ""}`, x + sigW / 2, sigY + 82, { align: "center" });
+    } else {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(150, 158, 165);
+      doc.text("Signature", x + sigW / 2, sigY + 82, { align: "center" });
+    }
+  }
+
+  doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || ref.siteId}_${ref.date}.pdf`);
+}
+
 // Envoie une ou plusieurs photos vers Supabase Storage (bucket "somip-photos") et renvoie
 // leurs URLs publiques. Utilisé pour justifier une perte (Stock fin) ou illustrer un Bilan Matières.
 async function uploadPhotos(files, folder, options = {}) {
@@ -5521,18 +5700,24 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Volume à 15°C calculé CUVE PAR CUVE (densité/température propres à chaque cuve).
+  // Un lubrifiant ne se corrige pas à 15°C (convention propre au gasoil) — on convertit plutôt
+  // les litres saisis en kg, avec la densité fixe et connue de chaque lubrifiant.
+  const isLubProduit = produit !== "gasoil";
+  const produitDensite = isLubProduit ? (LUBRICANTS.find((l) => l.id === produit)?.densite || null) : null;
   const cuvesComputed = cuveReadings.map((c) => {
     const amb = Number(c.stockAmbiant) || 0;
     let volume15 = null;
-    if (c.temperatureC !== "" && c.densite !== "") {
+    if (!isLubProduit && c.temperatureC !== "" && c.densite !== "") {
       const corr = correctVolumeTo15({ volumeAmbiant: amb, tempC: Number(c.temperatureC), densiteObservee: Number(c.densite) });
       if (corr) volume15 = corr.volume15;
     }
-    return { ...c, stockAmbiantNum: amb, volume15 };
+    const kg = isLubProduit && produitDensite ? amb * produitDensite : null;
+    return { ...c, stockAmbiantNum: amb, volume15, kg };
   });
   const stockAmbiantTotal = cuvesComputed.reduce((a, c) => a + c.stockAmbiantNum, 0);
   const allHave15 = cuvesComputed.length > 0 && cuvesComputed.every((c) => c.volume15 !== null);
   const stock15Total = allHave15 ? cuvesComputed.reduce((a, c) => a + c.volume15, 0) : null;
+  const kgTotal = isLubProduit && produitDensite ? stockAmbiantTotal * produitDensite : null;
 
   const updateCuve = (idx, field, value) => setCuveReadings((prev) => prev.map((c, i) => (i === idx ? { ...c, [field]: value } : c)));
   const addCuveRow = () => setCuveReadings((prev) => [...prev, emptyCuve(`Cuve ${prev.length + 1}`)]);
@@ -5582,6 +5767,14 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   };
 
   const list = inventairesOfficiels.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
+  // Détecte, pour chaque ligne lubrifiant, les autres inventaires du même site/date/type (les
+  // autres lubrifiants saisis le même jour) — sert à proposer un PDF combiné dès qu'il y en a
+  // au moins deux, sans attendre que les 4 soient forcément tous renseignés.
+  const lubGroupFor = (inv) => {
+    if (!LUBRICANT_SITE_IDS.includes(inv.siteId) || inv.produit === "gasoil") return null;
+    const group = inventairesOfficiels.filter((i) => i.siteId === inv.siteId && i.date === inv.date && i.type === inv.type && i.produit !== "gasoil");
+    return group.length > 1 ? group : null;
+  };
 
   return (
     <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -5625,17 +5818,21 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
             <div key={idx} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
               <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
                 <div style={{ flex: 1.3 }}>
-                  <Field label="Cuve"><input className="somip-input" value={c.cuve} onChange={(e) => updateCuve(idx, "cuve", e.target.value)} placeholder="Cuve 1" /></Field>
+                  <Field label={isLubProduit ? "Contenant" : "Cuve"}><input className="somip-input" value={c.cuve} onChange={(e) => updateCuve(idx, "cuve", e.target.value)} placeholder="Cuve 1" /></Field>
                 </div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={c.hauteur} onChange={(e) => updateCuve(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Densité"><input type="number" step="0.001" className="somip-input" value={c.densite} onChange={(e) => updateCuve(idx, "densite", e.target.value)} placeholder="0.840" /></Field>
-                </div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Température (°C)"><input type="number" className="somip-input" value={c.temperatureC} onChange={(e) => updateCuve(idx, "temperatureC", e.target.value)} placeholder="28" /></Field>
-                </div>
+                {!isLubProduit && (
+                  <>
+                    <div style={{ flex: 1 }}>
+                      <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={c.hauteur} onChange={(e) => updateCuve(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <Field label="Densité"><input type="number" step="0.001" className="somip-input" value={c.densite} onChange={(e) => updateCuve(idx, "densite", e.target.value)} placeholder="0.840" /></Field>
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <Field label="Température (°C)"><input type="number" className="somip-input" value={c.temperatureC} onChange={(e) => updateCuve(idx, "temperatureC", e.target.value)} placeholder="28" /></Field>
+                    </div>
+                  </>
+                )}
                 {cuveReadings.length > 1 && (
                   <button onClick={() => removeCuveRow(idx)} style={{ border: "none", background: "none", cursor: "pointer", padding: "9px 4px" }}>
                     <X size={16} color={C.danger} />
@@ -5646,15 +5843,21 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                 <div style={{ flex: 1 }}>
                   <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={c.stockAmbiant} onChange={(e) => updateCuve(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
                 </div>
-                <div style={{ flex: 1, paddingBottom: 9 }}>
-                  <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: "pointer" }}>
-                    <input type="checkbox" checked={c.eau} onChange={(e) => updateCuve(idx, "eau", e.target.checked)} />
-                    Présence d'eau
-                  </label>
-                </div>
+                {!isLubProduit && (
+                  <div style={{ flex: 1, paddingBottom: 9 }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: "pointer" }}>
+                      <input type="checkbox" checked={c.eau} onChange={(e) => updateCuve(idx, "eau", e.target.checked)} />
+                      Présence d'eau
+                    </label>
+                  </div>
+                )}
                 <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
-                  <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Volume à 15°C</span>
-                  <span className="somip-mono" style={{ fontWeight: 700, color: c.volume15 !== null ? C.blue : C.sub }}>{c.volume15 !== null ? `${fmt(c.volume15)} L` : "—"}</span>
+                  <span style={{ fontSize: 11, color: C.sub, display: "block" }}>{isLubProduit ? "Conversion en kg" : "Volume à 15°C"}</span>
+                  {isLubProduit ? (
+                    <span className="somip-mono" style={{ fontWeight: 700, color: c.kg !== null ? C.orange : C.sub }}>{c.kg !== null ? `${fmt(c.kg)} kg` : "—"}</span>
+                  ) : (
+                    <span className="somip-mono" style={{ fontWeight: 700, color: c.volume15 !== null ? C.blue : C.sub }}>{c.volume15 !== null ? `${fmt(c.volume15)} L` : "—"}</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -5711,8 +5914,12 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
               <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockAmbiantTotal)} L</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: C.sub, fontWeight: 600 }}>Stock total à 15°C</span>
-              <span className="somip-mono" style={{ fontWeight: 700, color: stock15Total !== null ? C.blue : C.sub }}>{stock15Total !== null ? `${fmt(stock15Total)} L` : "— (densité/température manquantes sur au moins une cuve)"}</span>
+              <span style={{ color: C.sub, fontWeight: 600 }}>{isLubProduit ? "Stock total en kg" : "Stock total à 15°C"}</span>
+              {isLubProduit ? (
+                <span className="somip-mono" style={{ fontWeight: 700, color: kgTotal !== null ? C.orange : C.sub }}>{kgTotal !== null ? `${fmt(kgTotal)} kg` : "—"}</span>
+              ) : (
+                <span className="somip-mono" style={{ fontWeight: 700, color: stock15Total !== null ? C.blue : C.sub }}>{stock15Total !== null ? `${fmt(stock15Total)} L` : "— (densité/température manquantes sur au moins une cuve)"}</span>
+              )}
             </div>
           </div>
 
@@ -5735,7 +5942,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
             <thead>
               <tr>
                 <th>Date</th><th>Site</th><th>Produit</th><th>Type</th><th>Inventoriste</th><th>Opérateur</th>
-                <th style={{ textAlign: "right" }}>Stock ambiant</th><th style={{ textAlign: "right" }}>Stock 15°C</th><th>Signatures</th><th></th>{canManage && <th></th>}
+                <th style={{ textAlign: "right" }}>Stock ambiant</th><th style={{ textAlign: "right" }}>15°C / kg</th><th>Signatures</th><th></th>{canManage && <th></th>}
               </tr>
             </thead>
             <tbody>
@@ -5749,16 +5956,27 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   <td style={{ color: C.sub }}>{inv.inventoriste || "—"}</td>
                   <td style={{ color: C.sub }}>{inv.operateur || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(inv.stockAmbiant)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: inv.stock15 !== undefined ? C.blue : C.sub }}>{inv.stock15 !== undefined ? `${fmt(inv.stock15)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: inv.stock15 !== undefined ? C.blue : C.sub }}>
+                    {inv.produit && inv.produit !== "gasoil"
+                      ? (() => { const d = LUBRICANTS.find((l) => l.id === inv.produit)?.densite; return d ? `${fmt(inv.stockAmbiant * d)} kg` : "—"; })()
+                      : (inv.stock15 !== undefined ? `${fmt(inv.stock15)} L` : "—")}
+                  </td>
                   <td>
                     <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => setSigningId(signingId === inv.id ? null : inv.id)}>
                       <Pencil size={12} /> {[inv.signatureSomipUrl, inv.signatureOperateurUrl, inv.signatureTotalUrl].filter(Boolean).length}/3
                     </button>
                   </td>
                   <td>
-                    <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielToPdf(inv, sites.find((s) => s.id === inv.siteId))}>
-                      <Download size={12} /> PDF
-                    </button>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielToPdf(inv, sites.find((s) => s.id === inv.siteId))}>
+                        <Download size={12} /> PDF
+                      </button>
+                      {lubGroupFor(inv) && (
+                        <button className="somip-btn somip-btn-secondary" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielLubCombinedPdf(lubGroupFor(inv), sites.find((s) => s.id === inv.siteId))} title={`Combine les ${lubGroupFor(inv).length} lubrifiants de ce site, cette date et ce type en un seul PDF`}>
+                          <Download size={12} /> PDF combiné ({lubGroupFor(inv).length})
+                        </button>
+                      )}
+                    </div>
                   </td>
                   {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaireOfficiel(inv)} /></td>}
                 </tr>
