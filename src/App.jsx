@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
+import ReunionsView from "./Reunions";
 import autoTable from "jspdf-autotable";
 import pptxgen from "pptxgenjs";
 import {
@@ -2583,6 +2584,7 @@ export default function App() {
     { id: "utilisateurs", label: "Utilisateurs", icon: Users, show: perms.canManage },
     { id: "personnalisation", label: "Personnalisation", icon: Palette, show: perms.canManage },
     { id: "historique", label: "Historique", icon: History, show: perms.canManage },
+    { id: "reunions", label: "Réunions", icon: Users, show: true },
   ].filter((n) => n.show);
   const viewTitle = NAV.find((n) => n.id === view)?.label || "";
   // Regroupement purement visuel de la même liste NAV, pour une barre latérale organisée par
@@ -2592,6 +2594,7 @@ export default function App() {
     { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "dashboard_lub", "saisie", "engins", "inventaires", "vcf"] },
     { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_lubrifiants"] },
     { label: null, ids: ["rapports"] },
+    { label: null, ids: ["reunions"] },
     { label: "Administration", ids: ["sites", "utilisateurs", "personnalisation", "historique"] },
   ].map((g) => ({ ...g, items: g.ids.map((id) => NAV.find((n) => n.id === id)).filter(Boolean) })).filter((g) => g.items.length > 0);
   useEffect(() => { if (perms.isTotalEnergiesOnly && view === "dashboard") setView("inventaires"); }, [perms.isTotalEnergiesOnly]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -2855,6 +2858,7 @@ export default function App() {
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
+          {view === "reunions" && <ReunionsView canManage={perms.canManage} currentUserName={currentUserName} sites={sites} />}
           </div>
         </div>
       </div>
@@ -5291,6 +5295,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   const [mainTab, setMainTab] = useState(isTotalEnergiesOnly ? "officiel" : "rapide");
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
+  const [productId, setProductId] = useState("gasoil");
   const [stockPhysique, setStockPhysique] = useState("");
   const [commentaire, setCommentaire] = useState("");
   const [filterSite, setFilterSite] = useState("all");
@@ -5299,9 +5304,14 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   const [densite, setDensite] = useState("");
 
   useEffect(() => { setObjectifDraft(settings.objectifFreinte); }, [settings.objectifFreinte]);
+  // Un site à lubrifiants (Prehomo, Okouma) distribue aussi du gasoil : le produit se choisit
+  // donc parmi Gasoil + les 4 lubrifiants. Les autres sites restent en gasoil uniquement, comme
+  // avant — rien ne change pour eux.
+  const isLubSite = LUBRICANT_SITE_IDS.includes(siteId);
+  useEffect(() => { if (!isLubSite) setProductId("gasoil"); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const theoriqueAmbiant = stockOf(siteId);
-  const theorique15 = stockOf15(siteId);
+  const theoriqueAmbiant = stockOf(siteId, productId);
+  const theorique15 = stockOf15(siteId, productId);
   const physiqueNum = Number(stockPhysique) || 0;
   const vcfResult = correctVolumeTo15({
     volumeAmbiant: physiqueNum,
@@ -5319,7 +5329,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
     const extra = vcfResult
       ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfResult.densite15, vcf: vcfResult.vcf, stockPhysique15: vcfResult.volume15 }
       : {};
-    addInventaire({ siteId, date, stockPhysique: physiqueNum, commentaire, ...extra });
+    addInventaire({ siteId, product: productId, date, stockPhysique: physiqueNum, commentaire, ...extra });
     setStockPhysique(""); setCommentaire(""); setTempC(""); setDensite("");
   };
 
@@ -5344,6 +5354,14 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
             </select>
           </Field>
           <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+          {isLubSite && (
+            <Field label="Produit">
+              <select className="somip-select" value={productId} onChange={(e) => setProductId(e.target.value)}>
+                <option value="gasoil">Gasoil</option>
+                {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+              </select>
+            </Field>
+          )}
           <Field label="Stock physique mesuré (L, ambiant)"><input type="number" className="somip-input" value={stockPhysique} onChange={(e) => setStockPhysique(e.target.value)} placeholder="Ex : 12450" /></Field>
           <VcfMiniPanel tempC={tempC} densite={densite} onTempC={setTempC} onDensite={setDensite} result={vcfResult} compact />
           <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={commentaire} onChange={(e) => setCommentaire(e.target.value)} /></Field>
@@ -5435,16 +5453,17 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
           <table className="somip-table">
             <thead>
               <tr>
-                <th>Date</th><th>Site</th><th>Base</th><th>Nature</th>
+                <th>Date</th><th>Site</th><th>Produit</th><th>Base</th><th>Nature</th>
                 <th style={{ textAlign: "right" }}>Théorique</th><th style={{ textAlign: "right" }}>Physique</th>
                 <th style={{ textAlign: "right" }}>Écart (L)</th><th style={{ textAlign: "right" }}>Écart (‰)</th>
                 <th style={{ textAlign: "right" }}>Taux de freinte</th><th>Statut (objectif)</th>{canManage && <th></th>}
               </tr>
             </thead>
             <tbody>
-              {list.length === 0 && <EmptyRow colSpan={canManage ? 11 : 10} text="Aucun inventaire enregistré." />}
+              {list.length === 0 && <EmptyRow colSpan={canManage ? 12 : 11} text="Aucun inventaire enregistré." />}
               {list.map((i) => {
                 const site = sites.find((s) => s.id === i.siteId);
+                const productLabel = !i.product || i.product === "gasoil" ? "Gasoil" : (LUBRICANTS.find((l) => l.id === i.product)?.label || i.product);
                 const nature = i.nature || (i.ecart === 0 ? "neutre" : i.ecart < 0 ? "perte" : "gain");
                 const conformite = i.conformite || "conforme";
                 const basis15 = i.basisEcart === "15c";
@@ -5454,6 +5473,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
                   <tr key={i.id}>
                     <td className="somip-mono">{i.date}</td>
                     <td>{site?.name}</td>
+                    <td><Badge color={!i.product || i.product === "gasoil" ? C.blue : C.orange}>{productLabel}</Badge></td>
                     <td><Badge color={basis15 ? C.blue : C.sub}>{basis15 ? "15°C" : "Ambiant"}</Badge></td>
                     <td><Badge color={NATURE_META[nature].color}>{NATURE_META[nature].label}</Badge></td>
                     <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{fmt(theoriqueAff)} L</td>
