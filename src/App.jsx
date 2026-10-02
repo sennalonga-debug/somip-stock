@@ -958,68 +958,49 @@ async function exportInventaireOfficielLubCombinedPdf(records, site) {
     y += 22 + 8;
   };
 
-  // Résumé : un lubrifiant par ligne — jamais de total entre produits différents, puisque ce
-  // sont des produits distincts (même principe que le Tableau de bord lubrifiants).
-  drawBanner("RÉSUMÉ — UN LUBRIFIANT PAR LIGNE, SANS TOTAL COMMUN");
+  // Un seul tableau pour les 4 huiles — une ligne par contenant, tous produits confondus —
+  // sur le même principe qu'une fiche gasoil (une seule table "cuve par cuve"), plutôt que 4
+  // tableaux séparés : ça tient sur une seule page même avec plusieurs contenants par huile.
+  drawBanner("DÉTAIL PAR HUILE — HAUTEUR, VOLUME ET INDEX");
+  const detailRows = [];
+  for (const r of records) {
+    const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
+    const idxLabel = (r.indexCompteurs || []).map((idx) => (idx.indexFin !== null && idx.indexFin !== undefined ? fmt(idx.indexFin) : "—")).join(", ") || "—";
+    (r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }]).forEach((c) => {
+      detailRows.push([
+        PRODUIT_INVENTAIRE_LABELS[r.produit] || r.produit,
+        c.cuve,
+        c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—",
+        `${fmt(c.stockAmbiant)} L`,
+        d ? `${fmt(c.stockAmbiant * d)} kg` : "—",
+        idxLabel,
+      ]);
+    });
+  }
   autoTable(doc, {
     startY: y,
-    head: [["Lubrifiant", "Contenant(s)", "Stock (L)", "Stock (kg)"]],
-    body: records.map((r) => [
-      PRODUIT_INVENTAIRE_LABELS[r.produit] || r.produit,
-      (r.cuves || []).map((c) => c.cuve).join(", ") || "—",
-      `${fmt(r.stockAmbiant)} L`,
-      (() => { const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite; return d ? `${fmt(r.stockAmbiant * d)} kg` : "—"; })(),
-    ]),
+    head: [["Huile", "Contenant", "Hauteur (mm)", "Stock (L)", "Stock (kg)", "Index compteur"]],
+    body: detailRows,
     theme: "grid",
-    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 9, cellPadding: 7 },
-    bodyStyles: { fontSize: 10, cellPadding: 7, textColor: [40, 48, 56] },
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 8.5, cellPadding: 6 },
+    bodyStyles: { fontSize: 9, cellPadding: 6, textColor: [40, 48, 56] },
     alternateRowStyles: { fillColor: [249, 250, 251] },
     styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
     columnStyles: { 0: { halign: "left", fontStyle: "bold" }, 1: { halign: "left" } },
     margin: { left: marginX, right: marginX },
   });
-  y = doc.lastAutoTable.finalY + 20;
+  y = doc.lastAutoTable.finalY + 18;
 
-  // Détail contenant par contenant, pour chaque lubrifiant.
-  for (const r of records) {
-    if (y > pageHeight - 160) { doc.addPage(); y = 50; }
-    drawBanner(`DÉTAIL — ${(PRODUIT_INVENTAIRE_LABELS[r.produit] || r.produit).toUpperCase()}`);
-    const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
-    autoTable(doc, {
-      startY: y,
-      head: [["Contenant", "Hauteur (mm)", "Stock (L, ambiant)", "Stock (kg)"]],
-      body: (r.cuves || []).map((c) => [
-        c.cuve,
-        c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—",
-        `${fmt(c.stockAmbiant)} L`,
-        d ? `${fmt(c.stockAmbiant * d)} kg` : "—",
-      ]),
-      theme: "grid",
-      headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 9.5, cellPadding: 6 },
-      bodyStyles: { fontSize: 9.5, cellPadding: 6, textColor: [40, 48, 56] },
-      alternateRowStyles: { fillColor: [249, 250, 251] },
-      styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
-      columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
-      margin: { left: marginX, right: marginX },
-      tableWidth: fullWidth * 0.85,
-    });
-    y = doc.lastAutoTable.finalY + 14;
-    if (r.indexCompteurs && r.indexCompteurs.length > 0) {
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(9);
-      doc.setTextColor(90, 100, 110);
-      const idxText = r.indexCompteurs.map((idx) => `${idx.compteur} : ${idx.indexFin !== null && idx.indexFin !== undefined ? fmt(idx.indexFin) : "—"}`).join("   ·   ");
-      doc.text(`Index — ${idxText}`, marginX, y);
-      y += 16;
-    }
-    if (r.commentaire) {
-      doc.setFont("helvetica", "italic");
-      doc.setFontSize(9);
-      doc.setTextColor(90, 100, 110);
-      const lines = doc.splitTextToSize(`Commentaire (${PRODUIT_INVENTAIRE_LABELS[r.produit]}) : ${r.commentaire}`, fullWidth);
-      doc.text(lines, marginX, y);
-      y += lines.length * 12 + 10;
-    }
+  // Commentaires : regroupés en un seul bloc (au lieu d'un paragraphe par huile), pour rester
+  // compact et tenir sur la page.
+  const commentLines = records.filter((r) => r.commentaire).map((r) => `${PRODUIT_INVENTAIRE_LABELS[r.produit]} : ${r.commentaire}`);
+  if (commentLines.length > 0) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(9);
+    doc.setTextColor(90, 100, 110);
+    const lines = doc.splitTextToSize(`Commentaires — ${commentLines.join("   ·   ")}`, fullWidth);
+    doc.text(lines, marginX, y);
+    y += lines.length * 12 + 10;
   }
 
   // Signatures partagées : une seule case par rôle pour les 4 lubrifiants — on prend la
@@ -3173,6 +3154,20 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds,
   const mySites = sites.filter((s) => assignedSiteIds.includes(s.id));
   const today = todayStr();
   const yesterday = (() => { const d = new Date(); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  // Même alerte que le Tableau de bord du Superviseur, limitée aux sites/camions de ce compte :
+  // à partir de 6h00, signale l'absence de Stock fin saisi pour la veille — un simple message,
+  // pas un tableau. Un camion dont le dernier stock connu était à zéro (hors service) est exclu.
+  const missingMySites = new Date().getHours() >= 6
+    ? mySites.filter((s) => {
+        const hasYesterday = inventaires.some((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === yesterday);
+        if (hasYesterday) return false;
+        if (s.isMobile) {
+          const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil"));
+          if (!lastInv || Number(lastInv.stockPhysique) === 0) return false;
+        }
+        return true;
+      })
+    : [];
 
   const rows = mySites.map((s) => {
     const stock = stockOf(s.id, "gasoil");
@@ -3204,6 +3199,19 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds,
   return (
     <div className="somip-fade">
       <SitesHero sites={mySites} stockOf={stockOf} canManage={false} onOpenSite={onOpenSite} />
+
+      {missingMySites.length > 0 && (
+        <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, borderLeft: `3px solid ${C.danger}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <AlertTriangle size={16} color={C.danger} />
+            <strong style={{ fontSize: 13, color: C.ink }}>Saisie du {yesterday} manquante</strong>
+          </div>
+          <p style={{ margin: 0, fontSize: 12.5, color: C.sub }}>
+            Stock fin non saisi pour : <strong style={{ color: C.ink }}>{missingMySites.map((s) => s.name).join(", ")}</strong>.
+          </p>
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))", gap: 12, marginBottom: 18 }}>
         {rows.map((r) => (
           <StatCard key={r.site.id} label={r.site.name} value={fmt(r.stock)} unit="L" accent={C.blue} icon={r.site.isMobile ? Truck : Factory} />
