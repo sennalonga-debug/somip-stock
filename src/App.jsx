@@ -525,127 +525,253 @@ async function exportExpositionModelPdf({ dateStr, decadeNum, monthLabel, gasoil
   const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const marginX = 28;
-  const [pR, pG, pB] = hexToRgb(C.blue);
-  const [aR, aG, aB] = hexToRgb(C.orange);
-  const [gR, gG, gB] = hexToRgb("#2E9B5C");
-  const [brR, brG, brB] = hexToRgb("#8B5E34");
-  const GREY_HEAD = [60, 68, 76];
-  const GREY_SUB = [240, 242, 244];
-  const BORDER = [190, 197, 204];
+  const marginX = 26;
 
-  // Ligne orange pleine largeur (rangée 1 du modèle).
-  doc.setFillColor(aR, aG, aB);
-  doc.rect(0, 0, pageWidth, 10, "F");
+  const RED = [192, 80, 77];           // #C0504D
+  const NAVY = [31, 42, 68];           // #1F2A44
+  const TERRACOTTA = [217, 115, 78];   // #D9734E
+  const GREY_LIGHT = [231, 233, 236];  // #E7E9EC
+  const GREY_BLOCK = [236, 236, 236];
+  const BLUE_TOTAL = [58, 110, 165];   // #3A6EA5
+  const GREEN = [46, 107, 79];         // #2E6B4F
+  const PURPLE = [59, 42, 74];         // #3B2A4A
+  const ORANGE_LIGHT = [232, 165, 114];
+  const DARK_GREY_TEXT = [43, 43, 43];
+  const WHITE = [255, 255, 255];
+  const BORDER = [138, 145, 153];
 
-  let y = 30;
+  // ---- En-tête ----
+  const bandH = 14;
+  doc.setFillColor(...RED);
+  doc.rect(0, 0, pageWidth, bandH, "F");
+
+  const headerH = 54;
+  const headerBottom = bandH + headerH;
+
+  let textX = marginX;
   if (CURRENT_LOGO_URL) {
     try {
       const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
       const fmtImg = dataUrl.includes("image/png") ? "PNG" : "JPEG";
-      doc.addImage(dataUrl, fmtImg, marginX, y, 40, 40);
+      doc.addImage(dataUrl, fmtImg, marginX, bandH + 10, 28, 28);
+      textX = marginX + 36;
     } catch (e) { /* logo indisponible : on continue sans */ }
   }
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(14);
-  doc.setTextColor(pR, pG, pB);
-  doc.text(`EXPOSITION AU ${formatDateShort(dateStr)} - ZONE SUD-EST`, marginX + 125, y + 17);
-  doc.setFontSize(12.5);
-  doc.setTextColor(aR, aG, aB);
-  doc.text(`DECADE N°${decadeNum} - ${monthLabel}`, pageWidth - marginX, y + 17, { align: "right" });
-  y += 56;
+  doc.setFontSize(15);
+  doc.setTextColor(...NAVY);
+  doc.text("SOMIP", textX, bandH + 26);
+  doc.setFont("helvetica", "italic");
+  doc.setFontSize(7.5);
+  doc.setTextColor(91, 107, 122);
+  doc.text("La technologie des fluides", textX, bandH + 36);
 
-  // ---- Grille A:L, une seule table, dessinée cellule par cellule ----
-  // 12 colonnes : A (site, large) + B,C,D (gasoil) + E..L (8 colonnes lubrifiant : 4 produits × Stock/Ventes).
-  const colW = [118, 78, 82, 84]; // A, B, C, D
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(...DARK_GREY_TEXT);
+  doc.text(`EXPOSITION AU ${formatDateShort(dateStr)} — ZONE SUD-EST`, pageWidth / 2, bandH + 30, { align: "center" });
+
+  const decadeW = 190, decadeH = 34;
+  const decadeX = pageWidth - marginX - decadeW;
+  const decadeY = bandH + (headerH - decadeH) / 2;
+  doc.setFillColor(...GREY_BLOCK);
+  doc.rect(decadeX, decadeY, decadeW, decadeH, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.setTextColor(...RED);
+  doc.text(`DÉCADE N°${decadeNum} — ${monthLabel}`, decadeX + decadeW / 2, decadeY + decadeH / 2 + 4, { align: "center" });
+
+  doc.setDrawColor(...RED);
+  doc.setLineWidth(1.3);
+  doc.line(marginX, headerBottom + 4, pageWidth - marginX, headerBottom + 4);
+
+  // ---- Grille ----
   const fullWidth = pageWidth - marginX * 2;
-  const lubWidth = fullWidth - colW.reduce((a, w) => a + w, 0);
-  const lubColW = lubWidth / 8;
-  for (let i = 0; i < 8; i++) colW.push(lubColW);
+  const colWLeft = [150, 95, 100, 100]; // SITES, Stock consignation, Demande appro, Ventes
+  const leftW = colWLeft.reduce((a, w) => a + w, 0);
+  const rightW = fullWidth - leftW;
+  const nLub = 4;
+  const lubW = rightW / nLub;
+  const subW = lubW / 2;
+
   const colX = [marginX];
-  colW.forEach((w) => colX.push(colX[colX.length - 1] + w));
-  const totalW = colX[colX.length - 1] - marginX;
+  colWLeft.forEach((w) => colX.push(colX[colX.length - 1] + w));
+  const lubColX = [colX[colX.length - 1]];
+  for (let i = 0; i < nLub; i++) lubColX.push(lubColX[lubColX.length - 1] + lubW);
 
   const PRODUCT_LABELS = { rubia_tir7400: "TIR-7400", ac50: "AC50", ac30: "AC30", sw10: "SW10" };
-  const colColors = [[pR, pG, pB], [aR, aG, aB], [gR, gG, gB], [brR, brG, brB]];
+  const PRODUCT_COLORS = { rubia_tir7400: NAVY, ac50: GREEN, ac30: PURPLE, sw10: PURPLE };
 
-  const cell = (c1, c2, rowY, rowH, opts = {}) => {
-    const x = colX[c1], w = colX[c2 + 1] - colX[c1];
+  const rowHBanner = 20, rowHProd = 20, rowHHead = 26, rowHData = 22;
+
+  const drawCell = (x, w, rowY, rowH, opts = {}) => {
     if (opts.fill) { doc.setFillColor(...opts.fill); doc.rect(x, rowY, w, rowH, "F"); }
     doc.setDrawColor(...BORDER);
-    doc.setLineWidth(0.6);
+    doc.setLineWidth(opts.borderW || 0.6);
     doc.rect(x, rowY, w, rowH, "S");
-    if (opts.text !== undefined) {
+    if (opts.text !== undefined && opts.text !== null) {
       doc.setFont("helvetica", opts.bold ? "bold" : "normal");
       doc.setFontSize(opts.fontSize || 8.5);
-      doc.setTextColor(...(opts.color || [30, 38, 46]));
+      doc.setTextColor(...(opts.color || DARK_GREY_TEXT));
       const align = opts.align || "center";
       const tx = align === "left" ? x + 6 : align === "right" ? x + w - 6 : x + w / 2;
-      doc.text(String(opts.text), tx, rowY + rowH / 2 + 3, { align });
+      doc.text(String(opts.text), tx, rowY + rowH / 2 + (opts.fontSize || 8.5) * 0.32, { align });
     }
   };
 
-  const rowHHeader = 20, rowHData = 19;
-  let ry = y;
+  let y = headerBottom + 20;
 
-  // Rangée "LUBRIFIANT VRAC" (E:L fusionné) — rien à afficher sur A:D à cette hauteur.
-  cell(0, 3, ry, rowHHeader, { fill: [255, 255, 255] });
-  cell(4, 11, ry, rowHHeader, { fill: [pR, pG, pB], text: "LUBRIFIANT VRAC", bold: true, color: [255, 255, 255], fontSize: 10 });
-  ry += rowHHeader;
+  // Ligne 1 : vide grise à gauche / bandeau marine "OKOUMA / PREHOMO · Lubrifiants vrac" à droite
+  drawCell(colX[0], leftW, y, rowHBanner, { fill: GREY_LIGHT });
+  drawCell(lubColX[0], rightW, y, rowHBanner, { fill: NAVY, text: "OKOUMA / PREHOMO · Lubrifiants vrac (Litres)", bold: true, color: WHITE, fontSize: 9.5 });
+  y += rowHBanner;
 
-  // Rangée des 4 produits (2 colonnes fusionnées chacun).
-  cell(0, 3, ry, rowHHeader, { fill: [255, 255, 255] });
+  // Ligne 2 : vide grise à gauche / 4 produits à droite
+  drawCell(colX[0], leftW, y, rowHProd, { fill: GREY_LIGHT });
   productOrder.forEach((p, i) => {
-    cell(4 + i * 2, 4 + i * 2 + 1, ry, rowHHeader, { fill: colColors[i], text: PRODUCT_LABELS[p], bold: true, color: [255, 255, 255], fontSize: 9 });
+    drawCell(lubColX[i], lubW, y, rowHProd, { fill: PRODUCT_COLORS[p], text: PRODUCT_LABELS[p], bold: true, color: WHITE, fontSize: 9 });
   });
-  ry += rowHHeader;
+  y += rowHProd;
 
-  // Rangée d'en-têtes : SITES/CONSIGNATION/DEMANDE D'APPRO/VENTES DECADEn + STOCK/VENTES ×4.
-  cell(0, 0, ry, rowHHeader, { fill: GREY_HEAD, text: "SITES", bold: true, color: [255, 255, 255], align: "left", fontSize: 8.5 });
-  cell(1, 1, ry, rowHHeader, { fill: GREY_HEAD, text: "CONSIGNATION", bold: true, color: [255, 255, 255], fontSize: 7.5 });
-  cell(2, 2, ry, rowHHeader, { fill: GREY_HEAD, text: "DEMANDE D'APPRO", bold: true, color: [255, 255, 255], fontSize: 7 });
-  cell(3, 3, ry, rowHHeader, { fill: GREY_HEAD, text: `VENTES DECADE${decadeNum}`, bold: true, color: [255, 255, 255], fontSize: 7 });
-  for (let i = 0; i < 8; i++) {
-    cell(4 + i, 4 + i, ry, rowHHeader, { fill: GREY_SUB, text: i % 2 === 0 ? "STOCK" : "VENTES", bold: true, fontSize: 7.5 });
+  // Ligne 3 : en-têtes gasoil (marine) + STOCK/VENTES ×4 (marine)
+  const HEAD_LABELS = ["SITES", "Stock en consignation (L)", "Demande d'appro (L)", "Ventes Décade (L)"];
+  HEAD_LABELS.forEach((lbl, i) => {
+    drawCell(colX[i], colWLeft[i], y, rowHHead, { fill: NAVY, text: lbl, bold: true, color: WHITE, fontSize: 7.8 });
+  });
+  for (let i = 0; i < nLub; i++) {
+    drawCell(lubColX[i], subW, y, rowHHead, { fill: NAVY, text: "STOCK", bold: true, color: WHITE, fontSize: 7.5 });
+    drawCell(lubColX[i] + subW, subW, y, rowHHead, { fill: NAVY, text: "VENTES", bold: true, color: WHITE, fontSize: 7.5 });
   }
-  ry += rowHHeader;
+  y += rowHHead;
 
-  // Lignes de données : 8 sites Gasoil (dans l'ordre fourni). La ligne Lubrifiant Prehomo
-  // s'aligne sur la ligne où "PREHOMO" apparaît côté Gasoil, et la ligne Lubrifiant Okouma sur
-  // celle où "OKOUMA" apparaît — pas juste les 2 premières lignes de la liste.
-  const lubDataFor = (siteId) => productOrder.flatMap((p) => {
-    const r = lubFor(siteId, p);
-    return [r ? fmt(r.stockConsignation) : "—", r ? fmt(r.ventes) : "—"];
-  });
-  const prehomoRowIdx = gasoilRows.findIndex((r) => r.label === "PREHOMO");
-  const okoumaRowIdx = gasoilRows.findIndex((r) => r.label === "OKOUMA");
-  const lubRowsByIdx = {};
-  if (prehomoRowIdx >= 0) lubRowsByIdx[prehomoRowIdx] = lubDataFor("prehomo");
-  if (okoumaRowIdx >= 0) lubRowsByIdx[okoumaRowIdx] = lubDataFor("okouma");
+  // Lignes de données : 8 sites gasoil, avec lubrifiants alignés sur OKOUMA/PREHOMO uniquement.
+  gasoilRows.forEach((r) => {
+    drawCell(colX[0], colWLeft[0], y, rowHData, { fill: TERRACOTTA, text: r.label, bold: true, color: WHITE, fontSize: 8.5 });
+    drawCell(colX[1], colWLeft[1], y, rowHData, { fill: GREY_LIGHT, text: fmt(r.stockConsignation), bold: true, color: [0, 0, 0], fontSize: 8.5 });
+    drawCell(colX[2], colWLeft[2], y, rowHData, { fill: GREY_LIGHT, text: String(Math.round(r.demandeAppro)), bold: true, color: [0, 0, 0], fontSize: 8.5 });
+    drawCell(colX[3], colWLeft[3], y, rowHData, { fill: GREY_LIGHT, text: fmt(r.ventesCumulees), bold: true, color: [0, 0, 0], fontSize: 8.5 });
 
-  gasoilRows.forEach((r, idx) => {
-    cell(0, 0, ry, rowHData, { text: r.label, bold: true, align: "left", fontSize: 8.5 });
-    cell(1, 1, ry, rowHData, { text: fmt(r.stockConsignation), fontSize: 8.5, align: "right" });
-    cell(2, 2, ry, rowHData, { text: fmt(r.demandeAppro), fontSize: 8.5, align: "right" });
-    cell(3, 3, ry, rowHData, { text: fmt(r.ventesCumulees), fontSize: 8.5, align: "right" });
-    if (lubRowsByIdx[idx]) {
-      lubRowsByIdx[idx].forEach((val, i) => cell(4 + i, 4 + i, ry, rowHData, { text: val, fontSize: 8, align: "right" }));
-    } else {
-      cell(4, 11, ry, rowHData, { fill: [255, 255, 255] });
-    }
-    ry += rowHData;
+    const isSpecial = r.label === "OKOUMA" || r.label === "PREHOMO";
+    const bw = isSpecial ? 1.6 : 0.6;
+    const siteIdForLub = r.label === "OKOUMA" ? "okouma" : r.label === "PREHOMO" ? "prehomo" : null;
+    productOrder.forEach((p, i) => {
+      const x1 = lubColX[i];
+      const rec = siteIdForLub ? lubFor(siteIdForLub, p) : null;
+      if (rec) {
+        drawCell(x1, subW, y, rowHData, { fill: GREY_LIGHT, text: fmt(rec.stockConsignation), bold: true, color: [0, 0, 0], fontSize: 8, borderW: bw });
+        drawCell(x1 + subW, subW, y, rowHData, { fill: GREY_LIGHT, text: fmt(rec.ventes), bold: true, color: [0, 0, 0], fontSize: 8, borderW: bw });
+      } else {
+        drawCell(x1, subW, y, rowHData, { fill: GREY_LIGHT, borderW: bw });
+        drawCell(x1 + subW, subW, y, rowHData, { fill: GREY_LIGHT, borderW: bw });
+      }
+    });
+    y += rowHData;
   });
 
-  // Ligne TOTAL — bandeau bleu.
-  cell(0, 0, ry, rowHData, { fill: [pR, pG, pB], text: "TOTAL", bold: true, color: [255, 255, 255], align: "left", fontSize: 8.5 });
-  cell(1, 1, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalStock), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
-  cell(2, 2, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalDemande), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
-  cell(3, 3, ry, rowHData, { fill: [pR, pG, pB], text: fmt(totalVentes), bold: true, color: [255, 255, 255], fontSize: 8.5, align: "right" });
-  cell(4, 11, ry, rowHData, { fill: [255, 255, 255] });
-  ry += rowHData;
+  // Ligne TOTAL — bandeau bleu ; partie lubrifiants = bande bleue vide, sans total.
+  drawCell(colX[0], colWLeft[0], y, rowHData, { fill: BLUE_TOTAL, text: "TOTAL", bold: true, color: WHITE, fontSize: 8.5 });
+  drawCell(colX[1], colWLeft[1], y, rowHData, { fill: BLUE_TOTAL, text: fmt(totalStock), bold: true, color: WHITE, fontSize: 8.5 });
+  drawCell(colX[2], colWLeft[2], y, rowHData, { fill: BLUE_TOTAL, text: String(Math.round(totalDemande)), bold: true, color: WHITE, fontSize: 8.5 });
+  drawCell(colX[3], colWLeft[3], y, rowHData, { fill: BLUE_TOTAL, text: fmt(totalVentes), bold: true, color: WHITE, fontSize: 8.5 });
+  drawCell(lubColX[0], rightW, y, rowHData, { fill: BLUE_TOTAL });
+  y += rowHData;
+
+  // ---- Pied de tableau : deux bandes pleine largeur, sans bordure ----
+  const footH = 18;
+  doc.setFillColor(...ORANGE_LIGHT);
+  doc.rect(colX[0], y, leftW, footH, "F");
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(8.5);
+  doc.setTextColor(...WHITE);
+  doc.text("Gasoil · Toutes valeurs en Litres", colX[0] + leftW / 2, y + footH / 2 + 3, { align: "center" });
+
+  doc.setFillColor(...BLUE_TOTAL);
+  doc.rect(lubColX[0], y, rightW, footH, "F");
+  doc.text("Lubrifiants vrac (Litres) — OKOUMA & PREHOMO", lubColX[0] + rightW / 2, y + footH / 2 + 3, { align: "center" });
 
   doc.save(filename);
 }
+
+// Export Excel "Exposition", même disposition que le PDF (lignes/colonnes, cellules fusionnées,
+// pieds de tableau). Limite technique à connaître : la bibliothèque "xlsx" utilisée ici (édition
+// gratuite) écrit les fusions, les formules et le format des nombres, mais ne conserve pas les
+// couleurs de fond à l'écriture — seul le PDF porte la mise en couleur complète du modèle.
+function exportExpositionExcel({ dateStr, decadeNum, monthLabel, gasoilRows, totalStock, totalDemande, totalVentes, productOrder, lubFor, filename }) {
+  const PRODUCT_LABELS = { rubia_tir7400: "TIR-7400", ac50: "AC50", ac30: "AC30", sw10: "SW10" };
+  const NUMFMT = "# ##0";
+  const nCols = 4 + productOrder.length * 2; // A..D + 2 colonnes par produit
+
+  const aoa = [];
+  aoa.push([`EXPOSITION AU ${formatDateShort(dateStr)} — ZONE SUD-EST`]);
+  aoa.push([`DÉCADE N°${decadeNum} — ${monthLabel}`]);
+  aoa.push(["", "", "", "", "OKOUMA / PREHOMO · Lubrifiants vrac (Litres)"]);
+  const prodRow = ["", "", "", ""];
+  productOrder.forEach((p) => { prodRow.push(PRODUCT_LABELS[p]); prodRow.push(""); });
+  aoa.push(prodRow);
+  const headRow = ["SITES", "Stock en consignation (L)", "Demande d'appro (L)", "Ventes Décade (L)"];
+  productOrder.forEach(() => headRow.push("STOCK", "VENTES"));
+  aoa.push(headRow);
+
+  const firstDataRow = aoa.length; // index 0-based dans aoa, = la ligne Excel (1-based) suivante
+  gasoilRows.forEach((r) => {
+    const row = [r.label, Math.round(r.stockConsignation), Math.round(r.demandeAppro), Math.round(r.ventesCumulees)];
+    const siteIdForLub = r.label === "OKOUMA" ? "okouma" : r.label === "PREHOMO" ? "prehomo" : null;
+    productOrder.forEach((p) => {
+      const rec = siteIdForLub ? lubFor(siteIdForLub, p) : null;
+      row.push(rec ? Math.round(rec.stockConsignation) : "", rec ? Math.round(rec.ventes) : "");
+    });
+    aoa.push(row);
+  });
+  const lastDataRow = aoa.length; // ligne Excel (1-based) de la dernière ligne de données
+
+  aoa.push(["TOTAL", null, null, null]); // formules =SOMME() posées juste après
+  const totalRowIdx = aoa.length; // ligne Excel 1-based de TOTAL (= son index 0-based + 1)
+  const footRow0 = aoa.length; // index 0-based de la ligne de pied, avant de la pousser
+  aoa.push(["Gasoil · Toutes valeurs en Litres", "", "", "", "Lubrifiants vrac (Litres) — OKOUMA & PREHOMO"]);
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // Fusions : titre, décade, bandeau lubrifiants, noms de produits, pieds de tableau.
+  const lastCol = nCols - 1;
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: lastCol } },
+    { s: { r: 2, c: 0 }, e: { r: 2, c: 3 } },
+    { s: { r: 2, c: 4 }, e: { r: 2, c: lastCol } },
+    { s: { r: 3, c: 0 }, e: { r: 3, c: 3 } },
+    ...productOrder.map((_, i) => ({ s: { r: 3, c: 4 + i * 2 }, e: { r: 3, c: 5 + i * 2 } })),
+    { s: { r: footRow0, c: 0 }, e: { r: footRow0, c: 3 } }, // pied gasoil
+    { s: { r: footRow0, c: 4 }, e: { r: footRow0, c: lastCol } }, // pied lubrifiants
+  ];
+
+  // Formules =SOMME() sur la ligne TOTAL, pour Stock / Demande / Ventes (colonnes B, C, D).
+  const colLetter = (c) => XLSX.utils.encode_col(c);
+  ["B", "C", "D"].forEach((col, i) => {
+    const cellRef = `${col}${totalRowIdx}`;
+    ws[cellRef] = { t: "n", f: `SUM(${col}${firstDataRow}:${col}${lastDataRow})`, z: NUMFMT };
+  });
+  ws[`A${totalRowIdx}`] = { t: "s", v: "TOTAL" };
+
+  // Format numérique (nombres, pas du texte) sur toutes les cellules de données.
+  for (let r = firstDataRow; r < lastDataRow; r++) {
+    for (let c = 1; c < nCols; c++) {
+      const ref = XLSX.utils.encode_cell({ r, c });
+      if (ws[ref] && typeof ws[ref].v === "number") { ws[ref].t = "n"; ws[ref].z = NUMFMT; }
+    }
+  }
+
+  ws["!cols"] = [{ wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, ...productOrder.flatMap(() => [{ wch: 10 }, { wch: 10 }])];
+
+  // Mise en page impression : A4 paysage, ajusté sur 1 page.
+  ws["!pageSetup"] = { orientation: "landscape", paperSize: 9, fitToPage: true, fitToWidth: 1, fitToHeight: 1 };
+  ws["!margins"] = { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 };
+
+  const wb = XLSX.utils.book_new();
+  wb.Workbook = { Views: [{ RTL: false }] };
+  XLSX.utils.book_append_sheet(wb, ws, "Exposition");
+  XLSX.writeFile(wb, filename);
+}
+
 
 async function exportInventaireOfficielToPdf(inv, site) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
@@ -7361,28 +7487,28 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
   const venteLabel = "Vente";
   const decadeLabel = `Décade ${decadeNum}`;
 
-  const doExcel = () => exportToExcel(`SOMIP_Exposition_${month}_D${decadeNum}.xlsx`, [
-    { name: "Exposition", rows: rows.map((r) => ({
-      Site: r.site.name, [`${venteLabel} (L)`]: Math.round(r.ventesCumulees),
-      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
-    })) },
-    ...(huilesRows.length ? [{ name: "Lubrifiants", rows: huilesRows.map((r) => ({
-      Site: r.site.name, Produit: r.lub.label, [`${venteLabel} (L)`]: Math.round(r.ventes),
-      "Stock en consignation (L)": Math.round(r.stockConsignation), "Demande d'approvisionnement (L)": Math.round(r.demandeAppro),
-    })) }] : []),
-  ]);
+  // Disposition commune au PDF et à l'Excel "modèle" : ordre fixe des 8 sites, 4 lubrifiants
+  // dans l'ordre TIR-7400/AC50/AC30/SW10, alignés uniquement sur les lignes OKOUMA et PREHOMO.
+  const GASOIL_ORDER = [
+    { code: "OKM", label: "OKOUMA" }, { code: "CIM", label: "CIM" }, { code: "GTR", label: "GARE" }, { code: "PRH", label: "PREHOMO" },
+    { code: "CMM", label: "CMM" }, { code: "FCV", label: "SETRAG FRANCEVILLE" }, { code: "GSB", label: "GSEZ BENGUIA" }, { code: "LPK", label: "AMD LIPAKA" },
+  ];
+  const gasoilOrdered = GASOIL_ORDER.map((o) => rows.find((r) => r.site.code === o.code)).filter(Boolean)
+    .map((r, i) => ({ ...r, label: GASOIL_ORDER[i].label }));
+  const PRODUCT_ORDER = ["rubia_tir7400", "ac50", "ac30", "sw10"];
+  const lubFor = (siteId, prodId) => huilesRows.find((r) => r.site.id === siteId && r.lub.id === prodId);
+  const monthLabel = `${FRENCH_MONTHS[Number(month.slice(5, 7)) - 1].toUpperCase()} ${month.slice(0, 4)}`;
+
+  const doExcel = () => exportExpositionExcel({
+    dateStr: todayStr(), decadeNum, monthLabel,
+    gasoilRows: gasoilOrdered, totalStock, totalDemande, totalVentes,
+    productOrder: PRODUCT_ORDER, lubFor,
+    filename: `SOMIP_Exposition_${month}_D${decadeNum}.xlsx`,
+  });
 
   const doPdf = () => {
-    const GASOIL_ORDER = [
-      { code: "OKM", label: "OKOUMA" }, { code: "CIM", label: "CIM" }, { code: "GTR", label: "GARE" }, { code: "PRH", label: "PREHOMO" },
-      { code: "CMM", label: "CMM" }, { code: "FCV", label: "SETRAG FRANCEVILLE" }, { code: "GSB", label: "GSEZ BENGUIA" }, { code: "LPK", label: "AMD LIPAKA" },
-    ];
-    const gasoilOrdered = GASOIL_ORDER.map((o) => rows.find((r) => r.site.code === o.code)).filter(Boolean)
-      .map((r, i) => ({ ...r, label: GASOIL_ORDER[i].label }));
-    const PRODUCT_ORDER = ["rubia_tir7400", "ac50", "ac30", "sw10"];
-    const lubFor = (siteId, prodId) => huilesRows.find((r) => r.site.id === siteId && r.lub.id === prodId);
     exportExpositionModelPdf({
-      dateStr: todayStr(), decadeNum, monthLabel: `${FRENCH_MONTHS[Number(month.slice(5, 7)) - 1].toUpperCase()} ${month.slice(0, 4)}`,
+      dateStr: todayStr(), decadeNum, monthLabel,
       gasoilRows: gasoilOrdered, totalVentes, totalStock, totalDemande,
       productOrder: PRODUCT_ORDER, lubFor,
       filename: `SOMIP_Exposition_${month}_D${decadeNum}.pdf`,
