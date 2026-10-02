@@ -6674,7 +6674,7 @@ const DOC_PAGES = {
     tabs: [{ id: "exposition", label: "Exposition" }, { id: "exposition_comilog", label: "Suivi Stocks Comilog" }],
   },
   doc_bons: {
-    label: "Bons de livraison", icon: ClipboardList, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    label: "Bons de livraison", icon: ClipboardList, allowed: () => true,
     tabs: [{ id: "bons", label: "Bons de livraison" }],
   },
   doc_transferts: {
