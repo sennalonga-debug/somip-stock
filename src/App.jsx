@@ -773,7 +773,7 @@ function exportExpositionExcel({ dateStr, decadeNum, monthLabel, gasoilRows, tot
 }
 
 
-async function exportInventaireOfficielToPdf(inv, site) {
+async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -829,7 +829,7 @@ async function exportInventaireOfficielToPdf(inv, site) {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(11.5);
   doc.setTextColor(aR, aG, aB);
-  doc.text(`${site?.name || inv.siteId} — ${PRODUIT_INVENTAIRE_LABELS[inv.produit] || "Gasoil"} — ${formatDateLong(inv.date)}`, pageWidth / 2, 110, { align: "center" });
+  doc.text(`${site?.name || inv.siteId} — ${inv.produit === "gasoil" || !inv.produit ? "Gasoil" : lubLabel(inv.siteId, inv.produit, productStocks)} — ${formatDateLong(inv.date)}`, pageWidth / 2, 110, { align: "center" });
 
   let y = 138;
   const infoRow = (label1, value1, label2, value2) => {
@@ -1002,7 +1002,7 @@ async function exportInventaireOfficielToPdf(inv, site) {
 // Un seul PDF pour les 4 lubrifiants d'un même site, à une même date et un même type
 // (mensuel/inopiné) — plutôt que 4 documents séparés. "records" doit contenir un inventaire
 // officiel par lubrifiant (même site, même date, même type), déjà filtré par l'appelant.
-async function exportInventaireOfficielLubCombinedPdf(records, site) {
+async function exportInventaireOfficielLubCombinedPdf(records, site, productStocks) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -1094,7 +1094,7 @@ async function exportInventaireOfficielLubCombinedPdf(records, site) {
     const idxLabel = (r.indexCompteurs || []).map((idx) => (idx.indexFin !== null && idx.indexFin !== undefined ? fmt(idx.indexFin) : "—")).join(", ") || "—";
     (r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }]).forEach((c) => {
       detailRows.push([
-        PRODUIT_INVENTAIRE_LABELS[r.produit] || r.produit,
+        lubLabel(r.siteId, r.produit, productStocks),
         c.cuve,
         c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—",
         `${fmt(c.stockAmbiant)} L`,
@@ -1119,7 +1119,7 @@ async function exportInventaireOfficielLubCombinedPdf(records, site) {
 
   // Commentaires : regroupés en un seul bloc (au lieu d'un paragraphe par huile), pour rester
   // compact et tenir sur la page.
-  const commentLines = records.filter((r) => r.commentaire).map((r) => `${PRODUIT_INVENTAIRE_LABELS[r.produit]} : ${r.commentaire}`);
+  const commentLines = records.filter((r) => r.commentaire).map((r) => `${lubLabel(r.siteId, r.produit, productStocks)} : ${r.commentaire}`);
   if (commentLines.length > 0) {
     doc.setFont("helvetica", "italic");
     doc.setFontSize(9);
@@ -1578,8 +1578,16 @@ const inventaireToRow = (i) => ({
   densite15: i.densite15 ?? null, vcf: i.vcf ?? null, stock_physique15: i.stockPhysique15 ?? null, photo_urls: i.photoUrls || [], created_by: i.createdBy ?? null,
 });
 
-const rowToProductStock = (r) => ({ id: r.id, siteId: r.site_id, product: r.product, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial) });
-const productStockToRow = (p) => ({ site_id: p.siteId, product: p.product, capacity: p.capacity, stock_initial: p.stockInitial });
+const rowToProductStock = (r) => ({ id: r.id, siteId: r.site_id, product: r.product, capacity: Number(r.capacity), stockInitial: Number(r.stock_initial), label: r.label || null });
+const productStockToRow = (p) => ({ site_id: p.siteId, product: p.product, capacity: p.capacity, stock_initial: p.stockInitial, label: p.label ?? null });
+// Nom affiché d'un lubrifiant pour UN site précis : la personnalisation enregistrée sur ce site
+// (product_stocks.label) si elle existe, sinon le nom par défaut du catalogue LUBRICANTS. Permet
+// à Prehomo d'afficher "Rubia Works 1000" pendant qu'Okouma garde encore "Rubia Tir7400" pour ce
+// même produit, sans toucher à l'historique ni aux calculs — seul le texte affiché change.
+function lubLabel(siteId, productId, productStocks) {
+  const ps = productStocks?.find((p) => p.siteId === siteId && p.product === productId);
+  return ps?.label || LUBRICANTS.find((l) => l.id === productId)?.label || productId;
+}
 
 const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
@@ -2395,8 +2403,12 @@ export default function App() {
   };
 
   /* ---- mutations : stocks de lubrifiants (Superviseur uniquement) ---- */
-  const saveProductStock = ({ siteId, product, capacity, stockInitial }) => withSync(async () => {
-    const row = productStockToRow({ siteId, product, capacity: Number(capacity), stockInitial: Number(stockInitial) || 0 });
+  const saveProductStock = ({ siteId, product, capacity, stockInitial, label }) => withSync(async () => {
+    // Si "label" n'est pas fourni (réglage de capacité/stock, par exemple), on garde le nom déjà
+    // enregistré pour ce site plutôt que de l'effacer par erreur.
+    const existing = productStocks.find((p) => p.siteId === siteId && p.product === product);
+    const finalLabel = label !== undefined ? (label?.trim() || null) : (existing?.label ?? null);
+    const row = productStockToRow({ siteId, product, capacity: Number(capacity), stockInitial: Number(stockInitial) || 0, label: finalLabel });
     const { data, error } = await supabase.from("product_stocks").upsert(row, { onConflict: "site_id,product" }).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("La mise à jour n'a pas pu être confirmée par le serveur — réessaie.");
@@ -2405,7 +2417,7 @@ export default function App() {
       const exists = prev.some((p) => p.siteId === siteId && p.product === product);
       return exists ? prev.map((p) => (p.siteId === siteId && p.product === product ? saved : p)) : [...prev, saved];
     });
-    appendAudit("Réglage lubrifiant", `${LUBRICANTS.find((l) => l.id === product)?.label || product} — ${sites.find((s) => s.id === siteId)?.name || ""}`);
+    appendAudit("Réglage lubrifiant", `${lubLabel(siteId, product, productStocks)} — ${sites.find((s) => s.id === siteId)?.name || ""}`);
     flash("Stock de lubrifiant mis à jour.");
   });
 
@@ -3184,7 +3196,7 @@ export default function App() {
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
           {view === "vcf" && <VcfView />}
           {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
@@ -3771,7 +3783,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
     const ps = productStocks.find((x) => x.siteId === site.id && x.product === p.id);
     const stockL = stockOf(site.id, p.id);
     const cap = ps?.capacity || 0;
-    return { p, ...a, stockL, kg: stockL * p.densite, cap, pct: cap ? (stockL / cap) * 100 : null };
+    return { p, ...a, stockL, kg: stockL * p.densite, cap, pct: cap ? (stockL / cap) * 100 : null, label: ps?.label || p.label };
   });
   // Pas de cumul entre lubrifiants différents (AC30, AC50, SW10, Rubia Tir7400 sont des produits
   // distincts) : chaque carte ci-dessous reste indépendante, aucun total « tous lubrifiants ».
@@ -3781,7 +3793,10 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
     const perSite = lubSites.map((s) => stockOf(s.id, p.id));
     const l = perSite.reduce((a, v) => a + v, 0);
     const ventes = lubSites.reduce((a, s) => a + (agg[s.id]?.[p.id]?.ventesMonth || 0), 0);
-    return { p, perSite, l, kg: l * p.densite, ventes };
+    // Si les sites affichent un nom différent pour ce même produit (ex. Prehomo "Rubia Works
+    // 1000" / Okouma encore "Rubia Tir7400"), on montre les deux plutôt que d'en choisir un.
+    const perSiteLabels = [...new Set(lubSites.map((s) => lubLabel(s.id, p.id, productStocks)))];
+    return { p, perSite, l, kg: l * p.densite, ventes, label: perSiteLabels.join(" / ") };
   }) : [];
 
   return (
@@ -3802,7 +3817,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
           <div style={{ display: "flex", alignItems: "flex-end", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontSize: "clamp(18px, 2.8vw, 26px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>Lubrifiants — {site.name}</div>
-              <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{LUBRICANTS.map((l) => l.label).join(" · ")}</div>
+              <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{rows.map((r) => r.label).join(" · ")}</div>
             </div>
             <div style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Lubrifiants suivis<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{LUBRICANTS.length}</span></div>
           </div>
@@ -3814,7 +3829,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
         {rows.map((r) => (
           <div key={r.p.id} className="somip-panel somip-kpi-card" onClick={() => setProductId(r.p.id)} title="Voir le détail de ce lubrifiant" style={{ padding: 16, cursor: "pointer", borderColor: r.p.id === productId ? C.blue : C.border, boxShadow: r.p.id === productId ? `0 0 0 2px ${C.blue}33` : undefined }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-              <span style={{ fontWeight: 800, fontSize: 14.5 }}>{r.p.label}</span>
+              <span style={{ fontWeight: 800, fontSize: 14.5 }}>{r.label}</span>
               <span style={{ fontSize: 11, color: C.sub }}>densité {r.p.densite}</span>
             </div>
             <div className="somip-mono" style={{ fontSize: 22, fontWeight: 700, color: C.ink }}>{fmt(r.stockL)} <span style={{ fontSize: 12, fontWeight: 500, color: C.sub }}>L</span></div>
@@ -3838,7 +3853,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18, minHeight: 320 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />{sel.p.label} — stock en fin de journée, 30 derniers jours</h3>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />{sel.label} — stock en fin de journée, 30 derniers jours</h3>
           <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point peut différer du stock actuel affiché, qui cumule les mouvements depuis le stock initial. Clique sur un autre lubrifiant pour changer.</p>
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={detail.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
@@ -3858,7 +3873,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
         </div>
 
         <div className="somip-panel" style={{ flex: "1 1 280px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Situation — {sel.p.label}</h3>
+          <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Situation — {sel.label}</h3>
           <div style={{ fontSize: 12.5, color: C.sub, lineHeight: 1.7 }}>
             <div>Stock actuel : <strong style={{ color: C.ink }}>{fmt(sel.stockL)} L</strong> (≈ {fmt(sel.kg)} kg)</div>
             <div>Dernière jauge : {sel.lastInv ? <strong style={{ color: C.ink }}>{fmt(sel.lastInv.stockPhysique)} L — {sel.lastInv.date}</strong> : <strong style={{ color: C.ink }}>aucune</strong>}</div>
@@ -3879,7 +3894,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
               <tbody>
                 {netRows.map((r) => (
                   <tr key={r.p.id}>
-                    <td style={{ fontWeight: 600 }}>{r.p.label}</td>
+                    <td style={{ fontWeight: 600 }}>{r.label}</td>
                     {r.perSite.map((v, i) => <td key={lubSites[i].id} className="somip-mono" style={{ textAlign: "right" }}>{fmt(v)} L</td>)}
                     <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.l)} L</td>
                     <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{fmt(r.kg)} kg</td>
@@ -3893,7 +3908,7 @@ function LubricantsDashboardView({ sites, movements, inventaires, productStocks,
       )}
 
       <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements — {sel.p.label} · {site.name}</h3>
+        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements — {sel.label} · {site.name}</h3>
         <table className="somip-table">
           <thead><tr><th>Date</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
           <tbody>
@@ -4243,7 +4258,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   const [editForm, setEditForm] = useState({});
   const [lubSiteId, setLubSiteId] = useState(LUBRICANT_SITE_IDS[0]);
   const [lubProduct, setLubProduct] = useState(LUBRICANTS[0].id);
-  const [lubForm, setLubForm] = useState({ capacity: "", stockInitial: "" });
+  const [lubForm, setLubForm] = useState({ capacity: "", stockInitial: "", label: "" });
   const trucks = sites.filter((s) => s.isMobile);
   const stations = sites.filter((s) => !s.isMobile);
   const [assignForm, setAssignForm] = useState({ truckId: trucks[0]?.id || "", stationId: stations[0]?.id || "", startDate: todayStr() });
@@ -4274,11 +4289,11 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
   const loadLubForEdit = (siteId, product) => {
     setLubSiteId(siteId); setLubProduct(product);
     const ps = productStocks.find((p) => p.siteId === siteId && p.product === product);
-    setLubForm({ capacity: ps ? String(ps.capacity) : "", stockInitial: ps ? String(ps.stockInitial) : "" });
+    setLubForm({ capacity: ps ? String(ps.capacity) : "", stockInitial: ps ? String(ps.stockInitial) : "", label: ps?.label || "" });
   };
   const submitLub = () => {
     if (!lubForm.capacity) return;
-    saveProductStock({ siteId: lubSiteId, product: lubProduct, capacity: lubForm.capacity, stockInitial: lubForm.stockInitial });
+    saveProductStock({ siteId: lubSiteId, product: lubProduct, capacity: lubForm.capacity, stockInitial: lubForm.stockInitial, label: lubForm.label });
   };
 
   const submitAssign = () => {
@@ -4449,11 +4464,15 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
             {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label} (densité {l.densite})</option>)}
           </select>
         </Field>
+        <Field label="Nom affiché sur ce site (optionnel)">
+          <input className="somip-input" value={lubForm.label} onChange={(e) => setLubForm({ ...lubForm, label: e.target.value })} placeholder={LUBRICANTS.find((l) => l.id === lubProduct)?.label || ""} />
+        </Field>
+        <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>Laisse vide pour garder le nom par défaut ({LUBRICANTS.find((l) => l.id === lubProduct)?.label}). Change uniquement l'affichage sur ce site — l'historique et les calculs ne sont pas affectés.</p>
         <div style={{ display: "flex", gap: 8 }}>
           <div style={{ flex: 1 }}><Field label="Capacité (L)"><input type="number" className="somip-input" value={lubForm.capacity} onChange={(e) => setLubForm({ ...lubForm, capacity: e.target.value })} placeholder="Ex : 1000" /></Field></div>
           <div style={{ flex: 1 }}><Field label="Stock initial (L)"><input type="number" className="somip-input" value={lubForm.stockInitial} onChange={(e) => setLubForm({ ...lubForm, stockInitial: e.target.value })} placeholder="0" /></Field></div>
         </div>
-        {currentLubStock && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>Déjà enregistré : capacité {fmt(currentLubStock.capacity)} L, stock initial {fmt(currentLubStock.stockInitial)} L.</p>}
+        {currentLubStock && <p style={{ margin: "-6px 0 10px", fontSize: 11, color: C.sub }}>Déjà enregistré : capacité {fmt(currentLubStock.capacity)} L, stock initial {fmt(currentLubStock.stockInitial)} L{currentLubStock.label ? `, nom affiché « ${currentLubStock.label} »` : ""}.</p>}
         <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submitLub} disabled={!lubForm.capacity}>
           <Check size={15} /> Enregistrer
         </button>
@@ -5011,7 +5030,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
 
           {isLub && !productStockEntry && (
             <p style={{ margin: "-6px 0 12px", fontSize: 11.5, color: C.warning }}>
-              Aucune capacité/stock initial défini pour {LUBRICANTS.find((l) => l.id === product)?.label} sur ce site — configure-le sur la page "Sites" (Superviseur).
+              Aucune capacité/stock initial défini pour {lubLabel(siteId, product, productStocks)} sur ce site — configure-le sur la page "Sites" (Superviseur).
             </p>
           )}
 
@@ -5411,7 +5430,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
       )}
 
       <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
-        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Mouvements du {date} — {site?.name}{isLub && ` — ${LUBRICANTS.find((l) => l.id === product)?.label}`}</h3>
+        <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Mouvements du {date} — {site?.name}{isLub && ` — ${lubLabel(siteId, product, productStocks)}`}</h3>
         <table className="somip-table">
           <thead><tr><th>Type</th><th>Détail</th><th style={{ textAlign: "right" }}>Quantité</th>{canManage && <th></th>}</tr></thead>
           <tbody>
@@ -5805,7 +5824,7 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly }) {
+function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
   const [mainTab, setMainTab] = useState(isTotalEnergiesOnly ? "officiel" : "rapide");
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -5872,7 +5891,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
             <Field label="Produit">
               <select className="somip-select" value={productId} onChange={(e) => setProductId(e.target.value)}>
                 <option value="gasoil">Gasoil</option>
-                {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+                {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{lubLabel(siteId, l.id, productStocks)}</option>)}
               </select>
             </Field>
           )}
@@ -5977,7 +5996,7 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
               {list.length === 0 && <EmptyRow colSpan={canManage ? 12 : 11} text="Aucun inventaire enregistré." />}
               {list.map((i) => {
                 const site = sites.find((s) => s.id === i.siteId);
-                const productLabel = !i.product || i.product === "gasoil" ? "Gasoil" : (LUBRICANTS.find((l) => l.id === i.product)?.label || i.product);
+                const productLabel = !i.product || i.product === "gasoil" ? "Gasoil" : lubLabel(i.siteId, i.product, productStocks);
                 const nature = i.nature || (i.ecart === 0 ? "neutre" : i.ecart < 0 ? "perte" : "gain");
                 const conformite = i.conformite || "conforme";
                 const basis15 = i.basisEcart === "15c";
@@ -6008,14 +6027,14 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
       )}
 
       {mainTab === "officiel" && (
-        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} />
+        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
       )}
     </div>
   );
 }
 
 /* ---- Inventaire officiel (inopiné / mensuel) — cuve par cuve, avec PDF signé ---- */
-function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly }) {
+function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
   const fixedSites = sites.filter((s) => !s.isMobile);
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -6092,7 +6111,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   const removeIndexRow = (idx) => setIndexReadings((prev) => prev.filter((_, i) => i !== idx));
 
   const isLubTous = produit === "lubrifiants_tous";
-  const emptyLubBlock = (l) => ({ produit: l.id, label: l.label, cuve: `Cuve ${l.label}`, hauteur: "", stockAmbiant: "", indexFin: "" });
+  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "" });
   const [lubBlocks, setLubBlocks] = useState(() => LUBRICANTS.map(emptyLubBlock));
   useEffect(() => {
     if (editLoadingRef.current) return;
@@ -6149,7 +6168,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       const c0 = (inv.cuves && inv.cuves[0]) || {};
       const idx0 = (inv.indexCompteurs && inv.indexCompteurs[0]) || {};
       setLubBlocks(LUBRICANTS.map((l) => (l.id === inv.produit
-        ? { produit: l.id, label: l.label, cuve: c0.cuve || `Cuve ${l.label}`, hauteur: c0.hauteur ?? "", stockAmbiant: String(inv.stockAmbiant ?? ""), indexFin: idx0.indexFin ?? "" }
+        ? { produit: l.id, label: lubLabel(inv.siteId, l.id, productStocks), cuve: c0.cuve || `Cuve ${lubLabel(inv.siteId, l.id, productStocks)}`, hauteur: c0.hauteur ?? "", stockAmbiant: String(inv.stockAmbiant ?? ""), indexFin: idx0.indexFin ?? "" }
         : emptyLubBlock(l))));
     }
   };
@@ -6454,7 +6473,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                 <tr key={inv.id}>
                   <td className="somip-mono">{inv.date}</td>
                   <td>{sites.find((s) => s.id === inv.siteId)?.name}</td>
-                  <td style={{ color: C.sub }}>{PRODUIT_INVENTAIRE_LABELS[inv.produit] || inv.produit}</td>
+                  <td style={{ color: C.sub }}>{inv.produit === "gasoil" || !inv.produit ? "Gasoil" : lubLabel(inv.siteId, inv.produit, productStocks)}</td>
                   <td><Badge color={inv.type === "inopine" ? C.orange : C.blue}>{TYPE_INVENTAIRE_LABELS[inv.type]}</Badge></td>
                   <td style={{ color: C.sub }}>{inv.inventoriste || "—"}</td>
                   <td style={{ color: C.sub }}>{inv.operateur || "—"}</td>
@@ -6471,11 +6490,11 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   </td>
                   <td>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielToPdf(inv, sites.find((s) => s.id === inv.siteId))}>
+                      <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielToPdf(inv, sites.find((s) => s.id === inv.siteId), productStocks)}>
                         <Download size={12} /> PDF
                       </button>
                       {lubGroupFor(inv) && (
-                        <button className="somip-btn somip-btn-secondary" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielLubCombinedPdf(lubGroupFor(inv), sites.find((s) => s.id === inv.siteId))} title={`Combine les ${lubGroupFor(inv).length} lubrifiants de ce site, cette date et ce type en un seul PDF`}>
+                        <button className="somip-btn somip-btn-secondary" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => exportInventaireOfficielLubCombinedPdf(lubGroupFor(inv), sites.find((s) => s.id === inv.siteId), productStocks)} title={`Combine les ${lubGroupFor(inv).length} lubrifiants de ce site, cette date et ce type en un seul PDF`}>
                           <Download size={12} /> PDF combiné ({lubGroupFor(inv).length})
                         </button>
                       )}
@@ -7589,7 +7608,7 @@ function ExposureReport({ sites, movements, inventaires, truckAssignments, produ
                   {huilesRows.map((r, i) => (
                     <tr key={i}>
                       <td style={{ fontWeight: 600 }}>{r.site.name}</td>
-                      <td>{r.lub.label}</td>
+                      <td>{lubLabel(r.site.id, r.lub.id, productStocks)}</td>
                       <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(r.ventes)} L</td>
                       <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockConsignation)} L</td>
                       <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(r.demandeAppro)} L</td>
@@ -8874,7 +8893,7 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
         </Field>
         <Field label="Produit">
           <select className="somip-select" style={{ maxWidth: 200 }} value={productId} onChange={(e) => setProductId(e.target.value)}>
-            {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+            {LUBRICANTS.map((l) => <option key={l.id} value={l.id}>{lubLabel(siteId, l.id, productStocks)}</option>)}
           </select>
         </Field>
         <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
@@ -8882,7 +8901,7 @@ function LubricantMonthlyLedgerReport({ sites, movements, inventaires, productSt
 
       {site && lub && (
         <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name} — {lub.label}</h4>
+          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name} — {lubLabel(siteId, productId, productStocks)}</h4>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
             <MiniStat label="Total Réceptions" value={`+${fmt(totalReception)} L`} color={C.success} />
