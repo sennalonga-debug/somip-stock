@@ -5436,6 +5436,20 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         </div>
       )}
 
+      {existingInv && (
+        <div className="somip-panel" style={{ flex: "1 1 100%", padding: "14px 18px", marginBottom: 2, borderLeft: `4px solid ${gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub}` }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".03em" }}>Perte/Gain du jour — {date}</div>
+              <div style={{ fontSize: 11.5, color: C.sub, marginTop: 2 }}>Jauge mesurée − stock théorique de la journée</div>
+            </div>
+            <div className="somip-mono" style={{ fontSize: 24, fontWeight: 800, color: gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub }}>
+              {gainPerteJour >= 0 ? "+" : ""}{fmt(gainPerteJour)} L
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
         <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Mouvements du {date} — {site?.name}{isLub && ` — ${lubLabel(siteId, product, productStocks)}`}</h3>
         <table className="somip-table">
@@ -5475,16 +5489,6 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(existingInv.stockPhysique)} L</td>
                 {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaire(existingInv)} /></td>}
-              </tr>
-            )}
-            {existingInv && (
-              <tr>
-                <td><Badge color={gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub}>Perte/Gain du jour</Badge></td>
-                <td style={{ color: C.sub }}>Jauge mesurée − stock théorique de la journée</td>
-                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub }}>
-                  {gainPerteJour >= 0 ? "+" : ""}{fmt(gainPerteJour)} L
-                </td>
-                {canManage && <td></td>}
               </tr>
             )}
           </tbody>
