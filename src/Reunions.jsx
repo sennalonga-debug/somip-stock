@@ -85,7 +85,17 @@ const rPanel = { background: "#fff", border: `1px solid ${RC.border}`, borderRad
 /* ---- Salle de réunion : iframe Jitsi Meet plein écran dans la carte ---- */
 function MeetingRoom({ reunion, currentUserName, onLeave }) {
   const displayName = encodeURIComponent(currentUserName || "Invité SOMIP");
-  const src = `https://meet.jit.si/${encodeURIComponent(reunion.room_name)}#userInfo.displayName=%22${displayName}%22&config.prejoinPageEnabled=true`;
+  // Jitsi masque parfois lui-même le bouton de partage d'écran dans un cadre intégré (iframe),
+  // par détection de fonctionnalité — même quand le navigateur l'autoriserait. On force sa
+  // présence dans la barre d'outils via la configuration d'URL de Jitsi, en plus de l'autorisation
+  // "display-capture" déjà donnée au cadre ci-dessous ; les deux sont nécessaires.
+  const toolbarButtons = ["microphone", "camera", "desktop", "chat", "raisehand", "tileview", "fullscreen", "hangup"];
+  const configParams = [
+    "config.prejoinPageEnabled=true",
+    `config.toolbarButtons=${encodeURIComponent(JSON.stringify(toolbarButtons))}`,
+    "config.disableDeepLinking=true",
+  ].join("&");
+  const src = `https://meet.jit.si/${encodeURIComponent(reunion.room_name)}#userInfo.displayName=%22${displayName}%22&${configParams}`;
 
   return (
     <div className="somip-fade">
@@ -108,6 +118,7 @@ function MeetingRoom({ reunion, currentUserName, onLeave }) {
             title={`Réunion — ${reunion.titre}`}
             src={src}
             allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write"
+            allowFullScreen
             style={{ width: "100%", height: "min(70vh, 640px)", border: "none", display: "block" }}
           />
         </div>
