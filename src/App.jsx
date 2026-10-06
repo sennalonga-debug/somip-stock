@@ -1830,10 +1830,14 @@ function AuthScreen() {
   const [busy, setBusy] = useState(false);
   const [resetBusy, setResetBusy] = useState(false);
   const [logoUrl, setLogoUrl] = useState(null);
+  const [bgUrl, setBgUrl] = useState(null);
 
   useEffect(() => {
-    supabase.from("settings").select("logo_url").eq("id", 1).maybeSingle()
-      .then(({ data }) => { if (data?.logo_url) setLogoUrl(data.logo_url); })
+    supabase.from("settings").select("logo_url, login_bg_url").eq("id", 1).maybeSingle()
+      .then(({ data }) => {
+        if (data?.logo_url) setLogoUrl(data.logo_url);
+        if (data?.login_bg_url) setBgUrl(data.login_bg_url);
+      })
       .catch(() => {});
   }, []);
 
@@ -1868,103 +1872,156 @@ function AuthScreen() {
   // Styles entièrement autonomes : tout est écrit ici, sans dépendre d'aucune classe globale de
   // l'application (celle-ci ne charge son style commun qu'une fois connecté, jamais avant).
   const SYS_FONT = "-apple-system, 'Segoe UI', Arial, Helvetica, sans-serif";
+  const RED = "#C0504D";
+  const NAVY = "#0A1F33";
   const label = { display: "block", fontSize: 13, fontWeight: 600, color: "#3C4654", marginBottom: 6 };
   const fieldWrap = { marginBottom: 16 };
   const inputBase = {
-    width: "100%", height: 44, boxSizing: "border-box", padding: "0 12px", fontSize: 14.5,
-    fontFamily: SYS_FONT, color: "#1A2330", background: "#fff", borderRadius: 8,
+    width: "100%", height: 50, boxSizing: "border-box", padding: "0 16px", fontSize: 15,
+    fontFamily: SYS_FONT, color: "#1A2330", background: "#fff", borderRadius: 12,
     border: "1.5px solid #D7DCE2", outline: "none", transition: "border-color .15s ease",
   };
-  const inputFocus = { borderColor: C.blue, boxShadow: `0 0 0 3px ${C.blue}22` };
+  const inputFocus = { borderColor: RED, boxShadow: `0 0 0 3px ${RED}22` };
 
   return (
-    <div style={{ minHeight: "100%", width: "100%", background: "#F5F7FA", fontFamily: SYS_FONT, display: "flex", flexDirection: "column" }}>
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "24px 16px" }}>
-        <div style={{ width: 400, maxWidth: "100%", background: "#fff", borderRadius: 12, boxShadow: "0 2px 10px rgba(20,30,45,0.07)", border: "1px solid #EAEDF1", padding: "34px 32px" }}>
+    <div className="somip-auth-root" style={{ minHeight: "100%", width: "100%", fontFamily: SYS_FONT, display: "flex" }}>
+      <style>{`
+        @keyframes somipAuthSpin { to { transform: rotate(360deg); } }
+        .somip-auth-left { flex: 1 1 480px; display: flex; flex-direction: column; background: #fff; }
+        .somip-auth-right { flex: 1 1 50%; position: relative; overflow: hidden; }
+        @media (max-width: 860px) {
+          .somip-auth-right { display: none !important; }
+          .somip-auth-logo { width: min(160px, 100%) !important; }
+        }
+      `}</style>
 
-          <div style={{ textAlign: "center", marginBottom: 26 }}>
-            {logoUrl ? (
-              <img src={logoUrl} alt="Logo SOMIP" style={{ width: 72, height: 72, borderRadius: 12, objectFit: "cover", margin: "0 auto 12px", display: "block" }} />
-            ) : (
-              <div style={{ width: 72, height: 72, borderRadius: 12, background: C.blue, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <Fuel size={34} color="#fff" />
-              </div>
-            )}
-            <div style={{ fontSize: 19, fontWeight: 700, color: "#1A2330" }}>SOMIP</div>
-            <div style={{ fontSize: 13, color: "#6B7684", marginTop: 2 }}>Gestion de Stock</div>
-          </div>
+      <div className="somip-auth-left">
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "32px 24px" }}>
+          <div style={{ width: "100%", maxWidth: 420 }}>
 
-          <div style={fieldWrap}>
-            <label style={label}>E-mail ou identifiant</label>
-            <input
-              type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={onKeyDown}
-              onFocus={() => setEmailFocus(true)} onBlur={() => setEmailFocus(false)}
-              placeholder="prenom.nom@somip-sarl.ga" autoComplete="username"
-              style={{ ...inputBase, ...(emailFocus ? inputFocus : null) }}
-            />
-          </div>
+            <div style={{ textAlign: "center", marginBottom: 22 }}>
+              {logoUrl ? (
+                <img
+                  src={logoUrl} alt="Logo SOMIP"
+                  style={{ width: "min(220px, 100%)", height: "auto", objectFit: "contain", margin: "0 auto 10px", display: "block" }}
+                  className="somip-auth-logo"
+                />
+              ) : (
+                <div style={{ width: 90, height: 90, borderRadius: 16, background: RED, margin: "0 auto 10px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Fuel size={42} color="#fff" />
+                </div>
+              )}
+              <div style={{ fontSize: 13, color: "#6B7684", fontStyle: "italic" }}>La technologie des fluides</div>
+            </div>
 
-          <div style={fieldWrap}>
-            <label style={label}>Mot de passe</label>
-            <div style={{ position: "relative" }}>
+            <h1 style={{ fontSize: 23, fontWeight: 800, color: "#1A2330", textAlign: "center", margin: "0 0 8px", lineHeight: 1.3 }}>
+              Bienvenue sur l'application SOMIP Stock
+            </h1>
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: NAVY, textAlign: "center", marginBottom: 4 }}>
+              SOMIP SARL — La technologie des fluides
+            </div>
+            <div style={{ fontSize: 12.5, color: "#8893A1", textAlign: "center", marginBottom: 22 }}>
+              Représentée par Ernest MAYENI
+            </div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: "#3C4654", textAlign: "center", marginBottom: 20 }}>
+              Connectez-vous pour continuer
+            </div>
+
+            <div style={fieldWrap}>
+              <label style={label}>E-mail ou identifiant</label>
               <input
-                type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={onKeyDown}
-                onFocus={() => setPasswordFocus(true)} onBlur={() => setPasswordFocus(false)}
-                placeholder="••••••••" autoComplete="current-password"
-                style={{ ...inputBase, paddingRight: 40, ...(passwordFocus ? inputFocus : null) }}
+                type="email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={onKeyDown}
+                onFocus={() => setEmailFocus(true)} onBlur={() => setEmailFocus(false)}
+                placeholder="prenom.nom@somip-sarl.ga" autoComplete="username"
+                style={{ ...inputBase, ...(emailFocus ? inputFocus : null) }}
               />
+            </div>
+
+            <div style={fieldWrap}>
+              <label style={label}>Mot de passe</label>
+              <div style={{ position: "relative" }}>
+                <input
+                  type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={onKeyDown}
+                  onFocus={() => setPasswordFocus(true)} onBlur={() => setPasswordFocus(false)}
+                  placeholder="••••••••" autoComplete="current-password"
+                  style={{ ...inputBase, paddingRight: 44, ...(passwordFocus ? inputFocus : null) }}
+                />
+                <button
+                  type="button" onClick={() => setShowPassword((v) => !v)}
+                  title={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
+                  style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)", width: 34, height: 34, border: "none", background: "transparent", cursor: "pointer", color: "#6B7684", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 8 }}
+                >
+                  {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "#3C4654", cursor: "pointer" }}>
+                <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} style={{ width: 15, height: 15, cursor: "pointer" }} />
+                Se souvenir de moi
+              </label>
               <button
-                type="button" onClick={() => setShowPassword((v) => !v)}
-                title={showPassword ? "Masquer le mot de passe" : "Afficher le mot de passe"}
-                style={{ position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)", width: 32, height: 32, border: "none", background: "transparent", cursor: "pointer", color: "#6B7684", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 6 }}
+                type="button" onClick={forgotPassword} disabled={resetBusy}
+                style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 13, color: RED, fontWeight: 600, padding: 0 }}
               >
-                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                Mot de passe oublié ?
               </button>
             </div>
-          </div>
 
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 13, color: "#3C4654", cursor: "pointer" }}>
-              <input type="checkbox" checked={rememberMe} onChange={(e) => setRememberMe(e.target.checked)} style={{ width: 15, height: 15, cursor: "pointer" }} />
-              Se souvenir de moi
-            </label>
+            {error && <p style={{ color: "#C0362C", fontSize: 13, margin: "0 0 14px", lineHeight: 1.4 }}>{error}</p>}
+            {info && <p style={{ color: "#1E7A45", fontSize: 13, margin: "0 0 14px", lineHeight: 1.4 }}>{info}</p>}
+
             <button
-              type="button" onClick={forgotPassword} disabled={resetBusy}
-              style={{ border: "none", background: "transparent", cursor: "pointer", fontSize: 13, color: C.blue, fontWeight: 600, padding: 0 }}
+              onClick={submit} disabled={busy}
+              onMouseEnter={() => setBtnHover(true)} onMouseLeave={() => setBtnHover(false)}
+              style={{
+                width: "100%", height: 50, borderRadius: 12, border: "none", cursor: busy ? "default" : "pointer",
+                background: busy ? RED : (btnHover ? "#9E3F3C" : RED), color: "#fff", fontSize: 15.5, fontWeight: 700,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                opacity: busy ? 0.85 : 1, transition: "background .15s ease", fontFamily: SYS_FONT,
+              }}
             >
-              Mot de passe oublié ?
+              {busy ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" style={{ animation: "somipAuthSpin .8s linear infinite" }}>
+                  <circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.35)" strokeWidth="3" fill="none" />
+                  <path d="M21 12a9 9 0 0 0-9-9" stroke="#fff" strokeWidth="3" fill="none" strokeLinecap="round" />
+                </svg>
+              ) : <Lock size={15} />}
+              {busy ? "Connexion…" : "Se connecter"}
             </button>
+
+            <p style={{ marginTop: 18, fontSize: 12, color: "#8893A1", textAlign: "center" }}>
+              Pas encore de compte ? Un Superviseur doit t'en créer un depuis la page Utilisateurs.
+            </p>
           </div>
-
-          {error && <p style={{ color: "#C0362C", fontSize: 13, margin: "0 0 14px", lineHeight: 1.4 }}>{error}</p>}
-          {info && <p style={{ color: "#1E7A45", fontSize: 13, margin: "0 0 14px", lineHeight: 1.4 }}>{info}</p>}
-
-          <button
-            onClick={submit} disabled={busy}
-            onMouseEnter={() => setBtnHover(true)} onMouseLeave={() => setBtnHover(false)}
-            style={{
-              width: "100%", height: 44, borderRadius: 8, border: "none", cursor: busy ? "default" : "pointer",
-              background: busy ? C.blue : (btnHover ? C.blueDark : C.blue), color: "#fff", fontSize: 15, fontWeight: 600,
-              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
-              opacity: busy ? 0.85 : 1, transition: "background .15s ease", fontFamily: SYS_FONT,
-            }}
-          >
-            {busy ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" style={{ animation: "somipAuthSpin .8s linear infinite" }}>
-                <circle cx="12" cy="12" r="9" stroke="rgba(255,255,255,0.35)" strokeWidth="3" fill="none" />
-                <path d="M21 12a9 9 0 0 0-9-9" stroke="#fff" strokeWidth="3" fill="none" strokeLinecap="round" />
-              </svg>
-            ) : <Lock size={15} />}
-            {busy ? "Connexion…" : "Se connecter"}
-          </button>
-          <style>{`@keyframes somipAuthSpin { to { transform: rotate(360deg); } }`}</style>
-
-          <p style={{ marginTop: 16, fontSize: 12, color: C.sub, textAlign: "center" }}>
-            Pas encore de compte ? Un Superviseur doit t'en créer un depuis la page Utilisateurs.
-          </p>
         </div>
-        <div style={{ width: 400, maxWidth: "100%", textAlign: "center", fontSize: 12, color: C.sub, marginTop: 16 }}>
+        <div style={{ textAlign: "center", fontSize: 12, color: "#8893A1", padding: "14px 12px" }}>
           © 2026 SOMIP — Sites externalisés
+        </div>
+      </div>
+
+      <div className="somip-auth-right" style={{
+        background: bgUrl
+          ? `linear-gradient(165deg, rgba(10,31,51,0.55) 0%, rgba(192,80,77,0.45) 100%), url(${bgUrl}) center/cover no-repeat`
+          : `linear-gradient(155deg, ${RED} 0%, ${NAVY} 100%)`,
+      }}>
+        {!bgUrl && (
+          <>
+            <div style={{ position: "absolute", top: "-10%", right: "-8%", width: 420, height: 420, borderRadius: "50%", background: "rgba(255,255,255,0.06)" }} />
+            <div style={{ position: "absolute", bottom: "-12%", left: "-10%", width: 340, height: 340, borderRadius: "50%", background: "rgba(255,255,255,0.05)" }} />
+            <svg style={{ position: "absolute", left: 0, right: 0, bottom: 0, width: "100%", height: "40%", opacity: 0.12 }} viewBox="0 0 1440 400" preserveAspectRatio="none">
+              <path d="M0,220 C240,300 420,140 680,190 C940,240 1060,100 1300,150 C1380,166 1420,180 1440,190 L1440,400 L0,400 Z" fill="#fff" />
+            </svg>
+          </>
+        )}
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "flex-end", padding: 48 }}>
+          <div style={{ fontSize: 26, fontWeight: 800, color: "#fff", textShadow: "0 2px 10px rgba(0,0,0,0.35)", maxWidth: 420, lineHeight: 1.35 }}>
+            La technologie des fluides
+          </div>
+          <div style={{ fontSize: 14, color: "rgba(255,255,255,0.88)", marginTop: 10, maxWidth: 380 }}>
+            Gestion du stock de gasoil et des lubrifiants — SOMIP, Zone Sud-Est, Gabon.
+          </div>
         </div>
       </div>
     </div>
