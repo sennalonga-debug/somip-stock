@@ -31,6 +31,14 @@ const RC = {
   danger: "#C63C3C",
 };
 
+// Choix "rôle" sélectionnables au même titre qu'un site, dans "Sites concernés" — une réunion
+// peut concerner les Superviseurs ou les comptes Lecture seule, pas seulement des sites précis.
+// Stockés dans le même tableau site_ids, avec un préfixe qui les distingue d'un vrai id de site.
+const ROLE_CHOICES = [
+  { id: "role:superviseur", label: "Superviseurs" },
+  { id: "role:lecture", label: "Lecture seule" },
+];
+
 function generateRoomName() {
   // Nom de salle unique, sans information sensible (pas le titre de la réunion) : n'importe
   // qui connaissant ce nom pourrait rejoindre la salle sur meet.jit.si, donc autant qu'il soit
@@ -139,7 +147,7 @@ function MeetingForm({ initial, sites, onCancel, onSubmit }) {
         <div style={{ flex: "1 1 160px" }}><RField label="Date"><input type="date" style={rInputStyle} value={date} onChange={(e) => setDate(e.target.value)} /></RField></div>
         <div style={{ flex: "1 1 120px" }}><RField label="Heure"><input type="time" style={rInputStyle} value={heure} onChange={(e) => setHeure(e.target.value)} /></RField></div>
       </div>
-      <RField label="Sites concernés (optionnel)">
+      <RField label="Sites / profils concernés (optionnel)">
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "4px 0" }}>
           {sites.map((s) => (
             <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, border: `1px solid ${siteIds.includes(s.id) ? RC.blue : RC.border}`, background: siteIds.includes(s.id) ? `${RC.blue}12` : "#fff", borderRadius: 20, padding: "5px 11px", cursor: "pointer" }}>
@@ -148,6 +156,14 @@ function MeetingForm({ initial, sites, onCancel, onSubmit }) {
             </label>
           ))}
           {sites.length === 0 && <span style={{ fontSize: 12, color: RC.sub }}>Aucun site disponible.</span>}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "8px 0 0", marginTop: 6, borderTop: `1px dashed ${RC.border}` }}>
+          {ROLE_CHOICES.map((r) => (
+            <label key={r.id} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, border: `1px solid ${siteIds.includes(r.id) ? RC.orange : RC.border}`, background: siteIds.includes(r.id) ? `${RC.orange}14` : "#fff", borderRadius: 20, padding: "5px 11px", cursor: "pointer" }}>
+              <input type="checkbox" checked={siteIds.includes(r.id)} onChange={() => toggleSite(r.id)} style={{ margin: 0 }} />
+              {r.label}
+            </label>
+          ))}
         </div>
       </RField>
       <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
@@ -209,7 +225,11 @@ export default function ReunionsView({ canManage, currentUserName, sites = [] })
     return <MeetingRoom reunion={activeRoom} currentUserName={currentUserName} onLeave={() => setActiveRoom(null)} />;
   }
 
-  const siteNames = (ids) => (ids || []).map((id) => sites.find((s) => s.id === id)?.name).filter(Boolean);
+  const siteNames = (ids) => (ids || []).map((id) => {
+    const role = ROLE_CHOICES.find((r) => r.id === id);
+    if (role) return role.label;
+    return sites.find((s) => s.id === id)?.name;
+  }).filter(Boolean);
 
   const MeetingRow = ({ r, isPast }) => (
     <div style={{ ...rPanel, padding: 16, marginBottom: 10, opacity: isPast ? 0.7 : 1 }}>
@@ -221,7 +241,7 @@ export default function ReunionsView({ canManage, currentUserName, sites = [] })
             <span style={{ display: "flex", alignItems: "center", gap: 5 }}><Clock size={13} />{(r.heure || "").slice(0, 5)}</span>
           </div>
           {siteNames(r.site_ids).length > 0 && (
-            <div style={{ marginTop: 6, fontSize: 12, color: RC.sub }}>Sites concernés : {siteNames(r.site_ids).join(", ")}</div>
+            <div style={{ marginTop: 6, fontSize: 12, color: RC.sub }}>Concerne : {siteNames(r.site_ids).join(", ")}</div>
           )}
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
