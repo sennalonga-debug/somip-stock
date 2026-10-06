@@ -4995,6 +4995,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   };
 
   const dayMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === product && m.date === date).sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+  // Perte/Gain du jour, visible directement ici une fois le Stock fin enregistré — basé sur les
+  // mouvements RÉELLEMENT enregistrés ce jour-là (dayMovs), pas sur les champs du formulaire
+  // (qui se vident après l'enregistrement), pour rester juste même après un rechargement.
+  const theoriqueDuJourSauve = stockDebutEffective
+    + sumQty(dayMovs, ["reception"]) + sumQty(dayMovs, ["retour_camion"])
+    - sumQty(dayMovs, ["sortie"]) - sumQty(dayMovs, ["sortie_camion"]);
+  const gainPerteJour = existingInv ? existingInv.stockPhysique - theoriqueDuJourSauve : null;
 
   return (
     <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -5468,6 +5475,16 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </td>
                 <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600 }}>{fmt(existingInv.stockPhysique)} L</td>
                 {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteInventaire(existingInv)} /></td>}
+              </tr>
+            )}
+            {existingInv && (
+              <tr>
+                <td><Badge color={gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub}>Perte/Gain du jour</Badge></td>
+                <td style={{ color: C.sub }}>Jauge mesurée − stock théorique de la journée</td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub }}>
+                  {gainPerteJour >= 0 ? "+" : ""}{fmt(gainPerteJour)} L
+                </td>
+                {canManage && <td></td>}
               </tr>
             )}
           </tbody>
