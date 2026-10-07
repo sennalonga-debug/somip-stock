@@ -5494,7 +5494,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
       )}
 
       {existingInv && (
-        <div className="somip-panel" style={{ flex: "1 1 100%", padding: "14px 18px", marginBottom: 2, borderLeft: `4px solid ${gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub}` }}>
+        <div className="somip-panel" style={{ flex: "1 1 380px", padding: "14px 18px", borderLeft: `4px solid ${gainPerteJour < 0 ? C.danger : gainPerteJour > 0 ? C.success : C.sub}` }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
             <div>
               <div style={{ fontSize: 12.5, fontWeight: 700, color: C.sub, textTransform: "uppercase", letterSpacing: ".03em" }}>Perte/Gain du jour — {date}</div>
