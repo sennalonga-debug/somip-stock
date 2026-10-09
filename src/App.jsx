@@ -1595,12 +1595,16 @@ const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
 const rowToBilan = (r) => ({
   id: r.id, siteId: r.site_id, periodType: r.period_type, periodKey: r.period_key,
   reception15: Number(r.reception15), ventes15: Number(r.ventes15), transferts15: Number(r.transferts15), stockFin15: Number(r.stock_fin15),
+  receptionAmbiant: numOrUndef(r.reception_ambiant), ventesAmbiant: numOrUndef(r.ventes_ambiant),
+  transfertsAmbiant: numOrUndef(r.transferts_ambiant), stockFinAmbiant: numOrUndef(r.stock_fin_ambiant),
   transfertSiteId: r.transfert_site_id || null,
   commentaire: r.commentaire || "", photoUrls: r.photo_urls || [], createdBy: r.created_by, createdAt: r.created_at,
 });
 const bilanToRow = (b) => ({
   site_id: b.siteId, period_type: b.periodType, period_key: b.periodKey,
   reception15: b.reception15, ventes15: b.ventes15, transferts15: b.transferts15, stock_fin15: b.stockFin15,
+  reception_ambiant: b.receptionAmbiant ?? null, ventes_ambiant: b.ventesAmbiant ?? null,
+  transferts_ambiant: b.transfertsAmbiant ?? null, stock_fin_ambiant: b.stockFinAmbiant ?? null,
   transfert_site_id: b.transfertSiteId || null,
   commentaire: b.commentaire ?? null, photo_urls: b.photoUrls || [], created_by: b.createdBy ?? null,
 });
@@ -6734,7 +6738,7 @@ function renderReportTab(tab, ctx) {
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
-    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} /> : null;
+    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
     case "retours_chargements": return canSee ? <RetoursChargementsReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
@@ -8250,7 +8254,20 @@ function MiniStat({ label, value, color, bold }) {
 
 /* ---- Registre des bons de livraison ---- */
 /* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
-function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, assignedSiteIds }) {
+// Une cellule de tableau Bilan Matières : la valeur à 15°C en avant (comme avant), la valeur
+// ambiant juste au-dessus en plus petit — "—" si cette saisie ne porte pas encore de valeur
+// ambiant (anciennes saisies, faites avant l'ajout de ce champ).
+function BilanCell({ ambiant, v15, color, bold, sign }) {
+  const fmtSigned = (v) => `${sign && v >= 0 ? "+" : ""}${fmt(v)} L`;
+  return (
+    <td className="somip-mono" style={{ textAlign: "right" }}>
+      <div style={{ fontSize: 10.5, color: C.sub }}>{ambiant !== null && ambiant !== undefined ? fmtSigned(ambiant) : "—"}</div>
+      <div style={{ fontWeight: bold ? 700 : 400, color: color || "inherit" }}>{fmtSigned(v15)}</div>
+    </td>
+  );
+}
+
+function BilanMatieresView({ sites, bilans, movements, saveBilan, deleteBilan, canManage, assignedSiteIds }) {
   const fixedSites = sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [periodType, setPeriodType] = useState("mensuel");
@@ -8262,7 +8279,13 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
   const periodKey = periodType === "mensuel" ? monthKey : periodType === "trimestriel" ? `${year}-Q${quarter}` : `${decadeMonth}-D${decadeNum}`;
   const site = sites.find((s) => s.id === siteId);
 
-  const emptyForm = { reception15: "", ventes15: "", transferts15: "", transfertSiteId: "", stockFin15: "", commentaire: "" };
+  // reception15/receptionAmbiant ne sont plus des champs du formulaire : la réception est
+  // désormais automatique (voir receptionAuto15/receptionAutoAmbiant), reprise de Saisie journalière.
+  const emptyForm = {
+    ventes15: "", transferts15: "", transfertSiteId: "", stockFin15: "",
+    ventesAmbiant: "", transfertsAmbiant: "", stockFinAmbiant: "",
+    commentaire: "",
+  };
   const [form, setForm] = useState(emptyForm);
   const [photoFiles, setPhotoFiles] = useState([]);
   const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
@@ -8271,25 +8294,61 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
   const existing = sorted.find((b) => b.periodKey === periodKey);
   const idx = sorted.findIndex((b) => b.periodKey === periodKey);
   const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
+  // Le Stock début reprend automatiquement le Stock fin de la période précédente pour ce site
+  // (ambiant et 15°C séparément) — comme c'était déjà le cas pour le 15°C.
   const stockDebut = previous ? previous.stockFin15 : 0;
+  const stockDebutAmbiant = previous?.stockFinAmbiant ?? 0;
 
-  const receptionN = Number(form.reception15) || 0;
+  // Réception : automatique, reprise des réceptions déjà saisies dans Saisie journalière pour
+  // ce site sur la période choisie — plus besoin de la retaper, et toujours la même donnée que
+  // partout ailleurs dans l'application.
+  const periodRange = periodType === "mensuel" ? { start: `${periodKey}-01`, end: `${periodKey}-31` }
+    : periodType === "trimestriel" ? (() => {
+        const [y, q] = periodKey.split("-Q").map(Number);
+        const startMonth = (q - 1) * 3 + 1;
+        const endMonth = startMonth + 2;
+        return { start: `${y}-${pad2(startMonth)}-01`, end: `${y}-${pad2(endMonth)}-31` };
+      })()
+    : (() => { const [m, d] = periodKey.split("-D"); return decadeBoundsExplicit(m, Number(d)); })();
+  const receptionMovs = (movements || []).filter((m) => m.siteId === siteId && m.type === "reception" && (m.product || "gasoil") === "gasoil" && m.date >= periodRange.start && m.date <= periodRange.end);
+  const receptionAuto15 = receptionMovs.reduce((a, m) => a + (m.volumeCorrige15 ?? m.quantity), 0);
+  const receptionAutoAmbiant = receptionMovs.reduce((a, m) => a + m.quantity, 0);
+
+  const receptionN = receptionAuto15;
   const ventesN = Number(form.ventes15) || 0;
   const transfertsN = Number(form.transferts15) || 0;
   const stockFinN = Number(form.stockFin15) || 0;
   const stockTheorique = stockDebut + receptionN - ventesN + transfertsN;
   const ecart = form.stockFin15 !== "" ? stockFinN - stockTheorique : null;
 
+  const receptionAmbiantN = receptionAutoAmbiant;
+  const ventesAmbiantN = Number(form.ventesAmbiant) || 0;
+  const transfertsAmbiantN = Number(form.transfertsAmbiant) || 0;
+  const stockFinAmbiantN = Number(form.stockFinAmbiant) || 0;
+  const stockTheoriqueAmbiant = stockDebutAmbiant + receptionAmbiantN - ventesAmbiantN + transfertsAmbiantN;
+  const ecartAmbiant = form.stockFinAmbiant !== "" ? stockFinAmbiantN - stockTheoriqueAmbiant : null;
+
   const resetForm = () => { setForm(emptyForm); setPhotoFiles([]); setExistingPhotoUrls([]); };
 
   const submit = () => {
-    if (form.stockFin15 === "" || !siteId) return;
-    saveBilan({ siteId, periodType, periodKey, ...form, photoFiles, existingPhotoUrls });
+    if (form.stockFin15 === "" || form.stockFinAmbiant === "" || !siteId) return;
+    // La réception n'est plus retapée : on enregistre directement la valeur automatique calculée
+    // à partir des réceptions déjà saisies dans Saisie journalière pour cette période.
+    saveBilan({ siteId, periodType, periodKey, ...form, reception15: receptionAuto15, receptionAmbiant: receptionAutoAmbiant, photoFiles, existingPhotoUrls });
     resetForm();
   };
 
   const loadForEdit = (b) => {
-    setForm({ reception15: String(b.reception15), ventes15: String(b.ventes15), transferts15: String(b.transferts15), transfertSiteId: b.transfertSiteId || "", stockFin15: String(b.stockFin15), commentaire: b.commentaire || "" });
+    // La réception n'est plus rechargée depuis la saisie passée : elle est systématiquement
+    // recalculée en automatique pour la période en cours (voir receptionAuto15/receptionAutoAmbiant).
+    setForm({
+      ventes15: String(b.ventes15), transferts15: String(b.transferts15),
+      transfertSiteId: b.transfertSiteId || "", stockFin15: String(b.stockFin15),
+      ventesAmbiant: b.ventesAmbiant !== undefined ? String(b.ventesAmbiant) : "",
+      transfertsAmbiant: b.transfertsAmbiant !== undefined ? String(b.transfertsAmbiant) : "",
+      stockFinAmbiant: b.stockFinAmbiant !== undefined ? String(b.stockFinAmbiant) : "",
+      commentaire: b.commentaire || "",
+    });
     setExistingPhotoUrls(b.photoUrls || []);
     setPhotoFiles([]);
   };
@@ -8298,9 +8357,12 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
   const history = sorted.map((b, i) => {
     const prev = i > 0 ? sorted[i - 1] : null;
     const debut = prev ? prev.stockFin15 : 0;
+    const debutAmbiant = prev?.stockFinAmbiant ?? 0;
     const theorique = debut + b.reception15 - b.ventes15 + b.transferts15;
     const ec = b.stockFin15 - theorique;
-    return { ...b, stockDebut: debut, stockTheorique: theorique, ecart: ec };
+    const theoriqueAmbiant = b.receptionAmbiant !== undefined ? debutAmbiant + (b.receptionAmbiant || 0) - (b.ventesAmbiant || 0) + (b.transfertsAmbiant || 0) : null;
+    const ecAmbiant = b.stockFinAmbiant !== undefined && theoriqueAmbiant !== null ? b.stockFinAmbiant - theoriqueAmbiant : null;
+    return { ...b, stockDebut: debut, stockDebutAmbiant: debutAmbiant, stockTheorique: theorique, ecart: ec, stockTheoriqueAmbiant: theoriqueAmbiant, ecartAmbiant: ecAmbiant };
   });
 
   const doPptx = () => exportBilanToPptx(history, periodType, site?.name);
@@ -8321,8 +8383,14 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
     const i = siteSorted.findIndex((b) => b.periodKey === allPeriodKey);
     const prev = i > 0 ? siteSorted[i - 1] : null;
     const debut = prev ? prev.stockFin15 : 0;
+    const debutAmbiant = prev?.stockFinAmbiant ?? 0;
     const theorique = debut + entry.reception15 - entry.ventes15 + entry.transferts15;
-    return { site: s, ...entry, stockDebut: debut, stockTheorique: theorique, ecart: entry.stockFin15 - theorique, photoUrls: entry.photoUrls };
+    const theoriqueAmbiant = entry.receptionAmbiant !== undefined ? debutAmbiant + (entry.receptionAmbiant || 0) - (entry.ventesAmbiant || 0) + (entry.transfertsAmbiant || 0) : null;
+    const ecartAmbiant = entry.stockFinAmbiant !== undefined && theoriqueAmbiant !== null ? entry.stockFinAmbiant - theoriqueAmbiant : null;
+    return {
+      site: s, ...entry, stockDebut: debut, stockDebutAmbiant: debutAmbiant, stockTheorique: theorique, ecart: entry.stockFin15 - theorique,
+      stockTheoriqueAmbiant: theoriqueAmbiant, ecartAmbiant, photoUrls: entry.photoUrls,
+    };
   }).filter(Boolean);
 
   const doAllSitesPdf = () => exportToPdf({
@@ -8395,14 +8463,38 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
               </p>
             )}
 
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock début (période précédente — {site?.name})</span>
-              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
+            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
+              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600, display: "block", marginBottom: 6 }}>Stock début (période précédente — {site?.name})</span>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 11.5, color: C.sub }}>Ambiant</span>
+                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebutAmbiant)} L</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 11.5, color: C.sub }}>À 15°C</span>
+                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
+              </div>
             </div>
 
-            <Field label="Réception à 15°C (L)"><input type="number" className="somip-input" value={form.reception15} onChange={(e) => setForm({ ...form, reception15: e.target.value })} placeholder="0" /></Field>
-            <Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field>
-            <Field label="Transferts entre sites à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field>
+            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
+              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600, display: "block", marginBottom: 6 }}>Réception (automatique — reprise de Saisie journalière)</span>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 11.5, color: C.sub }}>Ambiant</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: C.success }}>+{fmt(receptionAutoAmbiant)} L</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span style={{ fontSize: 11.5, color: C.sub }}>À 15°C</span>
+                <span className="somip-mono" style={{ fontWeight: 700, color: C.success }}>+{fmt(receptionAuto15)} L</span>
+              </div>
+              {receptionMovs.length === 0 && <p style={{ margin: "6px 0 0", fontSize: 10.5, color: C.warning }}>Aucune réception trouvée dans Saisie journalière pour cette période.</p>}
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><Field label="Ventes ambiant (L)"><input type="number" className="somip-input" value={form.ventesAmbiant} onChange={(e) => setForm({ ...form, ventesAmbiant: e.target.value })} placeholder="0" /></Field></div>
+              <div style={{ flex: 1 }}><Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field></div>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><Field label="Transferts ambiant (L, net)"><input type="number" className="somip-input" value={form.transfertsAmbiant} onChange={(e) => setForm({ ...form, transfertsAmbiant: e.target.value })} placeholder="0" /></Field></div>
+              <div style={{ flex: 1 }}><Field label="Transferts à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field></div>
+            </div>
             {Number(form.transferts15) !== 0 && (
               <Field label={Number(form.transferts15) > 0 ? "Reçu depuis quel site ?" : "Envoyé vers quel site ?"}>
                 <select className="somip-select" value={form.transfertSiteId} onChange={(e) => setForm({ ...form, transfertSiteId: e.target.value })}>
@@ -8418,21 +8510,34 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
               <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
             </div>
 
-            <Field label="Stock fin mesuré à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field>
+            <div style={{ display: "flex", gap: 8 }}>
+              <div style={{ flex: 1 }}><Field label="Stock fin ambiant (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFinAmbiant} onChange={(e) => setForm({ ...form, stockFinAmbiant: e.target.value })} placeholder="Jauge du site" /></Field></div>
+              <div style={{ flex: 1 }}><Field label="Stock fin à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field></div>
+            </div>
             <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
             <Field label="Photos justificatives (optionnel)">
               <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
             </Field>
 
-            {ecart !== null && (
-              <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5, display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+            {(ecart !== null || ecartAmbiant !== null) && (
+              <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
+                {ecartAmbiant !== null && (
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte ambiant</span>
+                    <span className="somip-mono" style={{ fontWeight: 700, color: ecartAmbiant < 0 ? C.danger : ecartAmbiant > 0 ? C.success : C.ink }}>{ecartAmbiant >= 0 ? "+" : ""}{fmt(ecartAmbiant)} L</span>
+                  </div>
+                )}
+                {ecart !== null && (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte à 15°C</span>
+                    <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
+                  </div>
+                )}
               </div>
             )}
 
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === ""}>
+              <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === "" || form.stockFinAmbiant === ""}>
                 <Plus size={15} /> Enregistrer
               </button>
               <button className="somip-btn somip-btn-secondary" onClick={resetForm}><X size={15} /> Annuler</button>
@@ -8455,20 +8560,21 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
                 {history.map((b) => (
                   <tr key={b.id}>
                     <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
-                    <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.stockDebut)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(b.reception15)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(b.ventes15)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>
-                      {b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L
+                    <BilanCell ambiant={b.stockDebutAmbiant} v15={b.stockDebut} bold />
+                    <BilanCell ambiant={b.receptionAmbiant} v15={b.reception15} color={C.success} sign />
+                    <BilanCell ambiant={b.ventesAmbiant} v15={b.ventes15} />
+                    <td className="somip-mono" style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 10.5, color: C.sub }}>{b.transfertsAmbiant !== undefined ? `${b.transfertsAmbiant >= 0 ? "+" : ""}${fmt(b.transfertsAmbiant)} L` : "—"}</div>
+                      <div>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</div>
                       {b.transfertSiteId && (
                         <div style={{ fontSize: 10.5, fontWeight: 600, color: C.orange }}>
                           {b.transferts15 >= 0 ? "← " : "→ "}{sites.find((s) => s.id === b.transfertSiteId)?.name || b.transfertSiteId}
                         </div>
                       )}
                     </td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockTheorique)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(b.stockFin15)} L</td>
-                    <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub }}>{b.ecart >= 0 ? "+" : ""}{fmt(b.ecart)} L</td>
+                    <BilanCell ambiant={b.stockTheoriqueAmbiant} v15={b.stockTheorique} bold />
+                    <BilanCell ambiant={b.stockFinAmbiant} v15={b.stockFin15} bold />
+                    <BilanCell ambiant={b.ecartAmbiant} v15={b.ecart} bold color={b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub} sign />
                     <td>
                       {b.photoUrls?.length > 0 ? (
                         <div style={{ display: "flex", gap: 3 }}>
@@ -8551,13 +8657,13 @@ function BilanMatieresView({ sites, bilans, saveBilan, deleteBilan, canManage, a
               {allSitesRows.map((r) => (
                 <tr key={r.site.id}>
                   <td style={{ fontWeight: 600 }}>{r.site.name}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.success }}>+{fmt(r.reception15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.ventes15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.transferts15 >= 0 ? "+" : ""}{fmt(r.transferts15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockFin15)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>{r.ecart >= 0 ? "+" : ""}{fmt(r.ecart)} L</td>
+                  <BilanCell ambiant={r.stockDebutAmbiant} v15={r.stockDebut} bold />
+                  <BilanCell ambiant={r.receptionAmbiant} v15={r.reception15} color={C.success} sign />
+                  <BilanCell ambiant={r.ventesAmbiant} v15={r.ventes15} />
+                  <BilanCell ambiant={r.transfertsAmbiant} v15={r.transferts15} sign />
+                  <BilanCell ambiant={r.stockTheoriqueAmbiant} v15={r.stockTheorique} bold />
+                  <BilanCell ambiant={r.stockFinAmbiant} v15={r.stockFin15} bold />
+                  <BilanCell ambiant={r.ecartAmbiant} v15={r.ecart} bold color={r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub} sign />
                 </tr>
               ))}
               {allSitesRows.length > 0 && (
