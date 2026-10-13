@@ -6860,7 +6860,11 @@ function VcfView() {
 /* ------------------------------------------------------------------ */
 function renderReportTab(tab, ctx) {
   const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds } = ctx;
-  const canSee = canManage || isSiteRestricted;
+  // Déjà filtré en amont (la page Rapports est ouverte à tous sauf les comptes TotalEnergies,
+  // et "Documents & suivis" a son propre contrôle par page) — cette barrière ne doit donc pas
+  // exclure en plus un compte Lecture seule sans site attribué, qui doit tout voir comme un
+  // Superviseur, simplement sans pouvoir écrire.
+  const canSee = true;
   switch (tab) {
     case "synthese_mensuelle_site": return <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
     case "synthese_mensuelle_site_15": return <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
