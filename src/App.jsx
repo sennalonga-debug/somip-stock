@@ -4,7 +4,7 @@ import {
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
   FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus, Palette,
-  ChevronsLeft, ChevronsRight, Eye, EyeOff, Clock,
+  ChevronsLeft, ChevronsRight, Eye, EyeOff, Clock, Calculator, ArrowRightLeft,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -116,6 +116,7 @@ const TYPE_META = {
   retour_camion: { label: "Retour camion (cuve)", color: C.success, sign: "+" },
   retour_cuve_camion: { label: "Retour cuve (camion)", color: C.danger, sign: "−" },
   ajustement: { label: "Ajustement d'inventaire", color: C.blue, sign: "±" },
+  transfert: { label: "Transfert entre sites", color: C.blue, sign: "±" },
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -1542,6 +1543,7 @@ const rowToMovement = (r) => ({
   product: r.product || "gasoil",
   ref: r.ref || undefined, commentaire: r.commentaire || "", destinataire: r.destinataire || undefined,
   camion: r.camion || undefined, destination: r.destination || undefined, compteur: r.compteur || undefined, isDemo: !!r.is_demo,
+  relatedSiteId: r.related_site_id || undefined,
   temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee),
   densite15: numOrUndef(r.densite15), vcf: numOrUndef(r.vcf), volumeCorrige15: numOrUndef(r.volume_corrige15),
   indexAvant: numOrUndef(r.index_avant), indexApres: numOrUndef(r.index_apres),
@@ -1552,6 +1554,7 @@ const movementToRow = (m) => ({
   product: m.product || "gasoil",
   ref: m.ref ?? null, commentaire: m.commentaire ?? null, destinataire: m.destinataire ?? null,
   camion: m.camion ?? null, destination: m.destination ?? null, compteur: m.compteur ?? null, is_demo: !!m.isDemo,
+  related_site_id: m.relatedSiteId ?? null,
   temperature_c: m.temperatureC ?? null, densite_observee: m.densiteObservee ?? null,
   densite15: m.densite15 ?? null, vcf: m.vcf ?? null, volume_corrige15: m.volumeCorrige15 ?? null,
   index_avant: m.indexAvant ?? null, index_apres: m.indexApres ?? null,
@@ -3257,7 +3260,7 @@ export default function App() {
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
           {view === "vcf" && <VcfView />}
           {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
@@ -4006,7 +4009,10 @@ function StockDuJourView({ sites, movements, inventaires, stockOf, assignedSiteI
 
   const rows = visibleSites.map((s) => {
     const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === viewDate);
-    const stock = isLive ? stockOf(s.id) : stockThroughDate(s, movements, viewDate, inventaires);
+    // Toujours ancré sur la dernière jauge connue (+ mouvements depuis) — jamais le cumul en
+    // direct depuis le tout début, même pour "aujourd'hui" : évite la dérive silencieuse entre
+    // la jauge réelle et le total affiché.
+    const stock = stockThroughDate(s, movements, viewDate, inventaires);
     const receptions = sumQty(dayMovs, ["reception"]);
     const ventes = sumQty(dayMovs, ["sortie"]);
     const chargements = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
@@ -4125,7 +4131,10 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   const isLive = viewDate === today;
   const month = viewDate.slice(0, 7);
   const rows = sites.map((s) => {
-    const stock = isLive ? stockOf(s.id) : stockThroughDate(s, movements, viewDate, inventaires);
+    // Toujours ancré sur la dernière jauge connue (+ mouvements depuis) — jamais le cumul en
+    // direct depuis le tout début, même pour "aujourd'hui" : évite la dérive silencieuse entre
+    // la jauge réelle et le total affiché.
+    const stock = stockThroughDate(s, movements, viewDate, inventaires);
     const pct = s.capacity ? (stock / s.capacity) * 100 : 0;
     const status = pct < 20 ? "danger" : pct < 35 ? "warning" : "ok";
     return { ...s, stock, pct, status };
@@ -5906,7 +5915,7 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
+function InventairesView({ sites, inventaires, movements, truckAssignments, stockOf, stockOf15, addInventaire, addMovement, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
   const [mainTab, setMainTab] = useState(isTotalEnergiesOnly ? "officiel" : "rapide");
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -5924,6 +5933,51 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
   // avant — rien ne change pour eux.
   const isLubSite = LUBRICANT_SITE_IDS.includes(siteId);
   useEffect(() => { if (!isLubSite) setProductId("gasoil"); }, [siteId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- Équation de stock à date (Stock début + Réceptions − Ventes ± Transferts − Chargements),
+  // ancrée sur la dernière jauge connue plutôt que sur le cumul en direct depuis le début. Pour
+  // Prehomo/Okouma, les camions rattachés ce jour-là sont inclus dans le total combiné. ----
+  const site = sites.find((s) => s.id === siteId);
+  const equationSite = (() => {
+    if (!site) return null;
+    const stockDebut = anchoredStock(siteId, site.stockInitial, movements, inventaires, productId, date, false);
+    const dateMovs = movements.filter((m) => m.siteId === siteId && (m.product || "gasoil") === productId && m.date === date);
+    const reception = sumQty(dateMovs, ["reception"]);
+    const vente = sumQty(dateMovs, ["sortie"]);
+    const transfert = dateMovs.filter((m) => m.type === "transfert").reduce((a, m) => a + m.delta, 0);
+    const chargement = sumQty(dateMovs, ["sortie_camion"]);
+    const theorique = stockDebut + reception - vente + transfert - chargement;
+    const jauge = pickLatestInv(inventaires.filter((i) => i.siteId === siteId && (i.product || "gasoil") === productId && i.date === date));
+    return { stockDebut, reception, vente, transfert, chargement, theorique, jauge: jauge ? jauge.stockPhysique : null };
+  })();
+  const trucksForEquation = (isLubSite && productId === "gasoil" && site) ? trucksAssignedAt(truckAssignments, siteId, date) : [];
+  const equationTrucks = trucksForEquation.map((truckId) => {
+    const truck = sites.find((s) => s.id === truckId);
+    if (!truck) return null;
+    const stockDebut = anchoredStock(truckId, truck.stockInitial, movements, inventaires, "gasoil", date, false);
+    const dateMovs = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === date);
+    const reception = sumQty(dateMovs, ["reception"]);
+    const vente = sumQty(dateMovs, ["sortie"]);
+    const theorique = stockDebut + reception - vente;
+    const jauge = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === date));
+    return { truck, stockDebut, reception, vente, theorique, jauge: jauge ? jauge.stockPhysique : null };
+  }).filter(Boolean);
+  const theoriqueCombine = (equationSite?.theorique || 0) + equationTrucks.reduce((a, t) => a + t.theorique, 0);
+  const jaugeCombine = equationSite
+    ? (equationSite.jauge ?? equationSite.theorique) + equationTrucks.reduce((a, t) => a + (t.jauge ?? t.theorique), 0)
+    : null;
+  const ecartCombine = equationSite?.jauge !== null && equationSite?.jauge !== undefined ? jaugeCombine - theoriqueCombine : null;
+
+  // ---- Nouveau transfert vers/depuis un autre site, directement depuis cette page ----
+  const [transfertForm, setTransfertForm] = useState({ relatedSiteId: "", amount: "", sens: "envoye" });
+  const submitTransfert = () => {
+    if (!transfertForm.relatedSiteId || !transfertForm.amount) return;
+    const qty = Math.abs(Number(transfertForm.amount)) || 0;
+    if (!qty) return;
+    const delta = transfertForm.sens === "recu" ? qty : -qty;
+    addMovement({ siteId, type: "transfert", date, product: productId, quantity: qty, delta, relatedSiteId: transfertForm.relatedSiteId });
+    setTransfertForm({ relatedSiteId: "", amount: "", sens: "envoye" });
+  };
 
   const theoriqueAmbiant = stockOf(siteId, productId);
   const theorique15 = stockOf15(siteId, productId);
@@ -6037,6 +6091,80 @@ function InventairesView({ sites, inventaires, stockOf, stockOf15, addInventaire
           <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submit} disabled={stockPhysique === ""}>
             <Plus size={15} /> Valider l'inventaire
           </button>
+        </div>
+        )}
+
+        <div className="somip-panel" style={{ padding: 18 }}>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Calculator size={15} color={C.blue} />Équation de stock — {date}</h3>
+          <p style={{ margin: "0 0 14px", fontSize: 11.5, color: C.sub }}>
+            Ancrée sur la dernière jauge connue (pas le cumul en direct). {isLubSite && productId === "gasoil" ? "Camions rattachés ce jour-là inclus dans le total." : ""}
+          </p>
+          {equationSite && (
+            <>
+              <div style={{ fontSize: 12.5 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ color: C.sub }}>Stock début ({site.name})</span><span className="somip-mono">{fmt(equationSite.stockDebut)} L</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ color: C.sub }}>+ Réceptions</span><span className="somip-mono" style={{ color: C.success }}>+{fmt(equationSite.reception)} L</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ color: C.sub }}>− Ventes</span><span className="somip-mono">−{fmt(equationSite.vente)} L</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ color: C.sub }}>± Transferts</span><span className="somip-mono" style={{ color: equationSite.transfert < 0 ? C.danger : equationSite.transfert > 0 ? C.success : C.ink }}>{equationSite.transfert >= 0 ? "+" : ""}{fmt(equationSite.transfert)} L</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ color: C.sub }}>− Chargements camions</span><span className="somip-mono">−{fmt(equationSite.chargement)} L</span></div>
+                <div style={{ height: 1, background: C.border, margin: "8px 0" }} />
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}><span style={{ fontWeight: 700 }}>= Théorique ({site.name})</span><span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(equationSite.theorique)} L</span></div>
+              </div>
+
+              {equationTrucks.length > 0 && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${C.border}` }}>
+                  <p style={{ margin: "0 0 6px", fontSize: 11.5, fontWeight: 700, color: C.sub }}>+ Camions rattachés ce jour-là</p>
+                  {equationTrucks.map((t) => (
+                    <div key={t.truck.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 3 }}>
+                      <span style={{ color: C.sub }}>{t.truck.name} (théorique)</span>
+                      <span className="somip-mono">{fmt(t.theorique)} L</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ background: C.bg, borderRadius: 8, padding: 12, marginTop: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontWeight: 700 }}>{equationTrucks.length > 0 ? "Stock théorique combiné" : "Stock théorique"}</span>
+                  <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(theoriqueCombine)} L</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: ecartCombine !== null ? 6 : 0 }}>
+                  <span style={{ fontWeight: 700 }}>{equationTrucks.length > 0 ? "Stock fin (jauge combinée)" : "Stock fin (jauge)"}</span>
+                  <span className="somip-mono" style={{ fontWeight: 700 }}>{jaugeCombine !== null ? `${fmt(jaugeCombine)} L` : "—"}</span>
+                </div>
+                {ecartCombine !== null && (
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontWeight: 700, color: C.sub }}>Écart</span>
+                    <span className="somip-mono" style={{ fontWeight: 700, color: ecartCombine < 0 ? C.danger : ecartCombine > 0 ? C.success : C.sub }}>{ecartCombine >= 0 ? "+" : ""}{fmt(ecartCombine)} L</span>
+                  </div>
+                )}
+                {equationSite.jauge === null && <p style={{ margin: "8px 0 0", fontSize: 10.5, color: C.warning }}>Pas de jauge saisie pour {site.name} à cette date — écart non calculable, seul le théorique est affiché.</p>}
+              </div>
+            </>
+          )}
+          {!equationSite && <p style={{ fontSize: 12.5, color: C.sub }}>Choisis un site ci-dessus pour voir son équation de stock.</p>}
+        </div>
+
+        {canWrite && site && (
+        <div className="somip-panel" style={{ padding: 18 }}>
+          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ArrowRightLeft size={15} color={C.blue} />Transfert vers/depuis un autre site</h3>
+          <Field label="Site concerné">
+            <select className="somip-select" value={transfertForm.relatedSiteId} onChange={(e) => setTransfertForm({ ...transfertForm, relatedSiteId: e.target.value })}>
+              <option value="">— Choisir —</option>
+              {sites.filter((s) => s.id !== siteId && s.active !== false).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Sens">
+            <select className="somip-select" value={transfertForm.sens} onChange={(e) => setTransfertForm({ ...transfertForm, sens: e.target.value })}>
+              <option value="envoye">Envoyé vers ce site (− pour {site.name})</option>
+              <option value="recu">Reçu de ce site (+ pour {site.name})</option>
+            </select>
+          </Field>
+          <Field label="Quantité (L)"><input type="number" className="somip-input" value={transfertForm.amount} onChange={(e) => setTransfertForm({ ...transfertForm, amount: e.target.value })} placeholder="0" /></Field>
+          <button className="somip-btn somip-btn-primary" style={{ width: "100%", justifyContent: "center" }} onClick={submitTransfert} disabled={!transfertForm.relatedSiteId || !transfertForm.amount}>
+            <Plus size={15} /> Enregistrer le transfert
+          </button>
+          <p style={{ margin: "10px 0 0", fontSize: 10.5, color: C.sub }}>Ce transfert n'est enregistré que du côté de {site.name} ({date}) — pas de miroir automatique créé sur l'autre site.</p>
         </div>
         )}
 
