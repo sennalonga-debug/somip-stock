@@ -3257,7 +3257,7 @@ export default function App() {
           {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} onOpenSite={openSiteDashboard} />}
           {view === "dashboard_lub" && <LubricantsDashboardView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} siteId={lubDashSiteId} onSelectSite={setLubDashSiteId} />}
           {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
-          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
+          {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
@@ -3280,7 +3280,7 @@ export default function App() {
 /* Dashboard                                                            */
 /* ------------------------------------------------------------------ */
 /* ---- Bandeau d'accueil : diaporama des photos de sites (ou bandeau SOMIP à défaut) ---- */
-function SitesHero({ sites, stockOf, canManage, onOpenSite }) {
+function SitesHero({ sites, movements, inventaires, canManage, onOpenSite }) {
   const [failed, setFailed] = useState({});
   const withPhoto = sites.filter((s) => s.photoUrl && s.active !== false && !failed[s.photoUrl]);
   const [idx, setIdx] = useState(0);
@@ -3308,7 +3308,7 @@ function SitesHero({ sites, stockOf, canManage, onOpenSite }) {
 
   const n = withPhoto.length;
   const current = withPhoto[((idx % n) + n) % n];
-  const stock = stockOf ? stockOf(current.id, "gasoil") : null;
+  const stock = movements && inventaires ? stockThroughDate(current, movements, todayStr(), inventaires) : null;
   const fill = stock !== null && current.capacity ? Math.round((stock / current.capacity) * 100) : null;
   const go = (delta) => setIdx((i) => i + delta);
   const arrow = { position: "absolute", top: "50%", transform: "translateY(-50%)", width: 32, height: 32, borderRadius: "50%", border: "none", background: "rgba(10,31,51,0.45)", color: "#fff", cursor: "pointer", fontSize: 18, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center" };
@@ -3372,7 +3372,7 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds,
     : [];
 
   const rows = mySites.map((s) => {
-    const stock = stockOf(s.id, "gasoil");
+    const stock = stockThroughDate(s, movements, todayStr(), inventaires);
     const fillPct = s.capacity ? Math.round((stock / s.capacity) * 100) : null;
     const hasYesterdayJauge = inventaires.some((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === yesterday);
     // Perte des 7 derniers jours, jour par jour (pas de cumul) — même règle que l'alerte générale.
@@ -3400,7 +3400,7 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds,
 
   return (
     <div className="somip-fade">
-      <SitesHero sites={mySites} stockOf={stockOf} canManage={false} onOpenSite={onOpenSite} />
+      <SitesHero sites={mySites} movements={movements} inventaires={inventaires} canManage={false} onOpenSite={onOpenSite} />
 
       {missingMySites.length > 0 && (
         <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, borderLeft: `3px solid ${C.danger}` }}>
@@ -3581,14 +3581,14 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
     );
   }
 
-  const stock = stockOf(site.id, "gasoil");
+  const stock = stockThroughDate(site, movements, todayStr(), inventaires);
   const pct = site.capacity ? (stock / site.capacity) * 100 : 0;
   const level = pct < 20 ? C.danger : pct < 35 ? C.warning : C.blue;
   const fixed = accessible.filter((s) => !s.isMobile);
   const trucks = accessible.filter((s) => s.isMobile);
   const HeroIcon = site.isMobile ? Truck : Factory;
   const stationExtra = st ? (() => {
-    const trucksNow = st.attachedToday.reduce((a, id) => a + stockOf(id, "gasoil"), 0);
+    const trucksNow = st.attachedToday.reduce((a, id) => a + stockThroughDate(sites.find((x) => x.id === id), movements, todayStr(), inventaires), 0);
     const ecart = st.siteEcart + st.trucksEcart;
     const hasJauge = d.daysWithJauge > 0 || st.trucks.some((t) => t.jaugeDays > 0);
     return { trucksNow, ecart, hasJauge, trucksVentes: st.trucks.reduce((a, t) => a + t.ventes, 0), trucksRecu: st.trucks.reduce((a, t) => a + t.recu, 0), trucksEcartTotal: st.trucksEcart };
@@ -3674,7 +3674,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
               {d.trucksToday.map((t) => (
                 <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "4px 0" }}>
                   <span style={{ fontWeight: 600 }}>{t.name}</span>
-                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockOf(t.id, "gasoil"))} L</span>
+                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockThroughDate(t, movements, todayStr(), inventaires))} L</span>
                 </div>
               ))}
             </div>
@@ -3727,7 +3727,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
                     return (
                       <tr key={t.site.id}>
                         <td style={{ fontWeight: 600 }}>{t.site.name}{!here && <span style={{ marginLeft: 6 }}><Badge color={C.sub}>plus rattaché</Badge></span>}</td>
-                        <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(stockOf(t.site.id, "gasoil"))} L</td>
+                        <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(stockThroughDate(t.site, movements, todayStr(), inventaires))} L</td>
                         <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(t.ventes)} L</td>
                         <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(t.recu)} L</td>
                         <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: t.jaugeDays > 0 ? ecartColor(t.ecart) : C.sub }}>{t.jaugeDays > 0 ? `${signed(t.ecart)} L` : "—"}</td>
@@ -4205,7 +4205,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 
   return (
     <div className="somip-fade">
-      <SitesHero sites={sites} stockOf={stockOf} canManage={canManage} onOpenSite={onOpenSite} />
+      <SitesHero sites={sites} movements={movements} inventaires={inventaires} canManage={canManage} onOpenSite={onOpenSite} />
       <p style={{ marginTop: -8, marginBottom: 14, fontSize: 13, color: C.sub }}>
         Vos données sont sauvegardées automatiquement et restent disponibles après fermeture ou actualisation de la page.
         Les capacités et stocks initiaux des sites restent des valeurs à vérifier/ajuster depuis la page Sites.
@@ -4322,7 +4322,7 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
 /* ------------------------------------------------------------------ */
 /* Sites                                                                 */
 /* ------------------------------------------------------------------ */
-function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter, toggleSiteEnginsEnabled, setSiteEnginsSource, applyEnginsGroup, siteEngins, addSiteEngin, importSiteEngins, removeSiteEngin, setSitePhoto }) {
+function SitesView({ sites, movements, inventaires, stockOf, addSite, editSite, removeSite, toggleSiteActive, productStocks, saveProductStock, truckAssignments, assignTruck, siteMeters, addSiteMeter, removeSiteMeter, siteTanks, addSiteTank, removeSiteTank, siteDepotageMeters, addSiteDepotageMeter, removeSiteDepotageMeter, toggleSiteEnginsEnabled, setSiteEnginsSource, applyEnginsGroup, siteEngins, addSiteEngin, importSiteEngins, removeSiteEngin, setSitePhoto }) {
   const [form, setForm] = useState({ name: "", code: "", capacity: "", stockInitial: "", isMobile: false });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
@@ -4451,7 +4451,7 @@ function SitesView({ sites, movements, stockOf, addSite, editSite, removeSite, t
           <thead><tr><th>Code</th><th>Site</th><th style={{ textAlign: "right" }}>Capacité (L)</th><th style={{ textAlign: "right" }}>Stock actuel (L)</th><th>Statut</th><th></th></tr></thead>
           <tbody>
             {sites.map((s) => {
-              const stock = stockOf(s.id);
+              const stock = stockThroughDate(s, movements, todayStr(), inventaires);
               const isEditing = editingId === s.id;
               return (
                 <tr key={s.id}>
