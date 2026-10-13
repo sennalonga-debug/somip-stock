@@ -5074,28 +5074,31 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const gainPerteJour = existingInv ? existingInv.stockPhysique - theoriqueDuJourSauve : null;
 
   return (
-    <div className="somip-fade" style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+    <div className="somip-fade">
+      <div className="somip-panel" style={{ padding: 14, marginBottom: 18, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div style={{ flex: "1 1 220px" }}>
+          <Field label="Site">
+            {hasSiteRestriction && availableSites.length === 1 ? (
+              <div className="somip-input" style={{ background: C.bg, color: C.ink, fontWeight: 600, display: "flex", alignItems: "center" }}>
+                {availableSites[0].name}
+              </div>
+            ) : (
+              <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+                {availableSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+            )}
+          </Field>
+        </div>
+        <div style={{ flex: "1 1 160px" }}>
+          <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        </div>
+        {!canWrite && <p style={{ margin: "0 0 9px", fontSize: 11.5, color: C.sub }}>Lecture seule — choisis un site et une date pour consulter les mouvements enregistrés.</p>}
+      </div>
+
+      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       {canWrite && (
         <div className="somip-panel" style={{ flex: "1 1 340px", padding: 18 }}>
           <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Saisie du jour</h3>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div style={{ flex: 1 }}>
-              <Field label="Site">
-                {hasSiteRestriction && availableSites.length === 1 ? (
-                  <div className="somip-input" style={{ background: C.bg, color: C.ink, fontWeight: 600, display: "flex", alignItems: "center" }}>
-                    {availableSites[0].name}
-                  </div>
-                ) : (
-                  <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-                    {availableSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  </select>
-                )}
-              </Field>
-            </div>
-            <div style={{ flex: 1 }}>
-              <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-            </div>
-          </div>
 
           {isLubSite && (
             <Field label="Produit">
@@ -5565,6 +5568,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         </table>
       </div>
 
+      </div>
     </div>
   );
 }
