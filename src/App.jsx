@@ -3074,6 +3074,36 @@ export default function App() {
         .somip-fade { animation: somipFade .25s ease; }
         @keyframes somipFade { from { opacity:0; transform:translateY(4px);} to {opacity:1; transform:none;} }
         @keyframes somipSpin { to { transform: rotate(360deg); } }
+
+        /* ---- Fond animé (CSS pur, sans image) — dégradé très pâle aux couleurs SOMIP qui se
+        déplace lentement, et vagues qui ondulent doucement en bas de l'écran. Respecte
+        "réduire les animations" (dégradé et vagues restent fixes dans ce cas) et s'allège sur
+        téléphone (une seule vague animée, au lieu de deux, pour économiser la batterie). ---- */
+        @keyframes somipBgDrift { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+        .somip-animated-bg {
+          background: linear-gradient(115deg, ${C.navy}12, ${C.danger}0A, ${C.orange}12, ${C.navy}0D, ${C.danger}0A);
+          background-size: 320% 320%;
+        }
+        @keyframes somipWaveA { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+        @keyframes somipWaveB { from { transform: translateX(-50%); } to { transform: translateX(0); } }
+        .somip-wave-a { animation: somipWaveA 46s linear infinite; }
+        .somip-wave-b { animation: somipWaveB 64s linear infinite; }
+        @keyframes somipNavyDrift { 0%, 100% { background-position: 0% 0%; } 50% { background-position: 100% 100%; } }
+        .somip-navy-animated-overlay {
+          position: absolute; inset: 0; background-size: 240% 240%;
+          background-image: linear-gradient(115deg, ${C.blue}3D 0%, transparent 28%, ${C.orange}26 50%, transparent 72%, ${C.blue}3D 100%);
+          pointer-events: none;
+        }
+        @media (prefers-reduced-motion: no-preference) {
+          .somip-animated-bg { animation: somipBgDrift 26s ease-in-out infinite; }
+          .somip-navy-animated-overlay { animation: somipNavyDrift 24s ease-in-out infinite; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .somip-animated-bg, .somip-wave-a, .somip-wave-b, .somip-navy-animated-overlay { animation: none !important; }
+        }
+        @media (max-width: 860px) {
+          .somip-wave-b { display: none; }
+        }
         .somip-print-only { display: none; }
         .somip-mobile-toggle { display: none; }
         .somip-mobile-backdrop { position: fixed; inset: 0; background: rgba(6,15,25,0.55); backdrop-filter: blur(1px); z-index: 35; }
@@ -3099,7 +3129,8 @@ export default function App() {
       {mobileNavOpen && <div className="somip-mobile-backdrop" onClick={() => setMobileNavOpen(false)} />}
 
       {/* Sidebar */}
-      <aside className={`somip-sidebar ${mobileNavOpen ? "open" : ""}`} style={{ width: sidebarCollapsed ? 76 : 226, transition: "width .18s ease", background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0, position: "relative" }}>
+      <aside className={`somip-sidebar ${mobileNavOpen ? "open" : ""}`} style={{ width: sidebarCollapsed ? 76 : 226, transition: "width .18s ease", background: `linear-gradient(180deg, ${C.navy}, ${C.navyLight})`, display: "flex", flexDirection: "column", padding: "20px 14px", flexShrink: 0, position: "relative", overflow: "hidden" }}>
+        <div className="somip-navy-animated-overlay" style={{ opacity: 0.5 }} />
         <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 6px 22px", overflow: "hidden" }}>
           {settings.logoUrl ? (
             <img src={settings.logoUrl} alt="Logo" style={{ width: 32, height: 32, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
@@ -3214,14 +3245,17 @@ export default function App() {
           </div>
         )}
 
-        <div className="somip-scroll" style={{ flex: 1, padding: "24px 28px", position: "relative", background: C.bg }}>
+        <div className="somip-scroll somip-animated-bg" style={{ flex: 1, padding: "24px 28px", position: "relative" }}>
           <div style={{ position: "absolute", inset: 0, overflow: "hidden", pointerEvents: "none" }}>
-            <div style={{ position: "absolute", top: "-10%", right: "-6%", width: 480, height: 480, borderRadius: "50%", background: `radial-gradient(circle, ${C.blue}14 0%, transparent 70%)` }} />
-            <div style={{ position: "absolute", top: "30%", left: "-8%", width: 380, height: 380, borderRadius: "50%", background: `radial-gradient(circle, ${C.orange}10 0%, transparent 70%)` }} />
-            <div style={{ position: "absolute", bottom: "-12%", right: "18%", width: 420, height: 420, borderRadius: "50%", background: `radial-gradient(circle, ${C.blue}0D 0%, transparent 70%)` }} />
-            <svg style={{ position: "absolute", left: 0, right: 0, bottom: 0, width: "100%", height: 220, opacity: 0.05 }} viewBox="0 0 1440 220" preserveAspectRatio="none">
-              <path d="M0,120 C200,180 320,60 520,100 C720,140 800,40 1020,80 C1220,116 1300,60 1440,100 L1440,220 L0,220 Z" fill={C.blue} />
-              <path d="M0,160 C220,110 380,190 600,150 C820,110 940,180 1160,150 C1300,130 1380,150 1440,160 L1440,220 L0,220 Z" fill={C.orange} />
+            {/* Vague 1 : chemin dupliqué deux fois côte à côte (largeur 200%), qui glisse vers la
+            gauche en boucle infinie et parfaitement fluide (translateX(0) -> translateX(-50%)). */}
+            <svg className="somip-wave-a" style={{ position: "absolute", left: 0, bottom: 0, width: "200%", height: 220, opacity: 0.06 }} viewBox="0 0 2880 220" preserveAspectRatio="none">
+              <path d="M0,120 C200,180 320,60 520,100 C720,140 800,40 1020,80 C1220,116 1300,60 1440,100 C1640,180 1760,60 1960,100 C2160,140 2240,40 2460,80 C2660,116 2740,60 2880,100 L2880,220 L0,220 Z" fill={C.blue} />
+            </svg>
+            {/* Vague 2 : même principe, sens et vitesse différents, masquée sur téléphone pour
+            rester légère (voir la media query dans le style global). */}
+            <svg className="somip-wave-b" style={{ position: "absolute", left: 0, bottom: 0, width: "200%", height: 220, opacity: 0.05 }} viewBox="0 0 2880 220" preserveAspectRatio="none">
+              <path d="M0,160 C220,110 380,190 600,150 C820,110 940,180 1160,150 C1300,130 1380,150 1440,160 C1660,110 1820,190 2040,150 C2260,110 2380,180 2600,150 C2740,130 2820,150 2880,160 L2880,220 L0,220 Z" fill={C.orange} />
             </svg>
           </div>
           <div style={{ position: "relative", zIndex: 1 }}>
@@ -3574,7 +3608,10 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
         {site.photoUrl && !imgFailed ? (
           <img src={site.photoUrl} alt={site.name} onError={() => setImgFailed(true)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
         ) : (
-          <HeroIcon size={120} color="rgba(255,255,255,0.10)" style={{ position: "absolute", right: 24, bottom: 10 }} />
+          <>
+            <div className="somip-navy-animated-overlay" />
+            <HeroIcon size={120} color="rgba(255,255,255,0.10)" style={{ position: "absolute", right: 24, bottom: 10 }} />
+          </>
         )}
         <div style={{ position: "absolute", inset: 0, background: "linear-gradient(180deg, rgba(6,20,34,0.15) 20%, rgba(6,20,34,0.82) 100%)" }} />
         <div style={{ position: "relative", padding: "16px 20px", minHeight: "inherit", display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 24, color: "#fff" }}>
