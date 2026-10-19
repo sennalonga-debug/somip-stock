@@ -2705,6 +2705,36 @@ export default function App() {
     setMovements((prev) => prev.filter((mm) => mm.id !== id));
     if (m) appendAudit("Suppression mouvement", `${TYPE_META[m.type]?.label || m.type} — ${fmt(m.quantity)} L`);
   });
+  // Ajouter ou corriger la température/densité d'une réception déjà enregistrée — utile quand un
+  // opérateur a oublié de les saisir sur le moment. Recalcule la correction à 15°C (densité à
+  // 15°C, VCF, volume corrigé) à partir des nouvelles valeurs ; ne touche à rien d'autre sur le
+  // mouvement (quantité, date, référence...). Réservé au Superviseur (canManage, contrôlé côté
+  // interface ET par la politique de sécurité de la base, comme pour la suppression).
+  const editMovementTempDensite = ({ id, temperatureC, densiteObservee }) => withSync(async () => {
+    const m = movements.find((mm) => mm.id === id);
+    if (!m) throw new Error("Mouvement introuvable.");
+    const hasTemp = temperatureC !== "" && temperatureC !== null && temperatureC !== undefined;
+    const hasDens = densiteObservee !== "" && densiteObservee !== null && densiteObservee !== undefined;
+    let row;
+    if (hasTemp && hasDens) {
+      const corr = correctVolumeTo15({ volumeAmbiant: m.quantity, tempC: Number(temperatureC), densiteObservee: Number(densiteObservee) });
+      row = {
+        temperature_c: Number(temperatureC), densite_observee: Number(densiteObservee),
+        densite15: corr ? corr.densite15 : null, vcf: corr ? corr.vcf : null, volume_corrige15: corr ? corr.volume15 : null,
+      };
+    } else {
+      // Effacement volontaire (champs vidés) : on retire aussi la correction à 15°C, qui n'a
+      // plus de sens sans les deux valeurs d'origine.
+      row = { temperature_c: null, densite_observee: null, densite15: null, vcf: null, volume_corrige15: null };
+    }
+    const { data, error } = await supabase.from("movements").update(row).eq("id", id).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("Modification refusée par la base de données (droits insuffisants) — rien n'a été changé.");
+    const saved = rowToMovement(data);
+    setMovements((prev) => prev.map((mm) => (mm.id === id ? saved : mm)));
+    appendAudit("Correction température/densité", `${sites.find((s) => s.id === m.siteId)?.name || m.siteId} — ${m.date}`);
+    flash("Température/densité mises à jour.");
+  });
   const purgeDemoMovements = () => withSync(async () => {
     const demoIds = movements.filter((m) => m.isDemo).map((m) => m.id);
     if (demoIds.length === 0) return;
@@ -3279,7 +3309,7 @@ export default function App() {
           {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
           {view === "vcf" && <VcfView />}
           {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
@@ -4828,7 +4858,7 @@ function SitesView({ sites, movements, inventaires, stockOf, addSite, editSite, 
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, deleteInventaire, settings, canWrite, canManage, assignedSiteIds, truckAssignments }) {
+function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, editMovementTempDensite, deleteInventaire, settings, canWrite, canManage, assignedSiteIds, truckAssignments }) {
   const hasSiteRestriction = assignedSiteIds && assignedSiteIds.length > 0;
   const activeSites = sites.filter((s) => s.active !== false);
   const availableSites = hasSiteRestriction ? activeSites.filter((s) => assignedSiteIds.includes(s.id)) : activeSites;
@@ -4836,6 +4866,18 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
   const [receptions, setReceptions] = useState([{ quantite: "", ref: "" }]);
+  // Ajout/correction a posteriori de la température et de la densité d'une réception déjà
+  // enregistrée (un opérateur les a parfois oubliées sur le moment) — Superviseur uniquement.
+  const [editingTempId, setEditingTempId] = useState(null);
+  const [tempEditForm, setTempEditForm] = useState({ temperatureC: "", densiteObservee: "" });
+  const startEditTemp = (m) => {
+    setEditingTempId(m.id);
+    setTempEditForm({ temperatureC: m.temperatureC !== undefined ? String(m.temperatureC) : "", densiteObservee: m.densiteObservee !== undefined ? String(m.densiteObservee) : "" });
+  };
+  const saveEditTemp = () => {
+    editMovementTempDensite({ id: editingTempId, temperatureC: tempEditForm.temperatureC, densiteObservee: tempEditForm.densiteObservee });
+    setEditingTempId(null);
+  };
   const [indexAvant, setIndexAvant] = useState("");
   const [indexApres, setIndexApres] = useState("");
   const [compteur, setCompteur] = useState("");
@@ -5567,9 +5609,30 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                     {m.indexAvant !== undefined && m.indexApres !== undefined && (
                       <div className="somip-mono" style={{ marginTop: 2, fontSize: 11, color: C.sub }}>Index : {fmt(m.indexAvant)} → {fmt(m.indexApres)}</div>
                     )}
-                    {(m.temperatureC !== undefined || m.densiteObservee !== undefined) && (
+                    {m.type === "reception" && editingTempId !== m.id && (
+                      <div style={{ marginTop: 2, fontSize: 11, color: C.sub, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span>
+                          {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
+                          {m.temperatureC === undefined && m.densiteObservee === undefined && "Température/densité non saisies"}
+                        </span>
+                        {canManage && (
+                          <button onClick={() => startEditTemp(m)} title="Ajouter ou corriger la température/densité" style={{ border: "none", background: "none", cursor: "pointer", padding: 2, display: "inline-flex" }}>
+                            <Pencil size={11} color={C.blue} />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {m.type !== "reception" && (m.temperatureC !== undefined || m.densiteObservee !== undefined) && (
                       <div style={{ marginTop: 2, fontSize: 11, color: C.sub }}>
                         {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
+                      </div>
+                    )}
+                    {editingTempId === m.id && (
+                      <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
+                        <input type="number" className="somip-input" style={{ width: 70, padding: "4px 6px", fontSize: 11.5 }} placeholder="°C" value={tempEditForm.temperatureC} onChange={(e) => setTempEditForm({ ...tempEditForm, temperatureC: e.target.value })} />
+                        <input type="number" step="0.1" className="somip-input" style={{ width: 95, padding: "4px 6px", fontSize: 11.5 }} placeholder="Densité (kg/m³)" value={tempEditForm.densiteObservee} onChange={(e) => setTempEditForm({ ...tempEditForm, densiteObservee: e.target.value })} />
+                        <button onClick={saveEditTemp} style={{ border: "none", background: C.blue, color: "#fff", borderRadius: 5, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>OK</button>
+                        <button onClick={() => setEditingTempId(null)} style={{ border: "none", background: "none", color: C.sub, cursor: "pointer", fontSize: 11 }}>Annuler</button>
                       </div>
                     )}
                   </td>
