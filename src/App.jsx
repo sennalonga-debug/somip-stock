@@ -332,6 +332,20 @@ function indexPairsLabel(dayMovs, types) {
   if (withIndex.length === 0) return null;
   return withIndex.map((m) => `${m.compteur ? m.compteur + " : " : ""}${fmt(m.indexAvant)} → ${fmt(m.indexApres)}`).join("  ·  ");
 }
+// Même principe qu'indexPairsLabel, pour la température et la densité saisies à la réception
+// (correction VCF) — les réceptions d'une même journée sont listées côte à côte.
+function tempDensiteLabel(dayMovs, types) {
+  const withData = dayMovs
+    .filter((m) => types.includes(m.type) && (m.temperatureC !== undefined || m.densiteObservee !== undefined))
+    .sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
+  if (withData.length === 0) return null;
+  return withData.map((m) => {
+    const parts = [];
+    if (m.temperatureC !== undefined) parts.push(`${m.temperatureC}°C`);
+    if (m.densiteObservee !== undefined) parts.push(`densité ${m.densiteObservee}`);
+    return parts.join(", ");
+  }).join("  ·  ");
+}
 function pickLatestInv(list) {
   return list.reduce((best, cur) => {
     if (!best) return cur;
@@ -5550,6 +5564,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                   <td style={{ color: C.sub }}>
                     {detail}
                     {transfer && <div style={{ marginTop: 2, fontSize: 11, color: C.orange, fontWeight: 600 }}>{transfer}</div>}
+                    {m.indexAvant !== undefined && m.indexApres !== undefined && (
+                      <div className="somip-mono" style={{ marginTop: 2, fontSize: 11, color: C.sub }}>Index : {fmt(m.indexAvant)} → {fmt(m.indexApres)}</div>
+                    )}
+                    {(m.temperatureC !== undefined || m.densiteObservee !== undefined) && (
+                      <div style={{ marginTop: 2, fontSize: 11, color: C.sub }}>
+                        {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
+                      </div>
+                    )}
                   </td>
                   <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>{meta.sign} {fmt(m.quantity)} L</td>
                   {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteMovement(m.id)} /></td>}
@@ -7015,9 +7037,10 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
       const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw; // affichage : vente terrain nette
       const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
       const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
+      const tempDensiteLbl = tempDensiteLabel(dayMovs, ["reception"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       const stockJauge = inv ? inv.stockPhysique : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, tempDensiteLbl, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -7042,7 +7065,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
       Date: d.date, "Stock début (L)": Math.round(d.stockDebut), [`${receptionLabel} (L)`]: Math.round(d.reception), [`${ventesLabel} (L)`]: Math.round(d.ventes),
       ...(isLubSite ? { "Chargement laitiers (L)": Math.round(d.chargementLaitiers) } : {}),
       ...(isTruck ? { "Retour Cuve (L)": Math.round(d.retourCuve) } : {}),
-      "Index (compteurs)": d.indexLabel || "",
+      "Index (compteurs)": d.indexLabel || "", "Temp./Densité (réception)": d.tempDensiteLbl || "",
       "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
     })),
@@ -7055,13 +7078,14 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
     columns: [
       "Date", "Stock début", receptionLabel, ventesLabel,
       ...(isLubSite ? ["Chargement laitiers"] : []), ...(isTruck ? ["Retour Cuve"] : []),
-      "Index (compteurs)", "Stock théorique", "Stock jauge", "Gain/Perte",
+      "Index (compteurs)", "Temp./Densité", "Stock théorique", "Stock jauge", "Gain/Perte",
     ],
     rows: days.map((d) => [
       d.date, `${fmt(d.stockDebut)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventes ? `${fmt(d.ventes)} L` : "—",
       ...(isLubSite ? [d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"] : []),
       ...(isTruck ? [d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"] : []),
       d.indexLabel || "—",
+      d.tempDensiteLbl || "—",
       `${fmt(d.stockTheorique)} L`, d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—",
       d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
     ]),
@@ -7107,6 +7131,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
                 {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
                 {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
                 <th>Index (compteurs)</th>
+                <th>Temp./Densité</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
                 <th style={{ textAlign: "right" }}>Gain/Perte</th>
               </tr>
@@ -7122,6 +7147,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
                   {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
                   <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
+                  <td style={{ fontSize: 12, color: C.sub }}>{d.tempDensiteLbl || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
@@ -7170,9 +7196,10 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSite
       const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw;
       const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
       const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
+      const tempDensiteLbl = tempDensiteLabel(dayMovs, ["reception"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
       const stockJauge = inv ? inv.stockPhysique15 : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, tempDensiteLbl, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -7255,6 +7282,7 @@ function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSite
                   {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
                   <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
+                  <td style={{ fontSize: 12, color: C.sub }}>{d.tempDensiteLbl || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
