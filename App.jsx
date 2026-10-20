@@ -787,6 +787,108 @@ function exportExpositionExcel({ dateStr, decadeNum, monthLabel, gasoilRows, tot
   XLSX.writeFile(wb, filename);
 }
 
+// Liste, sur une plage de dates, tous les Stock fin (jauge) enregistrés via Inventaire rapide,
+// tous sites confondus (sites fixes et camions) — un listing simple, pas un tableau croisé, pour
+// rester lisible même avec beaucoup de sites. Une ligne par jauge réellement saisie ; les
+// combinaisons site/date sans jauge n'apparaissent pas.
+async function exportInventairesRapidePdf({ rows, startDate, endDate, filename }) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = 40;
+  const [pR, pG, pB] = hexToRgb(C.blue);
+
+  doc.setFillColor(pR, pG, pB);
+  doc.rect(0, 0, pageWidth, 7, "F");
+  let textX = marginX;
+  if (CURRENT_LOGO_URL) {
+    try {
+      const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
+      const fmtImg = dataUrl.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrl, fmtImg, marginX, 20, 32, 32);
+      textX = marginX + 42;
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(pR, pG, pB);
+  doc.text("SOMIP", textX, 34);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9.5);
+  doc.setTextColor(110, 120, 130);
+  doc.text("Sites externalisés — Zone Sud-Est · Gabon", textX, 48);
+  doc.setDrawColor(226, 230, 234);
+  doc.setLineWidth(0.75);
+  doc.line(marginX, 66, pageWidth - marginX, 66);
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(20, 30, 40);
+  doc.text(`Inventaires du ${formatDateShort(startDate)} au ${formatDateShort(endDate)}`, pageWidth / 2, 92, { align: "center" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10.5);
+  doc.setTextColor(110, 120, 130);
+  doc.text("Tous les sites — Stock fin (jauge)", pageWidth / 2, 108, { align: "center" });
+
+  autoTable(doc, {
+    startY: 128,
+    head: [["Date", "Site", "Stock fin (L)"]],
+    body: rows.map((r) => [formatDateShort(r.date), r.siteName, `${fmt(r.stockPhysique)} L`]),
+    theme: "grid",
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 9.5, cellPadding: 7 },
+    bodyStyles: { fontSize: 10, cellPadding: 6, textColor: [40, 48, 56] },
+    alternateRowStyles: { fillColor: [249, 250, 251] },
+    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5 },
+    columnStyles: { 2: { halign: "right", fontStyle: "bold" } },
+    margin: { left: marginX, right: marginX },
+    didDrawPage: () => {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(150, 158, 165);
+      doc.text(`Page ${doc.internal.getNumberOfPages()}`, pageWidth - marginX, pageHeight - 20, { align: "right" });
+    },
+  });
+  if (rows.length === 0) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(11);
+    doc.setTextColor(110, 120, 130);
+    doc.text("Aucune jauge enregistrée sur cette période.", pageWidth / 2, 150, { align: "center" });
+  }
+
+  doc.save(filename);
+}
+
+// Un seul composant du bandeau : plage de dates + bouton Imprimer, pour tous les sites — placé
+// en haut de l'onglet Inventaire rapide, indépendant du site/date choisis dans le formulaire de
+// saisie juste en dessous.
+function InventaireRapidePrintPanel({ sites, inventaires }) {
+  const todayM = currentMonth();
+  const [startDate, setStartDate] = useState(`${todayM}-01`);
+  const [endDate, setEndDate] = useState(todayStr());
+
+  const doPrint = () => {
+    const rows = inventaires
+      .filter((i) => (i.product || "gasoil") === "gasoil" && i.date >= startDate && i.date <= endDate)
+      .map((i) => ({ ...i, siteName: sites.find((s) => s.id === i.siteId)?.name || i.siteId }))
+      .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.siteName.localeCompare(b.siteName)));
+    exportInventairesRapidePdf({ rows, startDate, endDate, filename: `SOMIP_Inventaires_${startDate}_au_${endDate}.pdf` });
+  };
+
+  return (
+    <div className="somip-panel somip-no-print" style={{ padding: 16, marginBottom: 18, display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+      <div style={{ flex: "0 0 auto" }}>
+        <Field label="Du"><input type="date" className="somip-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></Field>
+      </div>
+      <div style={{ flex: "0 0 auto" }}>
+        <Field label="Au"><input type="date" className="somip-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></Field>
+      </div>
+      <button className="somip-btn somip-btn-primary" onClick={doPrint} disabled={!startDate || !endDate || startDate > endDate}>
+        <Printer size={14} /> Imprimer (tous les sites)
+      </button>
+      <span style={{ fontSize: 11.5, color: C.sub }}>Exemple : Inventaires du {formatDateShort(startDate)} au {formatDateShort(endDate)}, tous sites confondus.</span>
+    </div>
+  );
+}
 
 async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
@@ -6118,6 +6220,10 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
       </div>
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
+      <InventaireRapidePrintPanel sites={sites} inventaires={inventaires} />
+      )}
+
+      {mainTab === "rapide" && !isTotalEnergiesOnly && (
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 18, flex: "1 1 300px" }}>
         {canWrite && (
@@ -8082,7 +8188,11 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
 
 /* ---- Synthèse Station (site fixe + camions rattachés, ex : Prehomo/Okouma) ---- */
 function trucksAssignedAt(assignments, stationId, dateStr) {
-  return assignments.filter((a) => a.stationId === stationId && a.startDate <= dateStr && (!a.endDate || a.endDate >= dateStr)).map((a) => a.truckId);
+  const ids = assignments.filter((a) => a.stationId === stationId && a.startDate <= dateStr && (!a.endDate || a.endDate >= dateStr)).map((a) => a.truckId);
+  // Si deux périodes d'affectation se chevauchent par erreur (ex. l'une se termine le même jour
+  // où l'autre commence), le même camion ne doit jamais être compté deux fois pour une même date
+  // — sinon ses mouvements (ventes, etc.) seraient doublés dans tous les rapports qui l'utilisent.
+  return [...new Set(ids)];
 }
 // Recherche inverse : le site auquel un camion est rattaché à une date donnée (ou null si aucun).
 function stationAssignedTo(assignments, truckId, dateStr) {
