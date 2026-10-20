@@ -787,6 +787,108 @@ function exportExpositionExcel({ dateStr, decadeNum, monthLabel, gasoilRows, tot
   XLSX.writeFile(wb, filename);
 }
 
+// Liste, sur une plage de dates, tous les Stock fin (jauge) enregistrés via Inventaire rapide,
+// tous sites confondus (sites fixes et camions) — un listing simple, pas un tableau croisé, pour
+// rester lisible même avec beaucoup de sites. Une ligne par jauge réellement saisie ; les
+// combinaisons site/date sans jauge n'apparaissent pas.
+async function exportInventairesRapidePdf({ rows, startDate, endDate, filename }) {
+  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const marginX = 40;
+  const [pR, pG, pB] = hexToRgb(C.blue);
+
+  doc.setFillColor(pR, pG, pB);
+  doc.rect(0, 0, pageWidth, 7, "F");
+  let textX = marginX;
+  if (CURRENT_LOGO_URL) {
+    try {
+      const dataUrl = await loadImageDataUrl(CURRENT_LOGO_URL);
+      const fmtImg = dataUrl.includes("image/png") ? "PNG" : "JPEG";
+      doc.addImage(dataUrl, fmtImg, marginX, 20, 32, 32);
+      textX = marginX + 42;
+    } catch (e) { /* logo indisponible : on continue sans */ }
+  }
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(16);
+  doc.setTextColor(pR, pG, pB);
+  doc.text("SOMIP", textX, 34);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(9.5);
+  doc.setTextColor(110, 120, 130);
+  doc.text("Sites externalisés — Zone Sud-Est · Gabon", textX, 48);
+  doc.setDrawColor(226, 230, 234);
+  doc.setLineWidth(0.75);
+  doc.line(marginX, 66, pageWidth - marginX, 66);
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(15);
+  doc.setTextColor(20, 30, 40);
+  doc.text(`Inventaires du ${formatDateShort(startDate)} au ${formatDateShort(endDate)}`, pageWidth / 2, 92, { align: "center" });
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10.5);
+  doc.setTextColor(110, 120, 130);
+  doc.text("Tous les sites — Stock fin (jauge)", pageWidth / 2, 108, { align: "center" });
+
+  autoTable(doc, {
+    startY: 128,
+    head: [["Date", "Site", "Stock fin (L)"]],
+    body: rows.map((r) => [formatDateShort(r.date), r.siteName, `${fmt(r.stockPhysique)} L`]),
+    theme: "grid",
+    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 9.5, cellPadding: 7 },
+    bodyStyles: { fontSize: 10, cellPadding: 6, textColor: [40, 48, 56] },
+    alternateRowStyles: { fillColor: [249, 250, 251] },
+    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5 },
+    columnStyles: { 2: { halign: "right", fontStyle: "bold" } },
+    margin: { left: marginX, right: marginX },
+    didDrawPage: () => {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8);
+      doc.setTextColor(150, 158, 165);
+      doc.text(`Page ${doc.internal.getNumberOfPages()}`, pageWidth - marginX, pageHeight - 20, { align: "right" });
+    },
+  });
+  if (rows.length === 0) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(11);
+    doc.setTextColor(110, 120, 130);
+    doc.text("Aucune jauge enregistrée sur cette période.", pageWidth / 2, 150, { align: "center" });
+  }
+
+  doc.save(filename);
+}
+
+// Un seul composant du bandeau : plage de dates + bouton Imprimer, pour tous les sites — placé
+// en haut de l'onglet Inventaire rapide, indépendant du site/date choisis dans le formulaire de
+// saisie juste en dessous.
+function InventaireRapidePrintPanel({ sites, inventaires }) {
+  const todayM = currentMonth();
+  const [startDate, setStartDate] = useState(`${todayM}-01`);
+  const [endDate, setEndDate] = useState(todayStr());
+
+  const doPrint = () => {
+    const rows = inventaires
+      .filter((i) => (i.product || "gasoil") === "gasoil" && i.date >= startDate && i.date <= endDate)
+      .map((i) => ({ ...i, siteName: sites.find((s) => s.id === i.siteId)?.name || i.siteId }))
+      .sort((a, b) => (a.date !== b.date ? (a.date < b.date ? -1 : 1) : a.siteName.localeCompare(b.siteName)));
+    exportInventairesRapidePdf({ rows, startDate, endDate, filename: `SOMIP_Inventaires_${startDate}_au_${endDate}.pdf` });
+  };
+
+  return (
+    <div className="somip-panel somip-no-print" style={{ padding: 16, marginBottom: 18, display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+      <div style={{ flex: "0 0 auto" }}>
+        <Field label="Du"><input type="date" className="somip-input" value={startDate} onChange={(e) => setStartDate(e.target.value)} /></Field>
+      </div>
+      <div style={{ flex: "0 0 auto" }}>
+        <Field label="Au"><input type="date" className="somip-input" value={endDate} onChange={(e) => setEndDate(e.target.value)} /></Field>
+      </div>
+      <button className="somip-btn somip-btn-primary" onClick={doPrint} disabled={!startDate || !endDate || startDate > endDate}>
+        <Printer size={14} /> Imprimer (tous les sites)
+      </button>
+      <span style={{ fontSize: 11.5, color: C.sub }}>Exemple : Inventaires du {formatDateShort(startDate)} au {formatDateShort(endDate)}, tous sites confondus.</span>
+    </div>
+  );
+}
 
 async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
@@ -3123,19 +3225,26 @@ export default function App() {
         déplace lentement, et vagues qui ondulent doucement en bas de l'écran. Respecte
         "réduire les animations" (dégradé et vagues restent fixes dans ce cas) et s'allège sur
         téléphone (une seule vague animée, au lieu de deux, pour économiser la batterie). ---- */
+        /* Taille de dégradé FIXE en pixels (pas en %) : à largeur d'écran réelle (souvent
+        1400-2000px), un dégradé en % s'étire tellement que ses couleurs deviennent invisibles.
+        Une taille fixe garantit la même variation de couleur visible quelle que soit la largeur. */
         @keyframes somipBgDrift { 0%, 100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
         .somip-animated-bg {
-          background: linear-gradient(115deg, ${C.navy}12, ${C.danger}0A, ${C.orange}12, ${C.navy}0D, ${C.danger}0A);
-          background-size: 320% 320%;
+          background-color: ${C.bg};
+          background-image: linear-gradient(115deg, ${C.navy}26 0%, ${C.danger}1F 22%, ${C.orange}29 45%, ${C.navy}1A 68%, ${C.danger}24 100%);
+          background-size: 1400px 1400px;
         }
         @keyframes somipWaveA { from { transform: translateX(0); } to { transform: translateX(-50%); } }
         @keyframes somipWaveB { from { transform: translateX(-50%); } to { transform: translateX(0); } }
         .somip-wave-a { animation: somipWaveA 46s linear infinite; }
         .somip-wave-b { animation: somipWaveB 64s linear infinite; }
+        /* Barre latérale : variation TRÈS discrète, bleu uniquement (jamais d'orange — un ton
+        chaud contraste davantage avec le texte gris pâle du menu et nuit à sa lisibilité à
+        certaines phases de l'animation). Fondu doux, jamais de bande nette. */
         @keyframes somipNavyDrift { 0%, 100% { background-position: 0% 0%; } 50% { background-position: 100% 100%; } }
         .somip-navy-animated-overlay {
-          position: absolute; inset: 0; background-size: 240% 240%;
-          background-image: linear-gradient(115deg, ${C.blue}3D 0%, transparent 28%, ${C.orange}26 50%, transparent 72%, ${C.blue}3D 100%);
+          position: absolute; inset: 0; background-size: 320% 320%;
+          background-image: linear-gradient(115deg, ${C.blue}14 0%, transparent 45%, transparent 55%, ${C.blue}14 100%);
           pointer-events: none;
         }
         @media (prefers-reduced-motion: no-preference) {
@@ -3147,6 +3256,7 @@ export default function App() {
         }
         @media (max-width: 860px) {
           .somip-wave-b { display: none; }
+          .somip-animated-bg { background-size: 700px 700px; }
         }
         .somip-print-only { display: none; }
         .somip-mobile-toggle { display: none; }
@@ -5137,6 +5247,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
     + sumQty(dayMovs, ["reception"]) + sumQty(dayMovs, ["retour_camion"])
     - sumQty(dayMovs, ["sortie"]) - sumQty(dayMovs, ["sortie_camion"]);
   const gainPerteJour = existingInv ? existingInv.stockPhysique - theoriqueDuJourSauve : null;
+  // Pour un camion : la "Sortie terrain" saisie est la sortie GLOBALE de la journée (ce qui a
+  // quitté la citerne), qui peut inclure une part revenue en cuve plutôt que distribuée. La vraie
+  // distribution sur le terrain est donc sortie − retour cuve, affichée à part plutôt que de
+  // changer l'étiquette des lignes individuelles (qui restent fidèles à ce qui a été saisi).
+  const sortieGlobaleJour = sumQty(dayMovs, ["sortie"]);
+  const retourCuveJour = sumQty(dayMovs, ["retour_cuve_camion"]);
+  const sortieTerrainNette = isMobileSite && retourCuveJour > 0 ? sortieGlobaleJour - retourCuveJour : null;
 
   return (
     <div className="somip-fade">
@@ -5641,6 +5758,16 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </tr>
               );
             })}
+            {sortieTerrainNette !== null && (
+              <tr style={{ background: C.bg }}>
+                <td><Badge color={C.orange}>Sortie terrain nette</Badge></td>
+                <td style={{ color: C.sub, fontSize: 11.5 }}>
+                  Sortie globale {fmt(sortieGlobaleJour)} L − retour cuve {fmt(retourCuveJour)} L = réellement distribué sur le terrain
+                </td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(sortieTerrainNette)} L</td>
+                {canManage && <td></td>}
+              </tr>
+            )}
             {existingInv && (
               <tr>
                 <td><Badge color={C.blue}>Stock fin</Badge></td>
@@ -6108,6 +6235,10 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
         {!isTotalEnergiesOnly && <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("rapide")}><ClipboardList size={13} />Inventaire rapide</button>}
         <button className={`somip-tab ${mainTab === "officiel" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("officiel")}><Pencil size={13} />Inventaire officiel (inopiné / mensuel)</button>
       </div>
+
+      {mainTab === "rapide" && !isTotalEnergiesOnly && (
+      <InventaireRapidePrintPanel sites={sites} inventaires={inventaires} />
+      )}
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -8074,7 +8205,11 @@ function ExpositionComilogReport({ sites, movements, inventaires, truckAssignmen
 
 /* ---- Synthèse Station (site fixe + camions rattachés, ex : Prehomo/Okouma) ---- */
 function trucksAssignedAt(assignments, stationId, dateStr) {
-  return assignments.filter((a) => a.stationId === stationId && a.startDate <= dateStr && (!a.endDate || a.endDate >= dateStr)).map((a) => a.truckId);
+  const ids = assignments.filter((a) => a.stationId === stationId && a.startDate <= dateStr && (!a.endDate || a.endDate >= dateStr)).map((a) => a.truckId);
+  // Si deux périodes d'affectation se chevauchent par erreur (ex. l'une se termine le même jour
+  // où l'autre commence), le même camion ne doit jamais être compté deux fois pour une même date
+  // — sinon ses mouvements (ventes, etc.) seraient doublés dans tous les rapports qui l'utilisent.
+  return [...new Set(ids)];
 }
 // Recherche inverse : le site auquel un camion est rattaché à une date donnée (ou null si aucun).
 function stationAssignedTo(assignments, truckId, dateStr) {
