@@ -2484,15 +2484,25 @@ export default function App() {
     const q = readOfflineQueue();
     if (q.length === 0) return;
     flushingRef.current = true;
+    // Après une coupure longue (plusieurs heures sur le terrain), le jeton de connexion a souvent
+    // expiré (~1h de durée de vie) — sans ce renouvellement explicite, chaque tentative d'envoi
+    // échoue à cause du jeton périmé, pas du réseau, et la saisie reste bloquée en attente
+    // indéfiniment puisque l'erreur est traitée à tort comme "toujours hors ligne". On tente donc
+    // de rafraîchir la session AVANT d'essayer d'envoyer quoi que ce soit.
+    try { await supabase.auth.refreshSession(); } catch (e) { /* session déjà valide, ou réseau encore indisponible : on tente quand même l'envoi ci-dessous */ }
     const remaining = [];
     let anySucceeded = false;
+    let stuckCount = 0;
+    const STUCK_THRESHOLD = 5; // au-delà, ce n'est plus juste "toujours hors ligne" — à signaler clairement
     for (const item of q) {
       try {
         const { error } = await supabase.from(item.table).insert(item.row);
         if (error) throw error;
         anySucceeded = true;
       } catch (e) {
-        remaining.push(item);
+        const attempts = (item.attempts || 0) + 1;
+        remaining.push({ ...item, attempts, lastError: String(e?.message || e || "") });
+        if (attempts >= STUCK_THRESHOLD) stuckCount++;
       }
     }
     writeOfflineQueue(remaining);
@@ -2504,6 +2514,12 @@ export default function App() {
       const [m, i] = await Promise.all([fetchTable("movements", rowToMovement, "date"), fetchTable("inventaires", rowToInventaire, "date")]);
       setMovements(m); setInventaires(i);
       flash(remaining.length === 0 ? "Toutes les saisies hors-connexion ont été synchronisées." : `${q.length - remaining.length} saisie(s) synchronisée(s), ${remaining.length} en attente.`);
+    }
+    // Une saisie qui échoue encore après plusieurs tentatives malgré une connexion apparemment
+    // revenue n'est probablement plus un simple problème de réseau — on le signale clairement
+    // plutôt que de continuer à réessayer indéfiniment en silence, invisible pour l'opérateur.
+    if (stuckCount > 0 && navigator.onLine) {
+      flash(`${stuckCount} saisie(s) hors-connexion n'arrivent pas à se synchroniser malgré la connexion revenue — contacte un Superviseur si ça persiste.`, "error");
     }
   };
   useEffect(() => {
