@@ -2413,6 +2413,10 @@ export default function App() {
 
     const fastTick = async () => {
       if (!navigator.onLine) return;
+      // Onglet en arrière-plan ou téléphone verrouillé : aucune utilité de recharger quoi que ce
+      // soit, personne ne regarde l'écran. Le minuteur continue de "sonner" toutes les 5 minutes,
+      // sans coût réel, mais ne déclenche plus aucun rechargement tant que ça reste invisible.
+      if (document.visibilityState !== "visible") return;
       try {
         await flushOfflineQueue();
         const [m, i, ee] = await Promise.all([
@@ -2441,6 +2445,7 @@ export default function App() {
 
     const slowTick = async () => {
       if (!navigator.onLine) return;
+      if (document.visibilityState !== "visible") return;
       try {
         // "audit" (l'Historique) n'est retiré de cette boucle : c'est un journal qui ne fait que
         // grossir, consulté par le Superviseur seul, rarement — pas besoin de le recharger en
@@ -2481,7 +2486,27 @@ export default function App() {
     // de données rechargées chaque jour (objectif : rester sous le quota gratuit de Supabase).
     const fastInterval = setInterval(fastTick, 300000);
     const slowInterval = setInterval(slowTick, 900000);
-    return () => { clearInterval(fastInterval); clearInterval(slowInterval); };
+
+    // Au retour (onglet qui redevient visible, téléphone déverrouillé) : un seul rechargement
+    // immédiat, plutôt que d'attendre jusqu'à 5 ou 15 minutes le prochain passage du minuteur —
+    // histoire que les données affichées ne soient jamais trop en retard après une absence.
+    let lastVisibleRefresh = 0;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      // Petite protection : si l'onglet redevient visible plusieurs fois en quelques secondes
+      // (changement rapide d'application, par exemple), on ne redéclenche pas à chaque fois.
+      if (now - lastVisibleRefresh < 10000) return;
+      lastVisibleRefresh = now;
+      fastTick();
+      slowTick();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearInterval(fastInterval); clearInterval(slowInterval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [loading, session, profile]);
 
   // "audit" (Historique) n'est plus tenu à jour en continu (voir slowTick ci-dessus) — on le
