@@ -2442,10 +2442,13 @@ export default function App() {
     const slowTick = async () => {
       if (!navigator.onLine) return;
       try {
-        const [s, p, a, ps, ta, sm, bl, io, st, sdm, se2] = await Promise.all([
+        // "audit" (l'Historique) n'est retiré de cette boucle : c'est un journal qui ne fait que
+        // grossir, consulté par le Superviseur seul, rarement — pas besoin de le recharger en
+        // entier toutes les 2 minutes pour tout le monde. Il est rechargé séparément, seulement
+        // à l'ouverture de la page Historique (voir plus bas, à l'affichage de la page).
+        const [s, p, ps, ta, sm, bl, io, st, sdm, se2] = await Promise.all([
           fetchTable("sites", rowToSite),
           fetchTable("profiles", rowToProfile),
-          fetchTable("audit", rowToAudit, "ts", false),
           fetchTable("product_stocks", rowToProductStock),
           fetchTable("truck_assignments", rowToAssignment, "start_date"),
           fetchTable("site_meters", rowToSiteMeter, "name"),
@@ -2455,13 +2458,13 @@ export default function App() {
           fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
           fetchTable("site_engins", rowToSiteEngin, "name"),
         ]);
-        setSites(s); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm); setSiteEngins(se2);
+        setSites(s); setProfiles(p); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm); setSiteEngins(se2);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
           writeAppCache(session.user.id, {
-            ...cached, sitesData: s, profilesData: p, auditData: a, productStocksData: ps,
+            ...cached, sitesData: s, profilesData: p, productStocksData: ps,
             assignmentsData: ta, siteMetersData: sm, bilansData: bl, invOffData: io,
             siteTanksData: st, siteDepotageMetersData: sdm, siteEnginsData: se2, settingsRow: se, cachedAt: new Date().toISOString(),
           });
@@ -2471,10 +2474,23 @@ export default function App() {
       }
     };
 
-    const fastInterval = setInterval(fastTick, 25000);
-    const slowInterval = setInterval(slowTick, 120000);
+    // Fréquences nettement allongées (25s -> 5 min, 2 min -> 15 min) : ni la saisie ni la
+    // consultation n'ont besoin d'une mise à jour à la seconde près pour un suivi de stock de
+    // carburant — ce rythme reste largement suffisant pour que les saisies d'un collègue
+    // apparaissent chez les autres en quelques minutes, tout en réduisant très fortement le volume
+    // de données rechargées chaque jour (objectif : rester sous le quota gratuit de Supabase).
+    const fastInterval = setInterval(fastTick, 300000);
+    const slowInterval = setInterval(slowTick, 900000);
     return () => { clearInterval(fastInterval); clearInterval(slowInterval); };
   }, [loading, session, profile]);
+
+  // "audit" (Historique) n'est plus tenu à jour en continu (voir slowTick ci-dessus) — on le
+  // recharge seulement au moment où le Superviseur ouvre réellement cette page.
+  useEffect(() => {
+    if (view === "historique" && perms.canManage) {
+      fetchTable("audit", rowToAudit, "ts", false).then(setAudit).catch(() => {});
+    }
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Vide la file d'attente hors-connexion vers Supabase, dès qu'une tentative semble possible.
   // Ce qui échoue encore (toujours hors-ligne) reste en attente pour la prochaine tentative.
@@ -2509,10 +2525,11 @@ export default function App() {
     setOfflineQueueCount(remaining.length);
     flushingRef.current = false;
     if (anySucceeded) {
-      // Au moins une entrée a été synchronisée : les remplace localement par les vraies
-      // données du serveur (retire les entrées optimistes temporaires du même coup).
-      const [m, i] = await Promise.all([fetchTable("movements", rowToMovement, "date"), fetchTable("inventaires", rowToInventaire, "date")]);
-      setMovements(m); setInventaires(i);
+      // Au moins une entrée a été synchronisée. On ne recharge plus movements/inventaires en
+      // entier ici : les valeurs affichées localement (saisies optimistes) sont déjà correctes
+      // pour tous les calculs — seul leur identifiant interne diffère temporairement de celui du
+      // serveur, sans aucune conséquence visible. Le prochain cycle automatique (fastTick) les
+      // mettra à jour avec les vraies données — inutile de recharger deux fois la même chose.
       flash(remaining.length === 0 ? "Toutes les saisies hors-connexion ont été synchronisées." : `${q.length - remaining.length} saisie(s) synchronisée(s), ${remaining.length} en attente.`);
     }
     // Une saisie qui échoue encore après plusieurs tentatives malgré une connexion apparemment
@@ -2792,7 +2809,28 @@ export default function App() {
   });
 
   /* ---- mutations : mouvements ---- */
-  const addMovement = (payload) => withSync(async () => {
+  // Avertit (sans jamais bloquer) avant d'enregistrer un mouvement qui ressemble fortement à un
+  // autre déjà présent pour le même site, la même date, le même produit et le même type, avec une
+  // quantité identique — le signe classique d'une double saisie (ex. un opérateur hors connexion
+  // et un Superviseur qui ressaisit la même chose depuis son PC sans le savoir). Une vraie saisie
+  // distincte mais de quantité différente n'est jamais concernée.
+  const addMovement = (payload) => {
+    const isDuplicate = movements.some((m) =>
+      m.siteId === payload.siteId
+      && (m.product || "gasoil") === (payload.product || "gasoil")
+      && m.type === payload.type
+      && m.date === payload.date
+      && Number(m.quantity) === Number(payload.quantity)
+    );
+    if (isDuplicate) {
+      const label = TYPE_META[payload.type]?.label || payload.type;
+      const siteName = sites.find((s) => s.id === payload.siteId)?.name || payload.siteId;
+      const ok = window.confirm(`Une saisie "${label}" de ${fmt(payload.quantity)} L existe déjà aujourd'hui (${payload.date}) pour ${siteName}. Est-ce une saisie différente, ou un doublon ?\n\nOK = l'enregistrer quand même (saisie distincte)\nAnnuler = ne rien enregistrer`);
+      if (!ok) return Promise.resolve(false);
+    }
+    return addMovementConfirmed(payload);
+  };
+  const addMovementConfirmed = (payload) => withSync(async () => {
     const record = { id: uid(), createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false, ...payload };
     const row = movementToRow(record);
     try {
