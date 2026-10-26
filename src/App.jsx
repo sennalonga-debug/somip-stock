@@ -1767,12 +1767,18 @@ const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSe
 // "columns" : liste exacte des colonnes dont ce mapper se sert réellement, pour ne jamais
 // récupérer plus de données que nécessaire. Optionnel et replié sur "*" par défaut, pour ne
 // jamais casser un appel existant qu'on aurait oublié de préciser.
+// IMPORTANT : en cas d'erreur (y compris un blocage Supabase, une coupure passagère...), ces
+// trois fonctions DOIVENT signaler l'échec (throw) plutôt que de rendre un tableau vide en
+// silence. Un tableau vide y ressemblerait à "il n'y a réellement rien ici" pour tout appelant
+// qui fusionne ce résultat dans les données déjà en mémoire (voir mergeRecentWindow et
+// mergeSiteDate plus bas) — un échec silencieux effacerait alors à tort des saisies bien réelles,
+// simplement parce que le rechargement qui aurait dû les confirmer a échoué au mauvais moment.
 async function fetchTable(table, mapper, orderCol, ascending, columns) {
   if (!SUPABASE_CONFIGURED) return [];
   let q = supabase.from(table).select(columns || "*");
   if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
   const { data, error } = await q;
-  if (error) return [];
+  if (error) throw error;
   return (data || []).map(mapper);
 }
 // Ne récupère que les lignes dont la date est >= dateFrom (inclus) — utilisé pour le rechargement
@@ -1781,7 +1787,7 @@ async function fetchTable(table, mapper, orderCol, ascending, columns) {
 async function fetchRecent(table, mapper, columns, dateFrom) {
   if (!SUPABASE_CONFIGURED) return [];
   const { data, error } = await supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true });
-  if (error) return [];
+  if (error) throw error;
   return (data || []).map(mapper);
 }
 // Recharge, directement depuis Supabase, les lignes d'UN SEUL site à UNE SEULE date — utilisé à
@@ -1793,7 +1799,7 @@ async function fetchForSiteDate(table, mapper, columns, siteId, date, product) {
   let q = supabase.from(table).select(columns).eq("site_id", siteId).eq("date", date);
   if (product) q = q.eq("product", product);
   const { data, error } = await q;
-  if (error) return [];
+  if (error) throw error;
   return (data || []).map(mapper);
 }
 // Fusionne une fenêtre récente fraîchement rechargée dans les données déjà en mémoire : tout ce
