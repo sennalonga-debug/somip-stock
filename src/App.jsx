@@ -2399,22 +2399,31 @@ export default function App() {
       }
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
+        // Chaque table est chargée indépendamment : si l'une d'elles échoue (ex. une colonne
+        // manquante après une mise à jour incomplète de la base), elle revient simplement vide,
+        // SANS empêcher les 13 autres de se charger normalement. Avant cette protection, une
+        // seule table en échec bloquait l'application entière pour tout le monde — exactement ce
+        // qui s'est produit avec la colonne "reception_ambiant" manquante sur bilan_matieres.
+        const loadTableSafe = async (promise, label) => {
+          try { return await promise; }
+          catch (e) { console.error(`Échec du chargement de "${label}" — cette table reviendra vide :`, e); return []; }
+        };
         const load = (async () => {
           const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
-            fetchTable("sites", rowToSite, null, false, COLS_SITES),
-            fetchTable("movements", rowToMovement, "date", true, COLS_MOVEMENTS),
-            fetchTable("inventaires", rowToInventaire, "date", true, COLS_INVENTAIRES),
-            fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES),
-            fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT),
-            fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS),
-            fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS),
-            fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS),
-            fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES),
-            fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS),
-            fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS),
-            fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS),
-            fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS),
-            fetchTable("engin_entries", rowToEnginEntry, "date", true, COLS_ENGIN_ENTRIES),
+            loadTableSafe(fetchTable("sites", rowToSite, null, false, COLS_SITES), "sites"),
+            loadTableSafe(fetchTable("movements", rowToMovement, "date", true, COLS_MOVEMENTS), "movements"),
+            loadTableSafe(fetchTable("inventaires", rowToInventaire, "date", true, COLS_INVENTAIRES), "inventaires"),
+            loadTableSafe(fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES), "profiles"),
+            loadTableSafe(fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT), "audit"),
+            loadTableSafe(fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS), "product_stocks"),
+            loadTableSafe(fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS), "truck_assignments"),
+            loadTableSafe(fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS), "site_meters"),
+            loadTableSafe(fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES), "bilan_matieres"),
+            loadTableSafe(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), "inventaires_officiels"),
+            loadTableSafe(fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS), "site_tanks"),
+            loadTableSafe(fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS), "site_depotage_meters"),
+            loadTableSafe(fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS), "site_engins"),
+            loadTableSafe(fetchTable("engin_entries", rowToEnginEntry, "date", true, COLS_ENGIN_ENTRIES), "engin_entries"),
           ]);
           let settingsRow = null;
           try {
@@ -2538,27 +2547,48 @@ export default function App() {
         // grossir, consulté par le Superviseur seul, rarement — pas besoin de le recharger en
         // entier toutes les 2 minutes pour tout le monde. Il est rechargé séparément, seulement
         // à l'ouverture de la page Historique (voir plus bas, à l'affichage de la page).
-        const [s, p, ps, ta, sm, bl, io, st, sdm, se2] = await Promise.all([
-          fetchTable("sites", rowToSite, null, false, COLS_SITES),
-          fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES),
-          fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS),
-          fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS),
-          fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS),
-          fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES),
-          fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS),
-          fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS),
-          fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS),
-          fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS),
+        // Chaque table est indépendante : si l'une échoue, on NE L'ÉCRASE PAS avec un tableau
+        // vide (contrairement à "remplacer en entier" comme avant) — on garde simplement ce qui
+        // était déjà en mémoire pour cette table précise, et les autres continuent de se mettre à
+        // jour normalement. Un problème isolé sur une seule table ne doit plus jamais effacer ses
+        // propres données ni empêcher le reste de l'application de rester à jour.
+        // "captured" retient la valeur fraîche de chaque table qui a réussi, pour l'écriture du
+        // cache juste en dessous — une table en échec garde sa précédente valeur en cache (via
+        // "cached.xxxData ?? ..." plus bas), au lieu d'être écrasée par du vide.
+        const captured = {};
+        const tryUpdate = async (promise, setter, label) => {
+          try { const v = await promise; setter(v); captured[label] = v; }
+          catch (e) { console.error(`Échec du rafraîchissement de "${label}" — données existantes conservées :`, e); }
+        };
+        await Promise.all([
+          tryUpdate(fetchTable("sites", rowToSite, null, false, COLS_SITES), setSites, "sites"),
+          tryUpdate(fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES), setProfiles, "profiles"),
+          tryUpdate(fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS), setProductStocks, "productStocks"),
+          tryUpdate(fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS), setTruckAssignments, "assignments"),
+          tryUpdate(fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS), setSiteMeters, "siteMeters"),
+          tryUpdate(fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES), setBilans, "bilans"),
+          tryUpdate(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), setInventairesOfficiels, "invOff"),
+          tryUpdate(fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS), setSiteTanks, "siteTanks"),
+          tryUpdate(fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS), setSiteDepotageMeters, "siteDepotageMeters"),
+          tryUpdate(fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS), setSiteEngins, "siteEngins"),
         ]);
-        setSites(s); setProfiles(p); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm); setSiteEngins(se2);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
           writeAppCache(session.user.id, {
-            ...cached, sitesData: s, profilesData: p, productStocksData: ps,
-            assignmentsData: ta, siteMetersData: sm, bilansData: bl, invOffData: io,
-            siteTanksData: st, siteDepotageMetersData: sdm, siteEnginsData: se2, settingsRow: se, cachedAt: new Date().toISOString(),
+            ...cached,
+            sitesData: captured.sites ?? cached.sitesData,
+            profilesData: captured.profiles ?? cached.profilesData,
+            productStocksData: captured.productStocks ?? cached.productStocksData,
+            assignmentsData: captured.assignments ?? cached.assignmentsData,
+            siteMetersData: captured.siteMeters ?? cached.siteMetersData,
+            bilansData: captured.bilans ?? cached.bilansData,
+            invOffData: captured.invOff ?? cached.invOffData,
+            siteTanksData: captured.siteTanks ?? cached.siteTanksData,
+            siteDepotageMetersData: captured.siteDepotageMeters ?? cached.siteDepotageMetersData,
+            siteEnginsData: captured.siteEngins ?? cached.siteEnginsData,
+            settingsRow: se, cachedAt: new Date().toISOString(),
           });
         }
       } catch (e) {
