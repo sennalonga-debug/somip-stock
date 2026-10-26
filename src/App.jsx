@@ -163,6 +163,9 @@ function readLastUserPointer() {
 function writeLastUserPointer(p) {
   try { localStorage.setItem(LAST_USER_KEY, JSON.stringify(p)); } catch (e) { /* pas bloquant */ }
 }
+function clearLastUserPointer() {
+  try { localStorage.removeItem(LAST_USER_KEY); } catch (e) { /* pas bloquant */ }
+}
 const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
 // Un inventaire "mensuel" saisi le 1er (ou les tout premiers jours) du mois représente la
 // clôture du mois PRÉCÉDENT, pas celui en cours — on recule donc d'un jour avant de déterminer
@@ -2183,13 +2186,15 @@ export default function App() {
   useEffect(() => {
     if (!SUPABASE_CONFIGURED) { setAuthLoading(false); return; }
     const fallbackOrNull = () => {
-      // Pas de session valide (jeton expiré, ou jamais rafraîchi) : si on est hors-ligne et
-      // qu'une identité a déjà été connectée avec succès sur cet appareil, on continue avec
-      // elle plutôt que d'exiger une reconnexion impossible sans réseau.
-      if (!navigator.onLine) {
-        const last = readLastUserPointer();
-        if (last?.userId) return { user: { id: last.userId, email: last.email }, access_token: last.accessToken || "", isOfflineFallback: true };
-      }
+      // Pas de session valide (jeton expiré sans pouvoir être renouvelé) — pour n'importe quelle
+      // raison : vraie coupure réseau, OU Supabase qui refuse temporairement de répondre (comme
+      // lors d'un blocage de quota, HTTP 402). Dans les deux cas, une reconnexion par mot de
+      // passe est de toute façon impossible tant que Supabase ne répond pas. Si une identité a
+      // déjà été connectée avec succès sur cet appareil et ne s'est pas explicitement déconnectée
+      // depuis (la déconnexion efface ce pointeur, voir signOut), on continue avec elle plutôt
+      // que de bloquer sur un écran de connexion qui ne peut pas aboutir.
+      const last = readLastUserPointer();
+      if (last?.userId) return { user: { id: last.userId, email: last.email }, access_token: last.accessToken || "", isOfflineFallback: true };
       return null;
     };
     // Hors-ligne dès le départ (mode avion...) : inutile d'attendre getSession(), qui peut
@@ -2289,7 +2294,11 @@ export default function App() {
   // centrée sur son propre site — le Superviseur et les comptes sans site attribué gardent
   // l'accès complet, sans changement.
   const isSiteRestricted = (currentRole === "operateur" || currentRole === "chauffeur") && (profile?.assignedSiteIds || []).length > 0;
-  const signOut = () => supabase.auth.signOut();
+  // Efface aussi la "dernière identité connue" de cet appareil : une déconnexion volontaire doit
+  // toujours ramener à l'écran de connexion, jamais être contournée plus tard par le secours
+  // hors-ligne/blocage (voir fallbackOrNull plus haut) — sinon quelqu'un qui se déconnecte
+  // explicitement (ex. appareil partagé) pourrait se retrouver reconnecté automatiquement.
+  const signOut = () => { clearLastUserPointer(); return supabase.auth.signOut(); };
 
   /* ---- chargement initial des données (une fois connecté) ---- */
   useEffect(() => {
