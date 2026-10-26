@@ -1773,22 +1773,42 @@ const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSe
 // qui fusionne ce résultat dans les données déjà en mémoire (voir mergeRecentWindow et
 // mergeSiteDate plus bas) — un échec silencieux effacerait alors à tort des saisies bien réelles,
 // simplement parce que le rechargement qui aurait dû les confirmer a échoué au mauvais moment.
+//
+// IMPORTANT (2) : Supabase/PostgREST limite chaque requête à 1000 lignes par défaut — au-delà,
+// le résultat est silencieusement tronqué, sans aucune erreur. "runPaginatedQuery" boucle avec
+// "range()" jusqu'à avoir récupéré la table en entier, quelle que soit sa taille, pour que ce
+// plafond ne puisse plus jamais couper discrètement des saisies récentes.
+async function runPaginatedQuery(buildQuery) {
+  const PAGE_SIZE = 1000;
+  let allRows = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    allRows = allRows.concat(data || []);
+    if (!data || data.length < PAGE_SIZE) break; // dernière page (partielle ou vide) atteinte
+    from += PAGE_SIZE;
+  }
+  return allRows;
+}
 async function fetchTable(table, mapper, orderCol, ascending, columns) {
   if (!SUPABASE_CONFIGURED) return [];
-  let q = supabase.from(table).select(columns || "*");
-  if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
-  const { data, error } = await q;
-  if (error) throw error;
-  return (data || []).map(mapper);
+  const rows = await runPaginatedQuery(() => {
+    let q = supabase.from(table).select(columns || "*");
+    if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
+    return q;
+  });
+  return rows.map(mapper);
 }
 // Ne récupère que les lignes dont la date est >= dateFrom (inclus) — utilisé pour le rechargement
 // automatique périodique des tables qui ne font que grossir (movements, inventaires,
 // engin_entries), au lieu de retélécharger tout l'historique à chaque fois.
 async function fetchRecent(table, mapper, columns, dateFrom) {
   if (!SUPABASE_CONFIGURED) return [];
-  const { data, error } = await supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true });
-  if (error) throw error;
-  return (data || []).map(mapper);
+  const rows = await runPaginatedQuery(() =>
+    supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true })
+  );
+  return rows.map(mapper);
 }
 // Recharge, directement depuis Supabase, les lignes d'UN SEUL site à UNE SEULE date — utilisé à
 // l'ouverture de Saisie journalière et à chaque changement de site/date, pour toujours voir la
@@ -1796,11 +1816,12 @@ async function fetchRecent(table, mapper, columns, dateFrom) {
 // attendre le prochain passage du rafraîchissement automatique global.
 async function fetchForSiteDate(table, mapper, columns, siteId, date, product) {
   if (!SUPABASE_CONFIGURED || !siteId || !date) return [];
-  let q = supabase.from(table).select(columns).eq("site_id", siteId).eq("date", date);
-  if (product) q = q.eq("product", product);
-  const { data, error } = await q;
-  if (error) throw error;
-  return (data || []).map(mapper);
+  const rows = await runPaginatedQuery(() => {
+    let q = supabase.from(table).select(columns).eq("site_id", siteId).eq("date", date);
+    if (product) q = q.eq("product", product);
+    return q;
+  });
+  return rows.map(mapper);
 }
 // Fusionne une fenêtre récente fraîchement rechargée dans les données déjà en mémoire : tout ce
 // qui est antérieur à cutoffDate reste tel quel (jamais retéléchargé), tout ce qui est à partir
