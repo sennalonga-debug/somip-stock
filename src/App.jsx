@@ -131,8 +131,16 @@ function writeOfflineQueue(q) {
 }
 function isNetworkError(e) {
   if (!navigator.onLine) return true;
-  const msg = String(e?.message || e || "");
-  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET|Délai dépassé/i.test(msg);
+  // Un blocage temporaire de Supabase (quota dépassé — HTTP 402) doit être traité comme une
+  // coupure : l'appareil est bien connecté, mais le serveur refuse de répondre pour l'instant.
+  // Même conséquence pratique qu'une vraie coupure réseau : conserver la saisie et réessayer
+  // plus tard, plutôt que de la perdre. Supabase transmet le code HTTP dans "status" — c'est le
+  // signal le plus fiable ; le texte du message sert de filet de sécurité si jamais ce champ
+  // manque pour une raison ou une autre.
+  const status = e?.status ?? e?.originalError?.status;
+  if (status === 402 || status === "402") return true;
+  const msg = String(e?.message || e?.details || e || "");
+  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET|Délai dépassé|\b402\b|payment required|quota.{0,20}(exceed|exhaust)/i.test(msg);
 }
 // ---- Cache local des données essentielles, pour ouvrir l'appli et saisir même sans AUCUN
 // réseau au démarrage (pas seulement une coupure en cours de route). Un jeu de données par
