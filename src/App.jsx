@@ -1784,6 +1784,18 @@ async function fetchRecent(table, mapper, columns, dateFrom) {
   if (error) return [];
   return (data || []).map(mapper);
 }
+// Recharge, directement depuis Supabase, les lignes d'UN SEUL site à UNE SEULE date — utilisé à
+// l'ouverture de Saisie journalière et à chaque changement de site/date, pour toujours voir la
+// version la plus à jour de cette saisie précise (celle d'un autre opérateur comprise), sans
+// attendre le prochain passage du rafraîchissement automatique global.
+async function fetchForSiteDate(table, mapper, columns, siteId, date, product) {
+  if (!SUPABASE_CONFIGURED || !siteId || !date) return [];
+  let q = supabase.from(table).select(columns).eq("site_id", siteId).eq("date", date);
+  if (product) q = q.eq("product", product);
+  const { data, error } = await q;
+  if (error) return [];
+  return (data || []).map(mapper);
+}
 // Fusionne une fenêtre récente fraîchement rechargée dans les données déjà en mémoire : tout ce
 // qui est antérieur à cutoffDate reste tel quel (jamais retéléchargé), tout ce qui est à partir
 // de cutoffDate est intégralement remplacé par la version fraîche — ce qui reflète correctement
@@ -1791,6 +1803,13 @@ async function fetchRecent(table, mapper, columns, dateFrom) {
 // d'une colonne "mis à jour le" dédiée côté base de données.
 function mergeRecentWindow(prevArray, freshRecent, cutoffDate) {
   return [...prevArray.filter((x) => x.date < cutoffDate), ...freshRecent];
+}
+// Même principe que mergeRecentWindow, mais ciblé sur UN SEUL site + UNE SEULE date (et un seul
+// produit si précisé) : remplace uniquement les lignes correspondantes, laisse tout le reste
+// intact — y compris les autres produits du même site à la même date (ex. un site à lubrifiants).
+function mergeSiteDate(prevArray, fresh, siteId, date, product) {
+  const matches = (x) => x.siteId === siteId && x.date === date && (!product || (x.product || "gasoil") === product);
+  return [...prevArray.filter((x) => !matches(x)), ...fresh];
 }
 // Colonnes exactes utilisées par chaque mapper "rowToX" ci-dessous (voir plus loin dans ce
 // fichier) — à tenir à jour si un mapper change. Si une colonne manque ici alors qu'un mapper
@@ -3023,6 +3042,19 @@ export default function App() {
       appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
       flash("Inventaire enregistré.");
     } catch (e) {
+      // Une saisie existe déjà pour ce site, cette date et ce produit — très probablement faite
+      // entre-temps par quelqu'un d'autre (un opérateur sur le terrain) avant que ce rafraîchissait
+      // local n'ait eu l'occasion de la récupérer. On ne l'écrase JAMAIS silencieusement : on
+      // recharge la vraie ligne depuis le serveur et on prévient clairement, plutôt que de
+      // continuer avec un formulaire qui aurait montré une version vide ou différente.
+      const code = e?.code || e?.originalError?.code;
+      const msg = String(e?.message || e || "");
+      if (code === "23505" || /duplicate key value violates unique constraint/i.test(msg)) {
+        const fresh = await fetchForSiteDate("inventaires", rowToInventaire, COLS_INVENTAIRES, siteId, date, product);
+        setInventaires((prev) => mergeSiteDate(prev, fresh, siteId, date, product));
+        flash("Une saisie existe déjà pour ce site et cette date (enregistrée depuis un autre appareil) — les données ont été actualisées.", "error");
+        return;
+      }
       if (!isNetworkError(e)) throw e;
       const q = readOfflineQueue();
       q.push({ id: uid(), table: "inventaires", row, createdAt: new Date().toISOString() });
@@ -3034,6 +3066,25 @@ export default function App() {
         : "Pas de connexion — inventaire enregistré sur l'appareil, sera synchronisé automatiquement dès le retour du réseau.");
     }
   });
+  // Recharge, directement depuis Supabase, les mouvements et l'inventaire d'UN SEUL site à UNE
+  // SEULE date — appelé à l'ouverture de Saisie journalière et à chaque changement de site/date,
+  // pour toujours voir la version la plus à jour de cette saisie précise (celle d'un autre
+  // opérateur comprise), sans attendre le prochain passage du rafraîchissement automatique global.
+  const refreshSiteDate = async (siteId, date, product) => {
+    if (!siteId || !date || !navigator.onLine) return;
+    try {
+      const [freshMovs, freshInv] = await Promise.all([
+        fetchForSiteDate("movements", rowToMovement, COLS_MOVEMENTS, siteId, date, product),
+        fetchForSiteDate("inventaires", rowToInventaire, COLS_INVENTAIRES, siteId, date, product),
+      ]);
+      setMovements((prev) => mergeSiteDate(prev, freshMovs, siteId, date, product));
+      setInventaires((prev) => mergeSiteDate(prev, freshInv, siteId, date, product));
+    } catch (e) {
+      // Pas de réseau ou Supabase indisponible : on continue avec ce qui est déjà en mémoire,
+      // sans bloquer la saisie — ce n'est qu'un rafraîchissement de confort, pas une condition
+      // préalable pour pouvoir travailler.
+    }
+  };
   const deleteInventaire = (inv) => withSync(async () => {
     const { data, error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id).select();
     if (e1) throw e1;
@@ -3560,7 +3611,7 @@ export default function App() {
           {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
           {view === "vcf" && <VcfView />}
           {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
@@ -5109,7 +5160,7 @@ function SitesView({ sites, movements, inventaires, stockOf, addSite, editSite, 
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, editMovementTempDensite, deleteInventaire, settings, canWrite, canManage, assignedSiteIds, truckAssignments }) {
+function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, editMovementTempDensite, deleteInventaire, refreshSiteDate, settings, canWrite, canManage, assignedSiteIds, truckAssignments }) {
   const hasSiteRestriction = assignedSiteIds && assignedSiteIds.length > 0;
   const activeSites = sites.filter((s) => s.active !== false);
   const availableSites = hasSiteRestriction ? activeSites.filter((s) => assignedSiteIds.includes(s.id)) : activeSites;
@@ -5149,6 +5200,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [commentaireInv, setCommentaireInv] = useState("");
   const [stockFinPhotos, setStockFinPhotos] = useState([]);
   const [stockDebutConfirm, setStockDebutConfirm] = useState("");
+
+  // À l'ouverture de cette page, et à chaque changement de site ou de date, on va chercher
+  // directement sur le serveur la version la plus à jour de CETTE saisie précise — sans attendre
+  // le prochain passage du rafraîchissement automatique global (toutes les 5 minutes). Ça évite
+  // qu'une saisie faite entre-temps par un autre opérateur n'apparaisse comme "vide" ici.
+  useEffect(() => {
+    refreshSiteDate?.(siteId, date, product);
+  }, [siteId, date, product]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const truckSites = sites.filter((s) => s.isMobile);
   const stationSites = sites.filter((s) => !s.isMobile);
