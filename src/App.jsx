@@ -1764,14 +1764,52 @@ const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
 const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [], active: r.active !== false, isAdmin: !!r.is_admin });
 
-async function fetchTable(table, mapper, orderCol, ascending) {
+// "columns" : liste exacte des colonnes dont ce mapper se sert réellement, pour ne jamais
+// récupérer plus de données que nécessaire. Optionnel et replié sur "*" par défaut, pour ne
+// jamais casser un appel existant qu'on aurait oublié de préciser.
+async function fetchTable(table, mapper, orderCol, ascending, columns) {
   if (!SUPABASE_CONFIGURED) return [];
-  let q = supabase.from(table).select("*");
+  let q = supabase.from(table).select(columns || "*");
   if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
   const { data, error } = await q;
   if (error) return [];
   return (data || []).map(mapper);
 }
+// Ne récupère que les lignes dont la date est >= dateFrom (inclus) — utilisé pour le rechargement
+// automatique périodique des tables qui ne font que grossir (movements, inventaires,
+// engin_entries), au lieu de retélécharger tout l'historique à chaque fois.
+async function fetchRecent(table, mapper, columns, dateFrom) {
+  if (!SUPABASE_CONFIGURED) return [];
+  const { data, error } = await supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true });
+  if (error) return [];
+  return (data || []).map(mapper);
+}
+// Fusionne une fenêtre récente fraîchement rechargée dans les données déjà en mémoire : tout ce
+// qui est antérieur à cutoffDate reste tel quel (jamais retéléchargé), tout ce qui est à partir
+// de cutoffDate est intégralement remplacé par la version fraîche — ce qui reflète correctement
+// aussi bien les ajouts que les modifications et les suppressions récentes, sans avoir besoin
+// d'une colonne "mis à jour le" dédiée côté base de données.
+function mergeRecentWindow(prevArray, freshRecent, cutoffDate) {
+  return [...prevArray.filter((x) => x.date < cutoffDate), ...freshRecent];
+}
+// Colonnes exactes utilisées par chaque mapper "rowToX" ci-dessous (voir plus loin dans ce
+// fichier) — à tenir à jour si un mapper change. Si une colonne manque ici alors qu'un mapper
+// en a besoin, ce champ reviendrait simplement "undefined" côté application : aucune erreur
+// bruyante, donc à vérifier soigneusement à chaque modification d'un mapper.
+const COLS_SITES = "id, code, name, capacity, stock_initial, is_mobile, active, engins_enabled, engins_source_id, photo_url";
+const COLS_MOVEMENTS = "id, site_id, type, date, quantity, delta, product, ref, commentaire, destinataire, camion, destination, compteur, is_demo, related_site_id, temperature_c, densite_observee, densite15, vcf, volume_corrige15, index_avant, index_apres, created_by, created_at";
+const COLS_INVENTAIRES = "id, site_id, date, stock_physique, commentaire, product, basis_ecart, stock_theorique_ambiant, stock_theorique15, stock_theorique, stock_physique_used, ecart, ecart_permille, nature, taux_freinte, objectif_utilise, conformite, adjustment_id, temperature_c, densite_observee, densite15, vcf, stock_physique15, photo_urls, created_by, created_at";
+const COLS_PROFILES = "id, full_name, role, last_seen_at, assigned_site_id, assigned_site_ids, active, is_admin";
+const COLS_AUDIT = "id, ts, user_name, action, detail";
+const COLS_PRODUCT_STOCKS = "id, site_id, product, capacity, stock_initial, label";
+const COLS_TRUCK_ASSIGNMENTS = "id, truck_id, station_id, start_date, end_date";
+const COLS_SITE_METERS = "id, site_id, name";
+const COLS_BILAN_MATIERES = "id, site_id, period_type, period_key, reception15, ventes15, transferts15, stock_fin15, reception_ambiant, ventes_ambiant, transferts_ambiant, stock_fin_ambiant, transfert_site_id, commentaire, photo_urls, created_by, created_at";
+const COLS_INVENTAIRES_OFFICIELS = "id, site_id, date, type, produit, inventoriste, operateur, cuves, depotage, index_compteurs, stock_ambiant, stock15, commentaire, signature_somip_url, signature_somip_by, signature_somip_at, signature_operateur_url, signature_operateur_by, signature_operateur_at, signature_total_url, signature_total_by, signature_total_at, created_by, created_at";
+const COLS_SITE_TANKS = "id, site_id, name";
+const COLS_SITE_DEPOTAGE_METERS = "id, site_id, name";
+const COLS_SITE_ENGINS = "id, site_id, name, code, type";
+const COLS_ENGIN_ENTRIES = "id, site_id, engin_id, date, quantity, commentaire, created_by, created_at";
 
 
 
@@ -2338,20 +2376,20 @@ export default function App() {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         const load = (async () => {
           const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
-            fetchTable("sites", rowToSite),
-            fetchTable("movements", rowToMovement, "date"),
-            fetchTable("inventaires", rowToInventaire, "date"),
-            fetchTable("profiles", rowToProfile),
-            fetchTable("audit", rowToAudit, "ts", false),
-            fetchTable("product_stocks", rowToProductStock),
-            fetchTable("truck_assignments", rowToAssignment, "start_date"),
-            fetchTable("site_meters", rowToSiteMeter, "name"),
-            fetchTable("bilan_matieres", rowToBilan, "period_key"),
-            fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
-            fetchTable("site_tanks", rowToSiteTank, "name"),
-            fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
-            fetchTable("site_engins", rowToSiteEngin, "name"),
-            fetchTable("engin_entries", rowToEnginEntry, "date"),
+            fetchTable("sites", rowToSite, null, false, COLS_SITES),
+            fetchTable("movements", rowToMovement, "date", true, COLS_MOVEMENTS),
+            fetchTable("inventaires", rowToInventaire, "date", true, COLS_INVENTAIRES),
+            fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES),
+            fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT),
+            fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS),
+            fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS),
+            fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS),
+            fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES),
+            fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS),
+            fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS),
+            fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS),
+            fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS),
+            fetchTable("engin_entries", rowToEnginEntry, "date", true, COLS_ENGIN_ENTRIES),
           ]);
           let settingsRow = null;
           try {
@@ -2436,17 +2474,24 @@ export default function App() {
       if (document.visibilityState !== "visible") return;
       try {
         await flushOfflineQueue();
-        const [m, i, ee] = await Promise.all([
-          fetchTable("movements", rowToMovement, "date"),
-          fetchTable("inventaires", rowToInventaire, "date"),
-          fetchTable("engin_entries", rowToEnginEntry, "date"),
+        // Seulement les 30 derniers jours sont retéléchargés ici, pas tout l'historique depuis
+        // le début — l'historique plus ancien, déjà chargé une fois à la connexion, reste en
+        // mémoire tel quel et n'est jamais retéléchargé par ce rechargement périodique.
+        const recentCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const [mRecent, iRecent, eeRecent] = await Promise.all([
+          fetchRecent("movements", rowToMovement, COLS_MOVEMENTS, recentCutoff),
+          fetchRecent("inventaires", rowToInventaire, COLS_INVENTAIRES, recentCutoff),
+          fetchRecent("engin_entries", rowToEnginEntry, COLS_ENGIN_ENTRIES, recentCutoff),
         ]);
-        setMovements(m); setInventaires(i); setEnginEntries(ee);
+        let mergedMovements, mergedInventaires, mergedEnginEntries;
+        setMovements((prev) => (mergedMovements = mergeRecentWindow(prev, mRecent, recentCutoff)));
+        setInventaires((prev) => (mergedInventaires = mergeRecentWindow(prev, iRecent, recentCutoff)));
+        setEnginEntries((prev) => (mergedEnginEntries = mergeRecentWindow(prev, eeRecent, recentCutoff)));
         setLastSync(new Date());
         setIsOfflineStart(false);
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
-          writeAppCache(session.user.id, { ...cached, movementsData: m, inventairesData: i, enginEntriesData: ee, cachedAt: new Date().toISOString() });
+          writeAppCache(session.user.id, { ...cached, movementsData: mergedMovements, inventairesData: mergedInventaires, enginEntriesData: mergedEnginEntries, cachedAt: new Date().toISOString() });
         }
         // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
         const now = Date.now();
@@ -2469,16 +2514,16 @@ export default function App() {
         // entier toutes les 2 minutes pour tout le monde. Il est rechargé séparément, seulement
         // à l'ouverture de la page Historique (voir plus bas, à l'affichage de la page).
         const [s, p, ps, ta, sm, bl, io, st, sdm, se2] = await Promise.all([
-          fetchTable("sites", rowToSite),
-          fetchTable("profiles", rowToProfile),
-          fetchTable("product_stocks", rowToProductStock),
-          fetchTable("truck_assignments", rowToAssignment, "start_date"),
-          fetchTable("site_meters", rowToSiteMeter, "name"),
-          fetchTable("bilan_matieres", rowToBilan, "period_key"),
-          fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
-          fetchTable("site_tanks", rowToSiteTank, "name"),
-          fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
-          fetchTable("site_engins", rowToSiteEngin, "name"),
+          fetchTable("sites", rowToSite, null, false, COLS_SITES),
+          fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES),
+          fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS),
+          fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS),
+          fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS),
+          fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES),
+          fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS),
+          fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS),
+          fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS),
+          fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS),
         ]);
         setSites(s); setProfiles(p); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm); setSiteEngins(se2);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
@@ -2530,7 +2575,7 @@ export default function App() {
   // recharge seulement au moment où le Superviseur ouvre réellement cette page.
   useEffect(() => {
     if (view === "historique" && perms.canManage) {
-      fetchTable("audit", rowToAudit, "ts", false).then(setAudit).catch(() => {});
+      fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT).then(setAudit).catch(() => {});
     }
   }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
