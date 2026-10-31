@@ -1796,7 +1796,10 @@ async function fetchTable(table, mapper, orderCol, ascending, columns) {
   const rows = await runPaginatedQuery(() => {
     let q = supabase.from(table).select(columns || "*");
     if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
-    return q;
+    // Second critère UNIQUE obligatoire : sans lui, des lignes de même date peuvent changer de
+    // place d'une page à l'autre (PostgreSQL ne garantit pas l'ordre des égalités) et la
+    // pagination risque alors de dupliquer ou d'omettre silencieusement des lignes.
+    return q.order("id", { ascending: true });
   });
   return rows.map(mapper);
 }
@@ -1806,7 +1809,7 @@ async function fetchTable(table, mapper, orderCol, ascending, columns) {
 async function fetchRecent(table, mapper, columns, dateFrom) {
   if (!SUPABASE_CONFIGURED) return [];
   const rows = await runPaginatedQuery(() =>
-    supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true })
+    supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true }).order("id", { ascending: true })
   );
   return rows.map(mapper);
 }
@@ -1819,7 +1822,7 @@ async function fetchForSiteDate(table, mapper, columns, siteId, date, product) {
   const rows = await runPaginatedQuery(() => {
     let q = supabase.from(table).select(columns).eq("site_id", siteId).eq("date", date);
     if (product) q = q.eq("product", product);
-    return q;
+    return q.order("id", { ascending: true });
   });
   return rows.map(mapper);
 }
@@ -3873,14 +3876,28 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
   const [imgFailed, setImgFailed] = useState(false);
   useEffect(() => { setImgFailed(false); }, [site?.id, site?.photoUrl]);
 
+  // Filtre par date : par défaut « aujourd'hui » (vue en direct, strictement comme avant). En
+  // choisissant une date passée, toute la page se recale sur cette date : stock recalé sur la
+  // dernière jauge connue à cette date, cumuls du mois jusqu'à cette date, courbe des 30 jours
+  // qui s'y terminent, camions rattachés à cette date, mouvements de ce jour précis.
+  const today = todayStr();
+  const [viewDate, setViewDate] = useState(today);
+  const isLive = viewDate === today;
+  const shiftViewDate = (delta) => {
+    const dt = new Date(`${viewDate}T00:00:00`);
+    dt.setDate(dt.getDate() + delta);
+    setViewDate(`${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`);
+  };
+
   // Calculs regroupés et mémorisés : la synchronisation périodique re-rend souvent la page.
   const d = useMemo(() => {
     if (!site) return null;
-    const month = currentMonth();
+    const month = viewDate.slice(0, 7);
     const monthStartD = `${month}-01`;
-    const todayD = todayStr();
+    const todayD = viewDate;
+    const upTo = isLive ? "9999-12-31" : viewDate; // en direct : aucune borne, exactement comme avant
     const gas = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil");
-    const inMonth = gas.filter((m) => m.date.startsWith(month));
+    const inMonth = gas.filter((m) => m.date.startsWith(month) && m.date <= upTo);
     const receptionsMonth = sumQty(inMonth, ["reception"]);
     const ventesMonth = sumQty(inMonth, ["sortie"]);
     const chargementsMonth = site.isMobile ? 0 : sumQty(inMonth, ["sortie_camion"]);
@@ -3905,21 +3922,24 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
     // Courbe du stock en fin de journée sur 30 jours (stock au début du lendemain).
     const trend = [];
+    const baseDay = isLive ? new Date() : new Date(`${viewDate}T00:00:00`);
     for (let k = 29; k >= 0; k--) {
-      const day = new Date(); day.setDate(day.getDate() - k);
+      const day = new Date(baseDay); day.setDate(day.getDate() - k);
       const next = new Date(day); next.setDate(next.getDate() + 1);
       const nextStr = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
       trend.push({ label: `${pad2(day.getDate())}/${pad2(day.getMonth() + 1)}`, stock: Math.round(stockBeforeDate(site, movements, nextStr, inventaires)) });
     }
 
-    const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil"));
+    const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date <= upTo));
     const yest = new Date(); yest.setDate(yest.getDate() - 1);
     const yestStr = `${yest.getFullYear()}-${pad2(yest.getMonth() + 1)}-${pad2(yest.getDate())}`;
     const hasYesterdayJauge = inventaires.some((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === yestStr);
-    const recent = movements.filter((m) => m.siteId === site.id).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || "").localeCompare(a.createdAt || ""))).slice(0, 10);
+    const recent = isLive
+      ? movements.filter((m) => m.siteId === site.id).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || "").localeCompare(a.createdAt || ""))).slice(0, 10)
+      : movements.filter((m) => m.siteId === site.id && m.date === viewDate).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
     const trucksToday = site.isMobile ? [] : trucksAssignedAt(truckAssignments || [], site.id, todayD).map((id) => sites.find((s) => s.id === id)).filter(Boolean);
     return { receptionsMonth, ventesMonth, chargementsMonth, ecartCumule, daysWithJauge, trend, lastInv, hasYesterdayJauge, recent, trucksToday };
-  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites]);
+  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites, viewDate, isLive]);
 
   // Vue « station + camions » (Okouma, Prehomo) : mêmes règles que le rapport Synthèse
   // journalière — Station (site + camion). Les camions sont pris selon leur rattachement à la
@@ -3927,9 +3947,9 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
   // les jours où ils ont été jaugés.
   const st = useMemo(() => {
     if (!site || site.isMobile || !LUBRICANT_SITE_IDS.includes(site.id)) return null;
-    const month = currentMonth();
+    const month = viewDate.slice(0, 7);
     const monthStartD = `${month}-01`;
-    const todayD = todayStr();
+    const todayD = viewDate;
     const assignments = truckAssignments || [];
     const cache = {};
     const gasOf = (id) => cache[id] || (cache[id] = movements.filter((m) => m.siteId === id && (m.product || "gasoil") === "gasoil"));
@@ -3967,8 +3987,9 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
     // Courbe : stock en fin de journée de la station + des camions rattachés CE jour-là.
     const trend = [];
+    const baseDay = isLive ? new Date() : new Date(`${viewDate}T00:00:00`);
     for (let k = 29; k >= 0; k--) {
-      const dd = new Date(); dd.setDate(dd.getDate() - k);
+      const dd = new Date(baseDay); dd.setDate(dd.getDate() - k);
       const nx = new Date(dd); nx.setDate(nx.getDate() + 1);
       const dayStr = `${dd.getFullYear()}-${pad2(dd.getMonth() + 1)}-${pad2(dd.getDate())}`;
       const nextStr = `${nx.getFullYear()}-${pad2(nx.getMonth() + 1)}-${pad2(nx.getDate())}`;
@@ -3980,7 +4001,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
     }
     const trucks = Object.values(perTruck).sort((a, b) => (attachedToday.includes(b.site.id) ? 1 : 0) - (attachedToday.includes(a.site.id) ? 1 : 0) || a.site.name.localeCompare(b.site.name));
     return { trucks, attachedToday, ventesCombinees, siteEcart, trucksEcart, trend };
-  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites]);
+  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites, viewDate, isLive]);
 
   if (!site || !d) {
     return (
@@ -3990,14 +4011,14 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
     );
   }
 
-  const stock = stockThroughDate(site, movements, todayStr(), inventaires);
+  const stock = stockThroughDate(site, movements, viewDate, inventaires);
   const pct = site.capacity ? (stock / site.capacity) * 100 : 0;
   const level = pct < 20 ? C.danger : pct < 35 ? C.warning : C.blue;
   const fixed = accessible.filter((s) => !s.isMobile);
   const trucks = accessible.filter((s) => s.isMobile);
   const HeroIcon = site.isMobile ? Truck : Factory;
   const stationExtra = st ? (() => {
-    const trucksNow = st.attachedToday.reduce((a, id) => a + stockThroughDate(sites.find((x) => x.id === id), movements, todayStr(), inventaires), 0);
+    const trucksNow = st.attachedToday.reduce((a, id) => a + stockThroughDate(sites.find((x) => x.id === id), movements, viewDate, inventaires), 0);
     const ecart = st.siteEcart + st.trucksEcart;
     const hasJauge = d.daysWithJauge > 0 || st.trucks.some((t) => t.jaugeDays > 0);
     return { trucksNow, ecart, hasJauge, trucksVentes: st.trucks.reduce((a, t) => a + t.ventes, 0), trucksRecu: st.trucks.reduce((a, t) => a + t.recu, 0), trucksEcartTotal: st.trucksEcart };
@@ -4007,6 +4028,26 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
   return (
     <div className="somip-fade">
+      <div className="somip-no-print" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+        <button className="somip-btn somip-btn-ghost" style={{ padding: "7px 10px" }} title="Jour précédent" onClick={() => shiftViewDate(-1)}>
+          <ChevronsLeft size={14} />
+        </button>
+        <input type="date" className="somip-input" style={{ width: "auto", maxWidth: 170 }} value={viewDate} max={today} onChange={(e) => e.target.value && setViewDate(e.target.value > today ? today : e.target.value)} />
+        <button className="somip-btn somip-btn-ghost" style={{ padding: "7px 10px" }} title="Jour suivant" disabled={isLive} onClick={() => shiftViewDate(1)}>
+          <ChevronsRight size={14} />
+        </button>
+        {!isLive && (
+          <button className="somip-btn somip-btn-primary" style={{ padding: "7px 12px", fontSize: 12.5 }} onClick={() => setViewDate(today)}>
+            Revenir à aujourd'hui
+          </button>
+        )}
+        {!isLive && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: C.orange, background: `${C.orange}14`, padding: "6px 12px", borderRadius: 20 }}>
+            <Clock size={13} /> Données arrêtées au {viewDate} — cumuls du mois jusqu'à cette date
+          </span>
+        )}
+      </div>
+
       <div className="somip-no-print" style={{ position: "relative", borderRadius: 16, overflow: "hidden", marginBottom: 18, minHeight: "clamp(150px, 22vw, 210px)", background: `linear-gradient(120deg, ${C.navy}, ${C.blue})`, boxShadow: C.cardShadow }}>
         {site.photoUrl && !imgFailed ? (
           <img src={site.photoUrl} alt={site.name} onError={() => setImgFailed(true)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
@@ -4029,7 +4070,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
               <div style={{ fontSize: "clamp(18px, 2.8vw, 26px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>{site.name}</div>
               <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{site.isMobile ? "Camion" : `Site ${site.code}`} · capacité {fmt(site.capacity)} L</div>
             </div>
-            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Stock actuel<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(stock)} L</span></div>
+            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>{isLive ? "Stock actuel" : `Stock au ${viewDate}`}<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(stock)} L</span></div>
           </div>
         </div>
       </div>
@@ -4050,8 +4091,8 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18, minHeight: 320 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock en fin de journée — 30 derniers jours</h3>
-          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point peut différer du « stock actuel » affiché, qui cumule les mouvements depuis le stock initial.</p>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock en fin de journée — {isLive ? "30 derniers jours" : `30 jours jusqu'au ${viewDate}`}</h3>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point correspond au stock affiché en haut de la page.</p>
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={d.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
               <defs>
@@ -4078,15 +4119,15 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
           <GaugeBar pct={pct} color={level} />
           <div style={{ marginTop: 14, fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
             <div>Dernière jauge : {d.lastInv ? <strong style={{ color: C.ink }}>{fmt(d.lastInv.stockPhysique)} L — {d.lastInv.date}</strong> : <strong style={{ color: C.ink }}>aucune</strong>}</div>
-            {!d.hasYesterdayJauge && <div style={{ color: C.warning, fontWeight: 600 }}>⚠ Stock fin de la veille pas encore saisi.</div>}
+            {isLive && !d.hasYesterdayJauge && <div style={{ color: C.warning, fontWeight: 600 }}>⚠ Stock fin de la veille pas encore saisi.</div>}
           </div>
           {d.trucksToday.length > 0 && (
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><Truck size={13} color={C.blue} />Camions rattachés aujourd'hui</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><Truck size={13} color={C.blue} />{isLive ? "Camions rattachés aujourd'hui" : `Camions rattachés au ${viewDate}`}</div>
               {d.trucksToday.map((t) => (
                 <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "4px 0" }}>
                   <span style={{ fontWeight: 600 }}>{t.name}</span>
-                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockThroughDate(t, movements, todayStr(), inventaires))} L</span>
+                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockThroughDate(t, movements, viewDate, inventaires))} L</span>
                 </div>
               ))}
             </div>
@@ -4100,10 +4141,10 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
           <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>{site.name} et les camions qui lui sont rattachés — mêmes règles que le rapport « Synthèse journalière — Station (site + camion) ».</p>
 
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 8 }}>
-            <StatCard label="Stock combiné (station + camions)" value={fmt(stock + stationExtra.trucksNow)} unit="L" accent={C.blue} icon={Fuel} />
+            <StatCard label={isLive ? "Stock combiné (station + camions)" : `Stock combiné au ${viewDate}`} value={fmt(stock + stationExtra.trucksNow)} unit="L" accent={C.blue} icon={Fuel} />
             <StatCard label="Ventes combinées (mois)" value={fmt(st.ventesCombinees)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
             <StatCard label="Gain/Perte combiné (mois)" value={stationExtra.hasJauge ? signed(stationExtra.ecart) : "—"} unit={stationExtra.hasJauge ? "L" : ""} accent={stationExtra.hasJauge ? ecartColor(stationExtra.ecart) : C.sub} icon={TrendingDown} />
-            <StatCard label="Camions rattachés" value={st.attachedToday.length} unit="aujourd'hui" accent={C.success} icon={Truck} />
+            <StatCard label="Camions rattachés" value={st.attachedToday.length} unit={isLive ? "aujourd'hui" : `au ${viewDate}`} accent={C.success} icon={Truck} />
           </div>
           {stationExtra.hasJauge && (
             <p style={{ margin: "0 0 16px", fontSize: 12, color: C.sub }}>
@@ -4114,7 +4155,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
           <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap", marginTop: 8 }}>
             <div style={{ flex: "1 1 340px", minWidth: 280 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Stock en fin de journée — 30 jours (station + camions)</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Stock en fin de journée — {isLive ? "30 jours" : `30 jours jusqu'au ${viewDate}`} (station + camions)</div>
               <ResponsiveContainer width="100%" height={230}>
                 <AreaChart data={st.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
@@ -4139,7 +4180,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
                     return (
                       <tr key={t.site.id}>
                         <td style={{ fontWeight: 600 }}>{t.site.name}{!here && <span style={{ marginLeft: 6 }}><Badge color={C.sub}>plus rattaché</Badge></span>}</td>
-                        <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(stockThroughDate(t.site, movements, todayStr(), inventaires))} L</td>
+                        <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(stockThroughDate(t.site, movements, viewDate, inventaires))} L</td>
                         <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(t.ventes)} L</td>
                         <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(t.recu)} L</td>
                         <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: t.jaugeDays > 0 ? ecartColor(t.ecart) : C.sub }}>{t.jaugeDays > 0 ? `${signed(t.ecart)} L` : "—"}</td>
@@ -4157,18 +4198,18 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
                   )}
                 </tbody>
               </table>
-              <p style={{ margin: "8px 0 0", fontSize: 11, color: C.sub }}>« Stock » : camions rattachés aujourd'hui. « Ventes » : nettes du retour cuve. « Reçu » : chargements reçus.</p>
+              <p style={{ margin: "8px 0 0", fontSize: 11, color: C.sub }}>« Stock » : camions rattachés {isLive ? "aujourd'hui" : `au ${viewDate}`}. « Ventes » : nettes du retour cuve. « Reçu » : chargements reçus.</p>
             </div>
           </div>
         </div>
       )}
 
       <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements — {site.name}</h3>
+        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />{isLive ? "Derniers mouvements" : `Mouvements du ${viewDate}`} — {site.name}</h3>
         <table className="somip-table">
           <thead><tr><th>Date</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
           <tbody>
-            {d.recent.length === 0 && <EmptyRow colSpan={3} text="Aucun mouvement enregistré pour ce site." />}
+            {d.recent.length === 0 && <EmptyRow colSpan={3} text={isLive ? "Aucun mouvement enregistré pour ce site." : `Aucun mouvement enregistré pour ce site le ${viewDate}.`} />}
             {d.recent.map((m) => {
               const meta = TYPE_META[m.type];
               if (!meta) return null;
