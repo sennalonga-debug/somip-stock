@@ -1834,6 +1834,31 @@ async function fetchForSiteDate(table, mapper, columns, siteId, date, product) {
 function mergeRecentWindow(prevArray, freshRecent, cutoffDate) {
   return [...prevArray.filter((x) => x.date < cutoffDate), ...freshRecent];
 }
+// Plus récente date de CRÉATION (en ms) parmi des lignes venues du SERVEUR — jamais d'une horloge
+// locale, qui peut être décalée sur un téléphone. 0 = inconnue.
+function maxCreatedAt(rows) {
+  let mx = 0;
+  for (const r of rows) { const t = r.createdAt ? Date.parse(r.createdAt) : NaN; if (!Number.isNaN(t) && t > mx) mx = t; }
+  return mx;
+}
+// Lignes CRÉÉES depuis sinceMs, quelle que soit leur date : rattrape une saisie faite en retard
+// (ex. une journée du 01/10 saisie le 10/10) que la fenêtre de dates récentes ne verrait pas.
+async function fetchCreatedSince(table, mapper, columns, sinceMs) {
+  if (!SUPABASE_CONFIGURED || !sinceMs) return [];
+  const rows = await runPaginatedQuery(() =>
+    supabase.from(table).select(columns).gte("created_at", new Date(sinceMs).toISOString()).order("created_at", { ascending: true }).order("id", { ascending: true })
+  );
+  return rows.map(mapper);
+}
+// Remplace les lignes déjà connues (même id) et ajoute les nouvelles — ne supprime jamais rien.
+function mergeById(prevArray, freshRows) {
+  if (!freshRows.length) return prevArray;
+  const byId = new Map(freshRows.map((r) => [r.id, r]));
+  const seen = new Set();
+  const out = prevArray.map((x) => { if (byId.has(x.id)) { seen.add(x.id); return byId.get(x.id); } return x; });
+  for (const r of freshRows) if (!seen.has(r.id)) out.push(r);
+  return out;
+}
 // Même principe que mergeRecentWindow, mais ciblé sur UN SEUL site + UNE SEULE date (et un seul
 // produit si précisé) : remplace uniquement les lignes correspondantes, laisse tout le reste
 // intact — y compris les autres produits du même site à la même date (ex. un site à lubrifiants).
@@ -2400,6 +2425,7 @@ export default function App() {
           setSites(cached.sitesData);
           setMovements(cached.movementsData || []);
           setInventaires(cached.inventairesData || []);
+          serverWatermarkRef.current = { movements: maxCreatedAt(cached.movementsData || []), inventaires: maxCreatedAt(cached.inventairesData || []), margin: 86400000 };
           setProfiles(cached.profilesData || []);
           setAudit(cached.auditData || []);
           setProductStocks(cached.productStocksData || []);
@@ -2461,6 +2487,7 @@ export default function App() {
         setSites(result.sitesData);
         setMovements(result.movementsData);
         setInventaires(result.inventairesData);
+        serverWatermarkRef.current = { movements: maxCreatedAt(result.movementsData), inventaires: maxCreatedAt(result.inventairesData), margin: 600000 };
         setProfiles(result.profilesData);
         setAudit(result.auditData);
         setProductStocks(result.productStocksData);
@@ -2489,6 +2516,7 @@ export default function App() {
             setSites(cached.sitesData);
             setMovements(cached.movementsData || []);
             setInventaires(cached.inventairesData || []);
+            serverWatermarkRef.current = { movements: maxCreatedAt(cached.movementsData || []), inventaires: maxCreatedAt(cached.inventairesData || []), margin: 86400000 };
             setProfiles(cached.profilesData || []);
             setAudit(cached.auditData || []);
             setProductStocks(cached.productStocksData || []);
@@ -2525,6 +2553,10 @@ export default function App() {
   // l'application que si les données sont réellement périmées, au lieu de tout retélécharger à
   // chaque déverrouillage de téléphone ou changement d'onglet.
   const syncStampsRef = useRef({ fast: 0, slow: 0 });
+  // Plus récente création connue côté serveur (ms), par table — point de départ du filet qui
+  // rattrape les saisies tardives. "margin" : recul de sécurité (10 min ; 24 h si le point de
+  // départ vient du cache de l'appareil plutôt que d'un chargement frais).
+  const serverWatermarkRef = useRef({ movements: 0, inventaires: 0, margin: 600000 });
   useEffect(() => {
     if (loading || !session || !profile) return;
     // Les données viennent d'être chargées en entier : c'est le point de départ de la "fraîcheur".
@@ -2538,18 +2570,28 @@ export default function App() {
       if (document.visibilityState !== "visible") return;
       try {
         await flushOfflineQueue();
-        // Seulement les 30 derniers jours sont retéléchargés ici, pas tout l'historique depuis
-        // le début — l'historique plus ancien, déjà chargé une fois à la connexion, reste en
-        // mémoire tel quel et n'est jamais retéléchargé par ce rechargement périodique.
-        const recentCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-        const [mRecent, iRecent, eeRecent] = await Promise.all([
+        // Seuls les 7 derniers jours sont retéléchargés et remplacés ici (ajouts, corrections et
+        // suppressions récents) — l'historique plus ancien, chargé une fois à la connexion, reste
+        // en mémoire tel quel. En plus, un filet récupère les lignes CRÉÉES depuis le dernier
+        // rechargement quelle que soit leur date : une journée saisie en retard par un collègue
+        // apparaît donc aussi, sans retélécharger 30 jours d'historique à chaque fois.
+        const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const wm = serverWatermarkRef.current;
+        const [mRecent, iRecent, eeRecent, mNew, iNew] = await Promise.all([
           fetchRecent("movements", rowToMovement, COLS_MOVEMENTS, recentCutoff),
           fetchRecent("inventaires", rowToInventaire, COLS_INVENTAIRES, recentCutoff),
           fetchRecent("engin_entries", rowToEnginEntry, COLS_ENGIN_ENTRIES, recentCutoff),
+          wm.movements ? fetchCreatedSince("movements", rowToMovement, COLS_MOVEMENTS, wm.movements - wm.margin) : [],
+          wm.inventaires ? fetchCreatedSince("inventaires", rowToInventaire, COLS_INVENTAIRES, wm.inventaires - wm.margin) : [],
         ]);
         let mergedMovements, mergedInventaires, mergedEnginEntries;
-        setMovements((prev) => (mergedMovements = mergeRecentWindow(prev, mRecent, recentCutoff)));
-        setInventaires((prev) => (mergedInventaires = mergeRecentWindow(prev, iRecent, recentCutoff)));
+        setMovements((prev) => (mergedMovements = mergeById(mergeRecentWindow(prev, mRecent, recentCutoff), mNew)));
+        setInventaires((prev) => (mergedInventaires = mergeById(mergeRecentWindow(prev, iRecent, recentCutoff), iNew)));
+        serverWatermarkRef.current = {
+          movements: Math.max(wm.movements, maxCreatedAt(mRecent), maxCreatedAt(mNew)),
+          inventaires: Math.max(wm.inventaires, maxCreatedAt(iRecent), maxCreatedAt(iNew)),
+          margin: 600000,
+        };
         setEnginEntries((prev) => (mergedEnginEntries = mergeRecentWindow(prev, eeRecent, recentCutoff)));
         syncStampsRef.current.fast = Date.now();
         setLastSync(new Date());
