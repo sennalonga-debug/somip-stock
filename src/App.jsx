@@ -2521,8 +2521,14 @@ export default function App() {
      fréquemment, le reste (sites, comptes, réglages...) beaucoup plus rarement, puisque ça
      bouge très peu en cours de journée. */
   const heartbeatRef = useRef(0);
+  // Heure du dernier rechargement réussi (rapide / lent). Sert à ne recharger au retour dans
+  // l'application que si les données sont réellement périmées, au lieu de tout retélécharger à
+  // chaque déverrouillage de téléphone ou changement d'onglet.
+  const syncStampsRef = useRef({ fast: 0, slow: 0 });
   useEffect(() => {
     if (loading || !session || !profile) return;
+    // Les données viennent d'être chargées en entier : c'est le point de départ de la "fraîcheur".
+    if (!syncStampsRef.current.fast) syncStampsRef.current = { fast: Date.now(), slow: Date.now() };
 
     const fastTick = async () => {
       if (!navigator.onLine) return;
@@ -2545,6 +2551,7 @@ export default function App() {
         setMovements((prev) => (mergedMovements = mergeRecentWindow(prev, mRecent, recentCutoff)));
         setInventaires((prev) => (mergedInventaires = mergeRecentWindow(prev, iRecent, recentCutoff)));
         setEnginEntries((prev) => (mergedEnginEntries = mergeRecentWindow(prev, eeRecent, recentCutoff)));
+        syncStampsRef.current.fast = Date.now();
         setLastSync(new Date());
         setIsOfflineStart(false);
         if (session?.user?.id) {
@@ -2598,6 +2605,7 @@ export default function App() {
         ]);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
+        if (Object.keys(captured).length === 10) syncStampsRef.current.slow = Date.now(); // 10 tables, toutes rechargées
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
           writeAppCache(session.user.id, {
@@ -2625,12 +2633,17 @@ export default function App() {
     // carburant — ce rythme reste largement suffisant pour que les saisies d'un collègue
     // apparaissent chez les autres en quelques minutes, tout en réduisant très fortement le volume
     // de données rechargées chaque jour (objectif : rester sous le quota gratuit de Supabase).
-    const fastInterval = setInterval(fastTick, 300000);
-    const slowInterval = setInterval(slowTick, 900000);
+    // Les minuteurs ne rechargent plus si un rechargement vient d'avoir lieu entre-temps (par
+    // exemple au retour dans l'application) : évite deux rechargements à quelques secondes
+    // d'écart. Marge d'une minute pour ne jamais "rater" le passage normal.
+    const fastInterval = setInterval(() => { if (Date.now() - syncStampsRef.current.fast > 240000) fastTick(); }, 300000);
+    const slowInterval = setInterval(() => { if (Date.now() - syncStampsRef.current.slow > 840000) slowTick(); }, 900000);
 
-    // Au retour (onglet qui redevient visible, téléphone déverrouillé) : un seul rechargement
-    // immédiat, plutôt que d'attendre jusqu'à 5 ou 15 minutes le prochain passage du minuteur —
-    // histoire que les données affichées ne soient jamais trop en retard après une absence.
+    // Au retour (onglet qui redevient visible, téléphone déverrouillé) : on recharge UNE fois, mais
+    // seulement ce qui est réellement périmé — les données courantes si elles ont plus de 2
+    // minutes, les données de configuration (sites, comptes, affectations...) si elles ont plus
+    // de 14 minutes. Sans cette règle, chaque déverrouillage retéléchargeait tout, même après
+    // seulement quelques secondes d'absence.
     let lastVisibleRefresh = 0;
     const onVisibilityChange = () => {
       if (document.visibilityState !== "visible") return;
@@ -2639,8 +2652,8 @@ export default function App() {
       // (changement rapide d'application, par exemple), on ne redéclenche pas à chaque fois.
       if (now - lastVisibleRefresh < 10000) return;
       lastVisibleRefresh = now;
-      fastTick();
-      slowTick();
+      if (now - syncStampsRef.current.fast > 120000) fastTick();
+      if (now - syncStampsRef.current.slow > 840000) slowTick();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
