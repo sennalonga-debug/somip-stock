@@ -1089,12 +1089,8 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   // toujours propre même si le tableau des cuves est court ou long). Si une signature
   // numérique a déjà été apposée, son image remplace la case vide.
   const sigY = Math.max(y + 20, pageHeight - 150);
-  const sigW = (fullWidth - 32) / 3;
-  const sigSlots = [
-    { label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt },
-    { label: "Opérateur", url: inv.signatureOperateurUrl, by: inv.signatureOperateurBy, at: inv.signatureOperateurAt },
-    { label: "TotalEnergies Marketing", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt },
-  ];
+  const sigW = (fullWidth - 16) / 2;
+  const sigSlots = inventaireSignatureSlots(inv);
   for (let i = 0; i < sigSlots.length; i++) {
     const slot = sigSlots[i];
     const x = marginX + i * (sigW + 16);
@@ -1741,6 +1737,17 @@ function permsFor(role) {
 // qui lui sont attribués (même règle que partout ailleurs dans l'application).
 function scopeSitesByAssignment(sites, assignedSiteIds) {
   return assignedSiteIds && assignedSiteIds.length > 0 ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+}
+
+// Signatures d'un inventaire officiel : DEUX seulement — SOMIP et TotalEnergies Marketing. La
+// signature "Opérateur" est retirée partout (PDF, écran de signature, compteur de l'historique) : le
+// nom de l'opérateur figure déjà en tête de chaque fiche. Les anciennes signatures opérateur déjà
+// enregistrées restent dans la base, simplement plus affichées ni imprimées.
+function inventaireSignatureSlots(inv) {
+  return [
+    { role: "somip", label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt },
+    { role: "total", label: "TotalEnergies Marketing", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt },
+  ];
 }
 
 // Un mouvement déjà enregistré est-il très probablement LE MÊME que celui qu'on s'apprête à
@@ -7402,7 +7409,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   </td>
                   <td>
                     <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => setSigningId(signingId === inv.id ? null : inv.id)}>
-                      <Pencil size={12} /> {[inv.signatureSomipUrl, inv.signatureOperateurUrl, inv.signatureTotalUrl].filter(Boolean).length}/3
+                      <Pencil size={12} /> {inventaireSignatureSlots(inv).filter((s) => s.url).length}/2
                     </button>
                   </td>
                   <td>
@@ -7434,11 +7441,8 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
         {signingId && (() => {
           const inv = list.find((i) => i.id === signingId);
           if (!inv) return null;
-          const slots = [
-            { role: "somip", label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt, can: canSignSomip },
-            { role: "operateur", label: "Opérateur", url: inv.signatureOperateurUrl, by: inv.signatureOperateurBy, at: inv.signatureOperateurAt, can: canSignOperateur },
-            { role: "total", label: "TotalEnergies", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt, can: canSignTotal },
-          ];
+          const canByRole = { somip: canSignSomip, total: canSignTotal };
+          const slots = inventaireSignatureSlots(inv).map((s) => ({ ...s, can: canByRole[s.role] }));
           return (
             <div className="somip-panel" style={{ marginTop: 14, padding: 14, background: C.bg }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
