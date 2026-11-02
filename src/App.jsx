@@ -1143,7 +1143,7 @@ const LUB_PDF_LEVELS = [
 ];
 function buildLubPdfBlocks(records, productStocks) {
   const rank = (id) => { const i = LUB_PDF_ORDER.indexOf(id); return i < 0 ? 99 : i; };
-  return [...records].sort((a, b) => rank(a.produit) - rank(b.produit)).map((r) => {
+  const blocks = [...records].map((r) => {
     const dens = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
     const ownLabel = lubLabel(r.siteId, r.produit, productStocks);
     const cuves = r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }];
@@ -1158,8 +1158,16 @@ function buildLubPdfBlocks(records, productStocks) {
       if (others.length > 0) parts.forEach((p) => rows.push({ kind: "dont", cells: [`dont ${p.nom}`, "—", `${fmt(p.litres)} L`, kgOf(p) !== null ? `${fmt(kgOf(p))} kg` : "—"] }));
     }
     const idx = (r.indexCompteurs || []).filter((i) => i.indexFin !== null && i.indexFin !== undefined).map((i) => `${i.compteur} : ${fmt(i.indexFin)}`);
-    return { title: `DÉTAIL — ${String(ownLabel).toUpperCase()}`, rows, indexLine: idx.length ? `Index — ${idx.join("   ·   ")}` : null };
+    return { produit: r.produit, title: `DÉTAIL — ${String(ownLabel).toUpperCase()}`, rows, indexLine: idx.length ? `Index — ${idx.join("   ·   ")}` : null };
   });
+  // Toutes les huiles du site figurent sur la fiche : une huile attendue mais sans enregistrement
+  // (ancien inventaire incomplet) est imprimée "Non renseigné" plutôt que de disparaître en silence.
+  const siteId = records[0]?.siteId;
+  const present = new Set(records.map((r) => r.produit));
+  siteLubricants(siteId, productStocks).filter((l) => !present.has(l.id)).forEach((l) => {
+    blocks.push({ produit: l.id, title: `DÉTAIL — ${String(lubLabel(siteId, l.id, productStocks)).toUpperCase()}`, rows: [{ kind: "main", cells: ["Non renseigné", "—", "—", "—"] }], indexLine: null });
+  });
+  return blocks.sort((a, b) => rank(a.produit) - rank(b.produit));
 }
 // Hauteur qu'occupe un bloc, pour un niveau de compacité donné.
 function lubPdfBlockHeight(blk, lv) {
@@ -1842,6 +1850,54 @@ const productStockToRow = (p) => ({ site_id: p.siteId, product: p.product, capac
 function lubLabel(siteId, productId, productStocks) {
   const ps = productStocks?.find((p) => p.siteId === siteId && p.product === productId);
   return ps?.label || LUBRICANTS.find((l) => l.id === productId)?.label || productId;
+}
+
+// Huiles d'un site : celles qui ont une ligne de stock (product_stocks) sur ce site ; à défaut de
+// configuration, toutes les huiles du catalogue.
+function siteLubricants(siteId, productStocks) {
+  const own = (productStocks || []).filter((p) => p.siteId === siteId).map((p) => p.product);
+  const list = LUBRICANTS.filter((l) => own.includes(l.id));
+  return list.length > 0 ? list : LUBRICANTS;
+}
+// Sites où la cuve Rubia contient DEUX produits (Rubia Tir7400 + Rubia Works 1000) : le formulaire
+// d'inventaire y propose de saisir le second produit. Les autres sites (ex. Okouma) n'en ont pas.
+const SHARED_RUBIA_TANK_SITES = ["prehomo"];
+const SHARED_RUBIA_DEFAULT_NAME = "Rubia Works 1000";
+// Saisie des lubrifiants d'un site : toutes les huiles ensemble, aucune oubliée. Les huiles déjà
+// enregistrées pour ce site/date/type ne sont jamais recréées (pas de doublon) : on ne demande que
+// celles qui manquent encore.
+function planLubricantEntry(blocks, existingRecords) {
+  const existingByProduit = {};
+  (existingRecords || []).forEach((r) => { existingByProduit[r.produit] = r; });
+  const pending = blocks.filter((b) => !existingByProduit[b.produit]);
+  const missing = pending.filter((b) => b.stockAmbiant === "" || b.stockAmbiant === null || b.stockAmbiant === undefined);
+  return { existingByProduit, pending, missing, complete: pending.length > 0 && missing.length === 0, allAlreadySaved: pending.length === 0 };
+}
+// Contenu de la cuve d'un bloc d'huile tel qu'il est enregistré : la cuve de l'huile elle-même, plus
+// les AUTRES produits qu'elle contient (cuves[i].autresContenus), s'il y en a. Le stock enregistré
+// pour l'huile reste celui de l'huile seule : rien ne change pour les calculs existants.
+function lubBlockToCuve(b) {
+  const autres = [];
+  if (b.autreLitres !== undefined && b.autreLitres !== null && b.autreLitres !== "") {
+    autres.push({ nom: String(b.autreNom || "").trim() || SHARED_RUBIA_DEFAULT_NAME, stockAmbiant: Number(b.autreLitres) || 0, densite: LUBRICANTS.find((l) => l.id === b.produit)?.densite ?? null });
+  }
+  (b.autresReste || []).forEach((a) => autres.push(a));
+  const cuve = { cuve: b.cuve, hauteur: b.hauteur === "" || b.hauteur === null || b.hauteur === undefined ? null : Number(b.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(b.stockAmbiant) || 0 };
+  if (autres.length > 0) cuve.autresContenus = autres;
+  return cuve;
+}
+
+// Bloc de saisie d'une huile rempli à partir d'un inventaire déjà enregistré, pour le corriger.
+// Reprend aussi les AUTRES produits de la cuve : corriger une valeur ne doit jamais les effacer.
+function lubBlockFromRecord(inv, productStocks) {
+  const c0 = (inv.cuves && inv.cuves[0]) || {};
+  const idx0 = (inv.indexCompteurs && inv.indexCompteurs[0]) || {};
+  const a0 = (c0.autresContenus || [])[0];
+  const label = lubLabel(inv.siteId, inv.produit, productStocks);
+  return {
+    produit: inv.produit, label, cuve: c0.cuve || `Cuve ${label}`, hauteur: c0.hauteur ?? "", stockAmbiant: String(inv.stockAmbiant ?? ""), indexFin: idx0.indexFin ?? "",
+    autreNom: a0?.nom || SHARED_RUBIA_DEFAULT_NAME, autreLitres: a0 ? String(a0.stockAmbiant ?? "") : "", autresReste: (c0.autresContenus || []).slice(1),
+  };
 }
 
 const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
@@ -7035,17 +7091,21 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   const removeIndexRow = (idx) => setIndexReadings((prev) => prev.filter((_, i) => i !== idx));
 
   const isLubTous = produit === "lubrifiants_tous";
-  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "" });
-  const [lubBlocks, setLubBlocks] = useState(() => LUBRICANTS.map(emptyLubBlock));
+  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "", autreNom: SHARED_RUBIA_DEFAULT_NAME, autreLitres: "", autresReste: [] });
+  const [lubBlocks, setLubBlocks] = useState(() => siteLubricants(siteId, productStocks).map(emptyLubBlock));
   useEffect(() => {
     if (editLoadingRef.current) return;
-    setLubBlocks(LUBRICANTS.map(emptyLubBlock));
+    setLubBlocks(siteLubricants(siteId, productStocks).map(emptyLubBlock));
   }, [siteId, date]); // eslint-disable-line react-hooks/exhaustive-deps
   // Dernier des effets liés à siteId/date à s'exécuter (déclaré après eux) : abaisse le drapeau
   // une fois qu'ils ont tous eu l'occasion de le consulter pour ce rendu.
   useEffect(() => { editLoadingRef.current = false; });
   const updateLubBlock = (idx, field, value) => setLubBlocks((prev) => prev.map((b, i) => (i === idx ? { ...b, [field]: value } : b)));
   const lubBlocksFilled = lubBlocks.filter((b) => b.stockAmbiant !== "");
+  // Huiles déjà enregistrées pour ce site, cette date et ce type : on ne les recrée pas, on ne
+  // demande que celles qui manquent encore.
+  const existingLubRecords = inventairesOfficiels.filter((i) => i.siteId === siteId && i.date === date && i.type === type && i.produit && i.produit !== "gasoil");
+  const lubPlan = planLubricantEntry(lubBlocks, existingLubRecords);
   const lubBlocksKg = (b) => { const d = LUBRICANTS.find((l) => l.id === b.produit)?.densite; return d && b.stockAmbiant !== "" ? (Number(b.stockAmbiant) || 0) * d : null; };
 
   // En modification, un inventaire lubrifiant ne porte que sur LE bloc d'origine (editingProduit)
@@ -7056,14 +7116,14 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       ? (editingProduit === "gasoil"
           ? (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== ""))
           : (editingLubBlock ? editingLubBlock.stockAmbiant !== "" : false))
-      : (isLubTous ? lubBlocksFilled.length > 0 : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")))
+      : (isLubTous ? lubPlan.complete : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")))
   );
 
   const resetCreateForm = () => {
     setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
     setDepotageReadings(depotageMetersForSite.length ? depotageMetersForSite.map((m) => emptyDepotage(m.name)) : []);
     setIndexReadings(salesMetersForSite.map((name) => emptyIndex(name)));
-    setLubBlocks(LUBRICANTS.map(emptyLubBlock));
+    setLubBlocks(siteLubricants(siteId, productStocks).map(emptyLubBlock));
     setInventoriste(""); setOperateur(""); setCommentaire("");
   };
 
@@ -7089,11 +7149,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       setDepotageReadings((inv.depotage || []).map((d) => ({ compteur: d.compteur, indexFin: d.indexFin ?? "" })));
     } else {
       setProduit("lubrifiants_tous");
-      const c0 = (inv.cuves && inv.cuves[0]) || {};
-      const idx0 = (inv.indexCompteurs && inv.indexCompteurs[0]) || {};
-      setLubBlocks(LUBRICANTS.map((l) => (l.id === inv.produit
-        ? { produit: l.id, label: lubLabel(inv.siteId, l.id, productStocks), cuve: c0.cuve || `Cuve ${lubLabel(inv.siteId, l.id, productStocks)}`, hauteur: c0.hauteur ?? "", stockAmbiant: String(inv.stockAmbiant ?? ""), indexFin: idx0.indexFin ?? "" }
-        : emptyLubBlock(l))));
+      setLubBlocks(siteLubricants(inv.siteId, productStocks).map((l) => (l.id === inv.produit ? lubBlockFromRecord(inv, productStocks) : emptyLubBlock(l))));
     }
   };
   const cancelEdit = () => {
@@ -7118,7 +7174,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       } else if (editingLubBlock) {
         editInventaireOfficiel({
           id: editingId, siteId, date, type, produit: editingProduit, inventoriste, operateur,
-          cuves: [{ cuve: editingLubBlock.cuve, hauteur: editingLubBlock.hauteur === "" ? null : Number(editingLubBlock.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(editingLubBlock.stockAmbiant) || 0 }],
+          cuves: [lubBlockToCuve(editingLubBlock)],
           depotage: [],
           indexCompteurs: editingLubBlock.indexFin === "" ? [] : [{ compteur: `Compteur ${editingLubBlock.label}`, indexFin: Number(editingLubBlock.indexFin) }],
           commentaire,
@@ -7129,15 +7185,15 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       return;
     }
     if (isLubTous) {
-      // Les 4 lubrifiants saisis ensemble, dans la même action : un enregistrement par huile
-      // renseignée (une huile à zéro ce mois-ci peut rester vide), tous avec le même site, la
-      // même date, le même type et les mêmes Inventoriste/Opérateur/Commentaire. Comme ils
-      // partagent ces mêmes site/date/type, le bouton "PDF combiné" les regroupera automatiquement
-      // dans l'historique une fois enregistrés.
-      lubBlocksFilled.forEach((b) => {
+      // Toutes les huiles du site saisies ensemble, dans la même action : un enregistrement par
+      // huile (0 si l'huile est vide — aucune ne peut être oubliée), tous avec le même site, la même
+      // date, le même type et les mêmes Inventoriste/Opérateur/Commentaire. Les huiles déjà
+      // enregistrées pour ce site/date/type ne sont pas recréées. Comme elles partagent ces mêmes
+      // site/date/type, le bouton "PDF combiné" les regroupera automatiquement dans l'historique.
+      lubPlan.pending.forEach((b) => {
         addInventaireOfficiel({
           siteId, date, type, produit: b.produit, inventoriste, operateur,
-          cuves: [{ cuve: b.cuve, hauteur: b.hauteur === "" ? null : Number(b.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(b.stockAmbiant) || 0 }],
+          cuves: [lubBlockToCuve(b)],
           depotage: [],
           indexCompteurs: b.indexFin === "" ? [] : [{ compteur: `Compteur ${b.label}`, indexFin: Number(b.indexFin) }],
           commentaire,
@@ -7198,7 +7254,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
               <Field label="Produit">
                 <select className="somip-select" value={produit} onChange={(e) => setProduit(e.target.value)} disabled={!!editingId}>
                   <option value="gasoil">Gasoil</option>
-                  <option value="lubrifiants_tous">Lubrifiants — les 4 ensemble (AC30, AC50, SW10, Rubia Tir7400)</option>
+                  <option value="lubrifiants_tous">{`Lubrifiants — tous ensemble (${siteLubricants(siteId, productStocks).map((l) => lubLabel(siteId, l.id, productStocks)).join(", ")})`}</option>
                 </select>
               </Field>
             </div>
@@ -7309,37 +7365,77 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
           )}
           {isLubTous && (
             <>
-              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{editingId ? `Modification — ${editingLubBlock?.label || ""}` : "Les 4 lubrifiants, saisis ensemble"}</p>
+              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{editingId ? `Modification — ${editingLubBlock?.label || ""}` : "Tous les lubrifiants de ce site, saisis ensemble"}</p>
               <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.sub }}>
                 {editingId
                   ? "Corrige les valeurs de cette huile, puis clique sur Enregistrer. Les autres huiles de ce même jour ne sont pas affectées."
-                  : "Renseigne le stock (L) d'au moins une huile pour pouvoir enregistrer — une huile à zéro ce mois-ci peut rester vide. Les 4 partageront le même site, la même date et le même type, et pourront ensuite être réunies en un seul PDF depuis l'historique."}
+                  : `Renseigne le stock (L) de CHAQUE huile du site — ${lubBlocks.map((b) => b.label).join(", ")} — avec 0 si une huile est vide : aucune ne peut être oubliée. Elles partagent le même site, la même date et le même type, et seront réunies en un seul PDF depuis l'historique.`}
               </p>
-              {lubBlocks.map((b, idx) => (editingId && b.produit !== editingProduit) ? null : (
-                <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                  <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
-                  <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
-                    <div style={{ flex: 1.3 }}>
-                      <Field label="Contenant"><input className="somip-input" value={b.cuve} onChange={(e) => updateLubBlock(idx, "cuve", e.target.value)} placeholder={`Cuve ${b.label}`} /></Field>
+              {lubBlocks.map((b, idx) => {
+                if (editingId && b.produit !== editingProduit) return null;
+                const already = !editingId ? lubPlan.existingByProduit[b.produit] : null;
+                if (already) {
+                  const ac = (already.cuves && already.cuves[0]) || {};
+                  return (
+                    <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, background: C.bg }}>
+                      <p style={{ margin: "0 0 4px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
+                      <p style={{ margin: 0, fontSize: 11.5, color: C.sub }}>
+                        Déjà enregistré : <strong style={{ color: C.ink }}>{fmt(already.stockAmbiant)} L</strong>{ac.hauteur !== null && ac.hauteur !== undefined ? ` — ${fmt(ac.hauteur)} mm` : ""}. Pour le corriger, utilise le crayon dans l'historique.
+                      </p>
                     </div>
-                    <div style={{ flex: 1 }}>
-                      <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={b.hauteur} onChange={(e) => updateLubBlock(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                  );
+                }
+                const sharedTank = b.produit === "rubia_tir7400" && (SHARED_RUBIA_TANK_SITES.includes(siteId) || b.autreLitres !== "");
+                return (
+                  <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1.3 }}>
+                        <Field label="Contenant"><input className="somip-input" value={b.cuve} onChange={(e) => updateLubBlock(idx, "cuve", e.target.value)} placeholder={`Cuve ${b.label}`} /></Field>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={b.hauteur} onChange={(e) => updateLubBlock(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Index du compteur"><input type="number" className="somip-input" value={b.indexFin} onChange={(e) => updateLubBlock(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+                      </div>
                     </div>
-                    <div style={{ flex: 1 }}>
-                      <Field label="Index du compteur"><input type="number" className="somip-input" value={b.indexFin} onChange={(e) => updateLubBlock(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.stockAmbiant} onChange={(e) => updateLubBlock(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
+                      </div>
+                      <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
+                        <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Conversion en kg</span>
+                        <span className="somip-mono" style={{ fontWeight: 700, color: lubBlocksKg(b) !== null ? C.orange : C.sub }}>{lubBlocksKg(b) !== null ? `${fmt(lubBlocksKg(b))} kg` : "—"}</span>
+                      </div>
                     </div>
+                    {sharedTank && (
+                      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.border}` }}>
+                        <p style={{ margin: "0 0 6px", fontSize: 11.5, fontWeight: 700, color: C.ink }}>Autre produit dans la même cuve (optionnel)</p>
+                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                          <div style={{ flex: 1.3 }}>
+                            <Field label="Produit"><input className="somip-input" value={b.autreNom} onChange={(e) => updateLubBlock(idx, "autreNom", e.target.value)} placeholder={SHARED_RUBIA_DEFAULT_NAME} /></Field>
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.autreLitres} onChange={(e) => updateLubBlock(idx, "autreLitres", e.target.value)} placeholder="0" /></Field>
+                          </div>
+                        </div>
+                        {b.autreLitres !== "" && (
+                          <p style={{ margin: "6px 0 0", fontSize: 11, color: C.sub }}>
+                            Total dans la cuve : <strong style={{ color: C.ink }}>{fmt((Number(b.stockAmbiant) || 0) + (Number(b.autreLitres) || 0))} L</strong> — le stock de l'huile ci-dessus reste celui de l'huile seule.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                    <div style={{ flex: 1 }}>
-                      <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.stockAmbiant} onChange={(e) => updateLubBlock(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
-                    </div>
-                    <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
-                      <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Conversion en kg</span>
-                      <span className="somip-mono" style={{ fontWeight: 700, color: lubBlocksKg(b) !== null ? C.orange : C.sub }}>{lubBlocksKg(b) !== null ? `${fmt(lubBlocksKg(b))} kg` : "—"}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
+              {!editingId && lubPlan.allAlreadySaved && (
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.sub, fontWeight: 600 }}>Toutes les huiles de ce site sont déjà enregistrées pour cette date et ce type. Pour corriger l'une d'elles, utilise le crayon dans l'historique.</p>
+              )}
+              {!editingId && !lubPlan.allAlreadySaved && lubPlan.missing.length > 0 && (
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.warning, fontWeight: 700 }}>Il manque : {lubPlan.missing.map((b) => b.label).join(", ")} — saisis 0 si l'huile est vide.</p>
+              )}
             </>
           )}
 
@@ -7401,7 +7497,10 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   <td><Badge color={inv.type === "inopine" ? C.orange : C.blue}>{TYPE_INVENTAIRE_LABELS[inv.type]}</Badge></td>
                   <td style={{ color: C.sub }}>{inv.inventoriste || "—"}</td>
                   <td style={{ color: C.sub }}>{inv.operateur || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(inv.stockAmbiant)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>
+                    {fmt(inv.stockAmbiant)} L
+                    {(() => { const extra = (inv.cuves || []).reduce((a, cv) => a + (cv.autresContenus || []).reduce((b, x) => b + (Number(x.stockAmbiant) || 0), 0), 0); return extra > 0 ? <span style={{ display: "block", fontSize: 10.5, fontWeight: 600, color: C.sub }}>+ {fmt(extra)} L autre produit</span> : null; })()}
+                  </td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: inv.stock15 !== undefined ? C.blue : C.sub }}>
                     {inv.produit && inv.produit !== "gasoil"
                       ? (() => { const d = LUBRICANTS.find((l) => l.id === inv.produit)?.densite; return d ? `${fmt(inv.stockAmbiant * d)} kg` : "—"; })()
