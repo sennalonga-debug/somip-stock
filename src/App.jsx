@@ -1127,14 +1127,54 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || inv.siteId}_${inv.date}.pdf`);
 }
 
-// Un seul PDF pour les 4 lubrifiants d'un même site, à une même date et un même type
-// (mensuel/inopiné) — plutôt que 4 documents séparés. "records" doit contenir un inventaire
+// Un seul PDF pour les lubrifiants d'un même site, à une même date et un même type
+// (mensuel/inopiné) — plutôt que des documents séparés. "records" doit contenir un inventaire
 // officiel par lubrifiant (même site, même date, même type), déjà filtré par l'appelant.
+//
+// Mise en page (modèle "Inventaire Lubrifiants fin septembre — Prehomo") : un bloc "DÉTAIL —
+// <huile>" par lubrifiant (contenant, hauteur, litres ambiants, kg, puis l'index du compteur),
+// sans tableau récapitulatif, et deux cases de signature seulement (SOMIP et TotalEnergies
+// Marketing), le tout sur UNE seule page. Si une cuve contient plusieurs produits, la ligne de
+// la cuve donne le total puis une ligne "dont …" par produit : les autres produits de la cuve
+// se lisent dans cuves[i].autresContenus = [{ nom, stockAmbiant, densite? }].
+const LUB_PDF_BLUE = [28, 23, 217]; // bleu du modèle de fiche lubrifiants
+const LUB_PDF_ORDER = ["sw10", "ac50", "ac30", "rubia_tir7400"]; // ordre d'affichage du modèle
+// Trois niveaux de compacité : on prend le premier qui fait tenir tout le contenu sur la page.
+const LUB_PDF_LEVELS = [
+  { bannerH: 22, g1: 8, rowH: 23, dontH: 18, noteH: 14, g2: 12, fs: 9, fsHead: 8.5, fsDont: 8.5, fsNote: 8.5 },
+  { bannerH: 19, g1: 6, rowH: 19, dontH: 15, noteH: 13, g2: 8, fs: 8.5, fsHead: 8, fsDont: 8, fsNote: 8 },
+  { bannerH: 16, g1: 4, rowH: 16, dontH: 13, noteH: 12, g2: 5, fs: 8, fsHead: 7.5, fsDont: 7.5, fsNote: 7.5 },
+];
+function buildLubPdfBlocks(records, productStocks) {
+  const rank = (id) => { const i = LUB_PDF_ORDER.indexOf(id); return i < 0 ? 99 : i; };
+  return [...records].sort((a, b) => rank(a.produit) - rank(b.produit)).map((r) => {
+    const dens = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
+    const ownLabel = lubLabel(r.siteId, r.produit, productStocks);
+    const cuves = r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }];
+    const rows = [];
+    for (const c of cuves) {
+      const others = (c.autresContenus || []).map((a) => ({ nom: a.nom || "—", litres: Number(a.stockAmbiant) || 0, d: Number(a.densite) > 0 ? Number(a.densite) : dens }));
+      const parts = [{ nom: ownLabel, litres: Number(c.stockAmbiant) || 0, d: dens }, ...others];
+      const kgOf = (p) => (p.d ? p.litres * p.d : null);
+      const totalL = parts.reduce((sum, p) => sum + p.litres, 0);
+      const totalKg = parts.every((p) => kgOf(p) !== null) ? parts.reduce((sum, p) => sum + kgOf(p), 0) : null;
+      rows.push({ kind: "main", cells: [c.cuve || "—", c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—", `${fmt(totalL)} L`, totalKg !== null ? `${fmt(totalKg)} kg` : "—"] });
+      if (others.length > 0) parts.forEach((p) => rows.push({ kind: "dont", cells: [`dont ${p.nom}`, "—", `${fmt(p.litres)} L`, kgOf(p) !== null ? `${fmt(kgOf(p))} kg` : "—"] }));
+    }
+    const idx = (r.indexCompteurs || []).filter((i) => i.indexFin !== null && i.indexFin !== undefined).map((i) => `${i.compteur} : ${fmt(i.indexFin)}`);
+    return { title: `DÉTAIL — ${String(ownLabel).toUpperCase()}`, rows, indexLine: idx.length ? `Index — ${idx.join("   ·   ")}` : null };
+  });
+}
+// Hauteur qu'occupe un bloc, pour un niveau de compacité donné.
+function lubPdfBlockHeight(blk, lv) {
+  const body = blk.rows.reduce((sum, row) => sum + (row.kind === "dont" ? lv.dontH : lv.rowH), 0);
+  return lv.bannerH + lv.g1 + lv.rowH + body + (blk.indexLine ? lv.noteH : 0) + lv.g2;
+}
 async function exportInventaireOfficielLubCombinedPdf(records, site, productStocks) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const [pR, pG, pB] = hexToRgb(C.blue), [aR, aG, aB] = hexToRgb(C.orange);
+  const [pR, pG, pB] = LUB_PDF_BLUE, [aR, aG, aB] = hexToRgb(C.orange);
   const marginX = 40;
   const fullWidth = pageWidth - marginX * 2;
   const ref = records[0];
@@ -1202,70 +1242,114 @@ async function exportInventaireOfficielLubCombinedPdf(records, site, productStoc
   doc.line(marginX, y - 14, pageWidth - marginX, y - 14);
   y += 6;
 
-  const drawBanner = (text) => {
-    doc.setFillColor(pR, pG, pB);
-    doc.roundedRect(marginX, y, fullWidth, 22, 3, 3, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10.5);
-    doc.setTextColor(255, 255, 255);
-    doc.text(text, marginX + 10, y + 15);
-    y += 22 + 8;
-  };
-
-  // Un seul tableau pour les 4 huiles — une ligne par contenant, tous produits confondus —
-  // sur le même principe qu'une fiche gasoil (une seule table "cuve par cuve"), plutôt que 4
-  // tableaux séparés : ça tient sur une seule page même avec plusieurs contenants par huile.
-  drawBanner("DÉTAIL PAR HUILE — HAUTEUR, VOLUME ET INDEX");
-  const detailRows = [];
-  for (const r of records) {
-    const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
-    const idxLabel = (r.indexCompteurs || []).map((idx) => (idx.indexFin !== null && idx.indexFin !== undefined ? fmt(idx.indexFin) : "—")).join(", ") || "—";
-    (r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }]).forEach((c) => {
-      detailRows.push([
-        lubLabel(r.siteId, r.produit, productStocks),
-        c.cuve,
-        c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—",
-        `${fmt(c.stockAmbiant)} L`,
-        d ? `${fmt(c.stockAmbiant * d)} kg` : "—",
-        idxLabel,
-      ]);
-    });
-  }
-  autoTable(doc, {
-    startY: y,
-    head: [["Huile", "Contenant", "Hauteur (mm)", "Stock (L)", "Stock (kg)", "Index compteur"]],
-    body: detailRows,
-    theme: "grid",
-    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 8.5, cellPadding: 6 },
-    bodyStyles: { fontSize: 9, cellPadding: 6, textColor: [40, 48, 56] },
-    alternateRowStyles: { fillColor: [249, 250, 251] },
-    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
-    columnStyles: { 0: { halign: "left", fontStyle: "bold" }, 1: { halign: "left" } },
-    margin: { left: marginX, right: marginX },
-  });
-  y = doc.lastAutoTable.finalY + 18;
-
-  // Commentaires : regroupés en un seul bloc (au lieu d'un paragraphe par huile), pour rester
-  // compact et tenir sur la page.
+  // Commentaires : regroupés en un seul bloc (au lieu d'un paragraphe par huile), pour rester compact.
   const commentLines = records.filter((r) => r.commentaire).map((r) => `${lubLabel(r.siteId, r.produit, productStocks)} : ${r.commentaire}`);
+  let commentTextLines = [];
   if (commentLines.length > 0) {
     doc.setFont("helvetica", "italic");
     doc.setFontSize(9);
-    doc.setTextColor(90, 100, 110);
-    const lines = doc.splitTextToSize(`Commentaires — ${commentLines.join("   ·   ")}`, fullWidth);
-    doc.text(lines, marginX, y);
-    y += lines.length * 12 + 10;
+    commentTextLines = doc.splitTextToSize(`Commentaires — ${commentLines.join("   ·   ")}`, fullWidth);
+  }
+  const commentH = commentTextLines.length > 0 ? commentTextLines.length * 12 + 10 : 0;
+
+  // Choix du niveau de compacité : le premier qui fait tenir tous les blocs + les commentaires au-dessus
+  // des cases de signature (réservées en bas de page). Si aucun ne suffit, on passe à une 2e page plutôt
+  // que de laisser du contenu sortir de la feuille.
+  const blocks = buildLubPdfBlocks(records, productStocks);
+  const sigTop = pageHeight - 150;
+  const fits = (lv) => y + blocks.reduce((sum, b) => sum + lubPdfBlockHeight(b, lv), 0) + commentH <= sigTop - 12;
+  const lv = LUB_PDF_LEVELS.find(fits) || LUB_PDF_LEVELS[LUB_PDF_LEVELS.length - 1];
+
+  // Largeurs fixes des 4 colonnes (438 pt au total), identiques pour tous les blocs.
+  const colW = [134, 100, 128, 76];
+  const pad = 6;
+  const lineRgb = [226, 230, 234];
+  const fitText = (text, maxW) => {
+    let t = String(text);
+    if (doc.getTextWidth(t) <= maxW) return t;
+    while (t.length > 1 && doc.getTextWidth(`${t}…`) > maxW) t = t.slice(0, -1);
+    return `${t}…`;
+  };
+  const drawCell = (x, cy, w, h, fill, textFn) => {
+    doc.setFillColor(fill[0], fill[1], fill[2]);
+    doc.setDrawColor(lineRgb[0], lineRgb[1], lineRgb[2]);
+    doc.setLineWidth(0.5);
+    doc.rect(x, cy, w, h, "FD");
+    textFn();
+  };
+  const drawBanner = (text) => {
+    doc.setFillColor(pR, pG, pB);
+    doc.roundedRect(marginX, y, fullWidth, lv.bannerH, 3, 3, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text(text, marginX + 10, y + lv.bannerH / 2 + 3.7);
+    y += lv.bannerH + lv.g1;
+  };
+
+  for (const blk of blocks) {
+    if (y + lubPdfBlockHeight(blk, lv) > pageHeight - 40) { doc.addPage(); y = 50; }
+    drawBanner(blk.title);
+    // En-tête du tableau
+    let x = marginX;
+    ["Contenant", "Hauteur (mm)", "Stock (L, ambiant)", "Stock (kg)"].forEach((h, i) => {
+      drawCell(x, y, colW[i], lv.rowH, LUB_PDF_BLUE, () => {
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(lv.fsHead);
+        doc.setTextColor(255, 255, 255);
+        doc.text(fitText(h, colW[i] - pad * 2), x + colW[i] - pad, y + lv.rowH / 2 + lv.fsHead * 0.34, { align: "right" });
+      });
+      x += colW[i];
+    });
+    y += lv.rowH;
+    // Lignes : la cuve (en gras) puis, si elle contient plusieurs produits, une ligne "dont …" par produit
+    for (const row of blk.rows) {
+      const h = row.kind === "dont" ? lv.dontH : lv.rowH;
+      const dont = row.kind === "dont";
+      x = marginX;
+      row.cells.forEach((txt, i) => {
+        drawCell(x, y, colW[i], h, dont ? [250, 250, 250] : [249, 250, 251], () => {
+          const fs = dont ? lv.fsDont : lv.fs;
+          // Ligne "dont …" : seul le libellé est en italique, les nombres restent droits (comme le modèle).
+          doc.setFont("helvetica", dont && i === 0 ? "italic" : (i === 0 && !dont ? "bold" : "normal"));
+          doc.setFontSize(fs);
+          doc.setTextColor(i === 0 && !dont ? 20 : 40, i === 0 && !dont ? 30 : 48, i === 0 && !dont ? 40 : 56);
+          const by = y + h / 2 + fs * 0.34;
+          if (i === 0) doc.text(fitText(txt, colW[0] - pad * 2 - (dont ? 8 : 0)), x + pad + (dont ? 8 : 0), by);
+          else doc.text(fitText(txt, colW[i] - pad * 2), x + colW[i] - pad, by, { align: "right" });
+        });
+        x += colW[i];
+      });
+      y += h;
+    }
+    if (blk.indexLine) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(lv.fsNote);
+      doc.setTextColor(90, 100, 110);
+      doc.text(fitText(blk.indexLine, fullWidth), marginX, y + lv.fsNote + 3);
+      y += lv.noteH;
+    }
+    y += lv.g2;
   }
 
-  // Signatures partagées : une seule case par rôle pour les 4 lubrifiants — on prend la
-  // première signature trouvée parmi les 4 inventaires pour chaque rôle, s'il y en a une.
+  if (commentTextLines.length > 0) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(9);
+    doc.setTextColor(90, 100, 110);
+    doc.text(commentTextLines, marginX, y + 2);
+    y += commentH;
+  }
+
+  // Signatures partagées : une seule case par rôle pour tous les lubrifiants — on prend la
+  // première signature trouvée parmi les inventaires pour chaque rôle, s'il y en a une.
+  // Deux cases seulement : SOMIP et TotalEnergies Marketing (le nom de l'opérateur figure déjà
+  // en haut de la fiche).
   const pick = (field) => records.map((r) => r[field]).find(Boolean) || null;
   if (y > pageHeight - 150) { doc.addPage(); y = 50; }
-  const sigY = Math.max(y + 20, pageHeight - 150);
-  const sigW = (fullWidth - 32) / 3;
+  const sigY = Math.max(y + 8, pageHeight - 150);
+  const sigW = (fullWidth - 16) / 2;
   const sigSlots = [
     { label: "SOMIP", url: pick("signatureSomipUrl"), by: pick("signatureSomipBy"), at: pick("signatureSomipAt") },
-    { label: "Opérateur", url: pick("signatureOperateurUrl"), by: pick("signatureOperateurBy"), at: pick("signatureOperateurAt") },
     { label: "TotalEnergies Marketing", url: pick("signatureTotalUrl"), by: pick("signatureTotalBy"), at: pick("signatureTotalAt") },
   ];
   for (let i = 0; i < sigSlots.length; i++) {
