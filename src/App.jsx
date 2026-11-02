@@ -1852,12 +1852,11 @@ function lubLabel(siteId, productId, productStocks) {
   return ps?.label || LUBRICANTS.find((l) => l.id === productId)?.label || productId;
 }
 
-// Huiles d'un site : celles qui ont une ligne de stock (product_stocks) sur ce site ; à défaut de
-// configuration, toutes les huiles du catalogue.
-function siteLubricants(siteId, productStocks) {
-  const own = (productStocks || []).filter((p) => p.siteId === siteId).map((p) => p.product);
-  const list = LUBRICANTS.filter((l) => own.includes(l.id));
-  return list.length > 0 ? list : LUBRICANTS;
+// Huiles proposées pour l'inventaire d'un site : TOUTES celles du catalogue, toujours. Une huile ne
+// disparaît jamais du formulaire (ni de la fiche PDF) parce qu'une ligne de configuration manque
+// sur un site : l'oubli serait silencieux. Si une huile est vide, on saisit 0.
+function siteLubricants() {
+  return LUBRICANTS;
 }
 // Sites où la cuve Rubia contient DEUX produits (Rubia Tir7400 + Rubia Works 1000) : le formulaire
 // d'inventaire y propose de saisir le second produit. Les autres sites (ex. Okouma) n'en ont pas.
@@ -1873,6 +1872,22 @@ function planLubricantEntry(blocks, existingRecords) {
   const missing = pending.filter((b) => b.stockAmbiant === "" || b.stockAmbiant === null || b.stockAmbiant === undefined);
   return { existingByProduit, pending, missing, complete: pending.length > 0 && missing.length === 0, allAlreadySaved: pending.length === 0 };
 }
+// Blocs d'huile tels qu'AFFICHÉS : une huile déjà enregistrée pour ce site, cette date et ce type
+// apparaît pré-remplie avec ses valeurs enregistrées (tant qu'on n'y a pas touché). Elle ne
+// disparaît donc jamais du formulaire : toutes les huiles se voient et se saisissent ensemble.
+function overlayLubBlocks(blocks, existingByProduit, productStocks) {
+  return blocks.map((b) => {
+    if (b.touched) return b;
+    const ex = existingByProduit[b.produit];
+    return ex ? { ...lubBlockFromRecord(ex, productStocks), touched: false } : b;
+  });
+}
+// Huiles déjà enregistrées dont les valeurs ont été corrigées à l'écran : elles sont MISES À JOUR sur
+// place (jamais recréées, donc pas de doublon). Réservé à qui a le droit de corriger un inventaire.
+function lubRecordsToUpdate(blocks, existingByProduit, canEdit) {
+  return canEdit ? blocks.filter((b) => b.touched && existingByProduit[b.produit]) : [];
+}
+
 // Contenu de la cuve d'un bloc d'huile tel qu'il est enregistré : la cuve de l'huile elle-même, plus
 // les AUTRES produits qu'elle contient (cuves[i].autresContenus), s'il y en a. Le stock enregistré
 // pour l'huile reste celui de l'huile seule : rien ne change pour les calculs existants.
@@ -1885,6 +1900,21 @@ function lubBlockToCuve(b) {
   const cuve = { cuve: b.cuve, hauteur: b.hauteur === "" || b.hauteur === null || b.hauteur === undefined ? null : Number(b.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(b.stockAmbiant) || 0 };
   if (autres.length > 0) cuve.autresContenus = autres;
   return cuve;
+}
+
+// Index du compteur d'une huile tel qu'enregistré (aucun index saisi -> liste vide).
+function lubIndexCompteurs(b) {
+  return b.indexFin === "" || b.indexFin === null || b.indexFin === undefined ? [] : [{ compteur: `Compteur ${b.label}`, indexFin: Number(b.indexFin) }];
+}
+// Données enregistrées pour une huile NOUVELLE (aucun inventaire de cette huile ce jour-là).
+function lubCreatePayload(b, form) {
+  return { siteId: form.siteId, date: form.date, type: form.type, produit: b.produit, inventoriste: form.inventoriste, operateur: form.operateur, cuves: [lubBlockToCuve(b)], depotage: [], indexCompteurs: lubIndexCompteurs(b), commentaire: form.commentaire };
+}
+// Données d'une MISE À JOUR sur place d'une huile déjà enregistrée : les valeurs corrigées, tandis que
+// Inventoriste, Opérateur et commentaire déjà enregistrés sont conservés si on ne les retape pas.
+// Aucune colonne de signature n'y figure : une mise à jour ne les touche jamais.
+function lubUpdatePayload(b, ex, form) {
+  return { id: ex.id, siteId: form.siteId, date: form.date, type: form.type, produit: b.produit, inventoriste: form.inventoriste || ex.inventoriste || "", operateur: form.operateur || ex.operateur || "", cuves: [lubBlockToCuve(b)], depotage: [], indexCompteurs: lubIndexCompteurs(b), commentaire: form.commentaire || ex.commentaire || "" };
 }
 
 // Bloc de saisie d'une huile rempli à partir d'un inventaire déjà enregistré, pour le corriger.
@@ -1933,6 +1963,12 @@ const inventaireOfficielToRow = (i) => ({
   cuves: i.cuves || [], depotage: i.depotage || [], index_compteurs: i.indexCompteurs || [], stock_ambiant: i.stockAmbiant || 0, stock15: i.stock15 ?? null, commentaire: i.commentaire ?? null,
   created_by: i.createdBy ?? null,
 });
+// Colonnes envoyées lors de la MODIFICATION d'un inventaire officiel : tout ce qui se saisit, mais ni
+// "created_by" (qui l'a créé ne doit jamais être effacé par une correction) ni les signatures.
+function inventaireOfficielUpdateRow(i) {
+  const { created_by, ...row } = inventaireOfficielToRow(i); // eslint-disable-line no-unused-vars
+  return row;
+}
 const rowToSiteTank = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteTankToRow = (t) => ({ site_id: t.siteId, name: t.name });
 const rowToSiteDepotageMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
@@ -3093,7 +3129,7 @@ export default function App() {
     });
     const stockAmbiant = cuvesComputed.reduce((a, c) => a + c.stockAmbiant, 0);
     const stock15 = cuvesComputed.every((c) => c.volume15 !== null) ? cuvesComputed.reduce((a, c) => a + c.volume15, 0) : undefined;
-    const row = inventaireOfficielToRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, depotage: depotage || [], indexCompteurs: indexCompteurs || [], stockAmbiant, stock15, commentaire });
+    const row = inventaireOfficielUpdateRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, depotage: depotage || [], indexCompteurs: indexCompteurs || [], stockAmbiant, stock15, commentaire });
     const { data, error } = await supabase.from("inventaires_officiels").update(row).eq("id", id).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("La modification n'a pas pu être confirmée par le serveur — réessaie.");
@@ -7091,32 +7127,38 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   const removeIndexRow = (idx) => setIndexReadings((prev) => prev.filter((_, i) => i !== idx));
 
   const isLubTous = produit === "lubrifiants_tous";
-  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "", autreNom: SHARED_RUBIA_DEFAULT_NAME, autreLitres: "", autresReste: [] });
+  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "", autreNom: SHARED_RUBIA_DEFAULT_NAME, autreLitres: "", autresReste: [], touched: false });
   const [lubBlocks, setLubBlocks] = useState(() => siteLubricants(siteId, productStocks).map(emptyLubBlock));
   useEffect(() => {
     if (editLoadingRef.current) return;
     setLubBlocks(siteLubricants(siteId, productStocks).map(emptyLubBlock));
-  }, [siteId, date]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [siteId, date, type]); // eslint-disable-line react-hooks/exhaustive-deps
   // Dernier des effets liés à siteId/date à s'exécuter (déclaré après eux) : abaisse le drapeau
   // une fois qu'ils ont tous eu l'occasion de le consulter pour ce rendu.
   useEffect(() => { editLoadingRef.current = false; });
-  const updateLubBlock = (idx, field, value) => setLubBlocks((prev) => prev.map((b, i) => (i === idx ? { ...b, [field]: value } : b)));
-  const lubBlocksFilled = lubBlocks.filter((b) => b.stockAmbiant !== "");
-  // Huiles déjà enregistrées pour ce site, cette date et ce type : on ne les recrée pas, on ne
-  // demande que celles qui manquent encore.
+  // Huiles déjà enregistrées pour ce site, cette date et ce type : elles restent dans le formulaire,
+  // pré-remplies ; les corriger les met à jour sur place (jamais de doublon).
   const existingLubRecords = inventairesOfficiels.filter((i) => i.siteId === siteId && i.date === date && i.type === type && i.produit && i.produit !== "gasoil");
-  const lubPlan = planLubricantEntry(lubBlocks, existingLubRecords);
+  const existingByProduit = {};
+  existingLubRecords.forEach((r) => { existingByProduit[r.produit] = r; });
+  // En modification d'une huile précise (crayon), pas de fusion : on édite exactement cet enregistrement.
+  const overlayMap = editingId ? {} : existingByProduit;
+  const effectiveLubBlocks = overlayLubBlocks(lubBlocks, overlayMap, productStocks);
+  const updateLubBlock = (idx, field, value) => setLubBlocks((prev) => overlayLubBlocks(prev, overlayMap, productStocks).map((b, i) => (i === idx ? { ...b, [field]: value, touched: true } : prev[i])));
+  const lubBlocksFilled = effectiveLubBlocks.filter((b) => b.stockAmbiant !== "");
+  const lubPlan = planLubricantEntry(effectiveLubBlocks, existingLubRecords);
+  const lubToUpdate = editingId ? [] : lubRecordsToUpdate(effectiveLubBlocks, existingByProduit, canManage);
   const lubBlocksKg = (b) => { const d = LUBRICANTS.find((l) => l.id === b.produit)?.densite; return d && b.stockAmbiant !== "" ? (Number(b.stockAmbiant) || 0) * d : null; };
 
   // En modification, un inventaire lubrifiant ne porte que sur LE bloc d'origine (editingProduit)
   // — les 3 autres blocs affichés à l'écran appartiennent à d'autres enregistrements séparés.
-  const editingLubBlock = editingId && editingProduit && editingProduit !== "gasoil" ? lubBlocks.find((b) => b.produit === editingProduit) : null;
+  const editingLubBlock = editingId && editingProduit && editingProduit !== "gasoil" ? effectiveLubBlocks.find((b) => b.produit === editingProduit) : null;
   const canSubmit = siteId && date && (
     editingId
       ? (editingProduit === "gasoil"
           ? (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== ""))
           : (editingLubBlock ? editingLubBlock.stockAmbiant !== "" : false))
-      : (isLubTous ? lubPlan.complete : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")))
+      : (isLubTous ? (lubPlan.complete || (lubPlan.allAlreadySaved && lubToUpdate.length > 0)) : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")))
   );
 
   const resetCreateForm = () => {
@@ -7190,15 +7232,12 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       // date, le même type et les mêmes Inventoriste/Opérateur/Commentaire. Les huiles déjà
       // enregistrées pour ce site/date/type ne sont pas recréées. Comme elles partagent ces mêmes
       // site/date/type, le bouton "PDF combiné" les regroupera automatiquement dans l'historique.
-      lubPlan.pending.forEach((b) => {
-        addInventaireOfficiel({
-          siteId, date, type, produit: b.produit, inventoriste, operateur,
-          cuves: [lubBlockToCuve(b)],
-          depotage: [],
-          indexCompteurs: b.indexFin === "" ? [] : [{ compteur: `Compteur ${b.label}`, indexFin: Number(b.indexFin) }],
-          commentaire,
-        });
-      });
+      const lubForm = { siteId, date, type, inventoriste, operateur, commentaire };
+      lubPlan.pending.forEach((b) => addInventaireOfficiel(lubCreatePayload(b, lubForm)));
+      // Huiles déjà enregistrées dont on a corrigé les valeurs : mise à jour sur place. Les noms
+      // (Inventoriste, Opérateur) et le commentaire déjà enregistrés sont conservés si on ne les
+      // retape pas ; les signatures ne sont jamais touchées.
+      lubToUpdate.forEach((b) => editInventaireOfficiel(lubUpdatePayload(b, existingByProduit[b.produit], lubForm)));
     } else {
       addInventaireOfficiel({
         siteId, date, type, produit, inventoriste, operateur,
@@ -7369,12 +7408,14 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
               <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.sub }}>
                 {editingId
                   ? "Corrige les valeurs de cette huile, puis clique sur Enregistrer. Les autres huiles de ce même jour ne sont pas affectées."
-                  : `Renseigne le stock (L) de CHAQUE huile du site — ${lubBlocks.map((b) => b.label).join(", ")} — avec 0 si une huile est vide : aucune ne peut être oubliée. Elles partagent le même site, la même date et le même type, et seront réunies en un seul PDF depuis l'historique.`}
+                  : `Renseigne le stock (L) de CHAQUE huile du site — ${effectiveLubBlocks.map((b) => b.label).join(", ")} — avec 0 si une huile est vide : aucune ne peut être oubliée. Elles partagent le même site, la même date et le même type, et seront réunies en un seul PDF depuis l'historique.${canManage ? " Une huile déjà enregistrée pour ce jour apparaît pré-remplie : la corriger la met à jour, sans doublon." : ""}`}
               </p>
-              {lubBlocks.map((b, idx) => {
+              {effectiveLubBlocks.map((b, idx) => {
                 if (editingId && b.produit !== editingProduit) return null;
                 const already = !editingId ? lubPlan.existingByProduit[b.produit] : null;
-                if (already) {
+                // Qui ne peut pas corriger un inventaire voit l'huile déjà enregistrée en lecture seule ;
+                // le Superviseur la voit pré-remplie et modifiable, avec tous ses champs.
+                if (already && !canManage) {
                   const ac = (already.cuves && already.cuves[0]) || {};
                   return (
                     <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, background: C.bg }}>
@@ -7387,8 +7428,8 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                 }
                 const sharedTank = b.produit === "rubia_tir7400" && (SHARED_RUBIA_TANK_SITES.includes(siteId) || b.autreLitres !== "");
                 return (
-                  <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                    <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
+                  <div key={b.produit} style={{ border: `1px solid ${already ? C.blue : C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}{already && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: C.blue }}>Déjà enregistré — corrige les valeurs puis Enregistrer pour le mettre à jour</span>}</p>
                     <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
                       <div style={{ flex: 1.3 }}>
                         <Field label="Contenant"><input className="somip-input" value={b.cuve} onChange={(e) => updateLubBlock(idx, "cuve", e.target.value)} placeholder={`Cuve ${b.label}`} /></Field>
@@ -7431,7 +7472,14 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                 );
               })}
               {!editingId && lubPlan.allAlreadySaved && (
-                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.sub, fontWeight: 600 }}>Toutes les huiles de ce site sont déjà enregistrées pour cette date et ce type. Pour corriger l'une d'elles, utilise le crayon dans l'historique.</p>
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.sub, fontWeight: 600 }}>
+                  {canManage
+                    ? "Toutes les huiles de ce site sont déjà enregistrées pour cette date et ce type. Corrige directement les valeurs ci-dessus, puis clique sur Enregistrer pour les mettre à jour (sans créer de doublon)."
+                    : "Toutes les huiles de ce site sont déjà enregistrées pour cette date et ce type. Pour corriger l'une d'elles, utilise le crayon dans l'historique."}
+                </p>
+              )}
+              {!editingId && lubToUpdate.length > 0 && (
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.blue, fontWeight: 600 }}>{lubToUpdate.length} huile(s) déjà enregistrée(s) seront mises à jour : {lubToUpdate.map((b) => b.label).join(", ")}.</p>
               )}
               {!editingId && !lubPlan.allAlreadySaved && lubPlan.missing.length > 0 && (
                 <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.warning, fontWeight: 700 }}>Il manque : {lubPlan.missing.map((b) => b.label).join(", ")} — saisis 0 si l'huile est vide.</p>
