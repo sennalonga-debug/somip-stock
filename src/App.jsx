@@ -1653,6 +1653,40 @@ function permsFor(role) {
   };
 }
 
+// Sites accessibles à un compte : tous si aucun site ne lui est attribué, sinon uniquement ceux
+// qui lui sont attribués (même règle que partout ailleurs dans l'application).
+function scopeSitesByAssignment(sites, assignedSiteIds) {
+  return assignedSiteIds && assignedSiteIds.length > 0 ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+}
+
+// Un mouvement déjà enregistré est-il très probablement LE MÊME que celui qu'on s'apprête à
+// enregistrer (double appui, nouvel essai après une lenteur) ? Même site, produit, type, date et
+// quantité sont nécessaires mais PAS suffisants : deux camions de 20 000 L le même jour sont deux
+// réceptions distinctes (bons de livraison différents), comme deux relevés de compteur différents.
+// On ne prévient donc que si rien ne prouve qu'il s'agit de deux saisies distinctes.
+const DUPLICATE_RECENT_MS = 10 * 60 * 1000;
+function isLikelyDuplicateMovement(existing, payload, nowMs) {
+  if (existing.siteId !== payload.siteId) return false;
+  if ((existing.product || "gasoil") !== (payload.product || "gasoil")) return false;
+  if (existing.type !== payload.type || existing.date !== payload.date) return false;
+  if (Number(existing.quantity) !== Number(payload.quantity)) return false;
+  const norm = (v) => String(v ?? "").trim().toLowerCase();
+  // Deux bons de livraison différents = deux livraisons distinctes ; le même bon = doublon quasi certain.
+  if (norm(existing.ref) && norm(payload.ref)) return norm(existing.ref) === norm(payload.ref);
+  // Autre camion, autre compteur ou autre site lié = autre saisie.
+  if (norm(existing.camion) && norm(payload.camion) && norm(existing.camion) !== norm(payload.camion)) return false;
+  if (norm(existing.relatedSiteId) && norm(payload.relatedSiteId) && norm(existing.relatedSiteId) !== norm(payload.relatedSiteId)) return false;
+  if (norm(existing.compteur) && norm(payload.compteur) && norm(existing.compteur) !== norm(payload.compteur)) return false;
+  // Deux plages d'index différentes = deux relevés distincts.
+  const hasIdx = (m) => m.indexAvant !== undefined && m.indexApres !== undefined && !Number.isNaN(Number(m.indexAvant)) && !Number.isNaN(Number(m.indexApres));
+  if (hasIdx(existing) && hasIdx(payload)) return Number(existing.indexAvant) === Number(payload.indexAvant) && Number(existing.indexApres) === Number(payload.indexApres);
+  // Aucune preuve dans un sens ou dans l'autre : on ne prévient que si la saisie identique vient
+  // d'être faite, pas si elle date de plusieurs heures.
+  const t = existing.createdAt ? Date.parse(existing.createdAt) : NaN;
+  if (Number.isNaN(t)) return true;
+  return Math.abs(nowMs - t) <= DUPLICATE_RECENT_MS;
+}
+
 /* ------------------------------------------------------------------ */
 /* Base de données partagée (Supabase) — conversion lignes <-> objets  */
 /* ------------------------------------------------------------------ */
@@ -3036,17 +3070,12 @@ export default function App() {
   // et un Superviseur qui ressaisit la même chose depuis son PC sans le savoir). Une vraie saisie
   // distincte mais de quantité différente n'est jamais concernée.
   const addMovement = (payload) => {
-    const isDuplicate = movements.some((m) =>
-      m.siteId === payload.siteId
-      && (m.product || "gasoil") === (payload.product || "gasoil")
-      && m.type === payload.type
-      && m.date === payload.date
-      && Number(m.quantity) === Number(payload.quantity)
-    );
+    const nowMs = Date.now();
+    const isDuplicate = movements.some((m) => isLikelyDuplicateMovement(m, payload, nowMs));
     if (isDuplicate) {
       const label = TYPE_META[payload.type]?.label || payload.type;
       const siteName = sites.find((s) => s.id === payload.siteId)?.name || payload.siteId;
-      const ok = window.confirm(`Une saisie "${label}" de ${fmt(payload.quantity)} L existe déjà aujourd'hui (${payload.date}) pour ${siteName}. Est-ce une saisie différente, ou un doublon ?\n\nOK = l'enregistrer quand même (saisie distincte)\nAnnuler = ne rien enregistrer`);
+      const ok = window.confirm(`Une saisie "${label}" de ${fmt(payload.quantity)} L vient d'être enregistrée pour ${siteName} (${payload.date}), ou porte le même numéro de bon / les mêmes index. Est-ce une saisie différente, ou un doublon ?\n\nOK = l'enregistrer quand même (saisie distincte)\nAnnuler = ne rien enregistrer`);
       if (!ok) return Promise.resolve(false);
     }
     return addMovementConfirmed(payload);
@@ -3408,7 +3437,7 @@ export default function App() {
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
     { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
     { id: "engins", label: "Saisie par engins", icon: Truck, show: !perms.isTotalEnergiesOnly && sites.some((s) => s.enginsEnabled && s.active !== false && (!(profile?.assignedSiteIds || []).length || (profile?.assignedSiteIds || []).includes(s.id))) },
-    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted },
+    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted || perms.canInventaireOfficiel },
     { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: !perms.isTotalEnergiesOnly },
     // « Documents & suivis » : mêmes droits que les anciens onglets de Rapports.
@@ -3727,7 +3756,7 @@ export default function App() {
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "vcf" && <VcfView />}
           {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
@@ -6493,9 +6522,16 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, movements, truckAssignments, stockOf, stockOf15, addInventaire, addMovement, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
+function InventairesView({ sites, inventaires, movements, truckAssignments, stockOf, stockOf15, addInventaire, addMovement, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks, assignedSiteIds }) {
+  // Un compte rattaché à des sites (ex. un opérateur) ne voit et ne manipule que les inventaires
+  // de SES sites — rapides comme officiels (inopiné / mensuel), donc aussi leurs signatures.
+  const isScoped = !!(assignedSiteIds && assignedSiteIds.length > 0);
+  const scopedSites = scopeSitesByAssignment(sites, assignedSiteIds);
+  const scopedIds = new Set(scopedSites.map((s) => s.id));
+  const scopedInventaires = isScoped ? inventaires.filter((i) => scopedIds.has(i.siteId)) : inventaires;
+  const scopedInventairesOfficiels = isScoped ? inventairesOfficiels.filter((i) => scopedIds.has(i.siteId)) : inventairesOfficiels;
   const [mainTab, setMainTab] = useState(isTotalEnergiesOnly ? "officiel" : "rapide");
-  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+  const [siteId, setSiteId] = useState(scopedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [productId, setProductId] = useState("gasoil");
   const [stockPhysique, setStockPhysique] = useState("");
@@ -6580,17 +6616,22 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
     setStockPhysique(""); setCommentaire(""); setTempC(""); setDensite("");
   };
 
-  const list = inventaires.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const list = scopedInventaires.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
 
   return (
     <div className="somip-fade">
+      {isScoped && (
+        <div className="somip-no-print" style={{ marginBottom: 12, fontSize: 12.5, color: C.sub }}>
+          Accès limité à : <strong style={{ color: C.ink }}>{scopedSites.map((s) => s.name).join(", ") || "—"}</strong>
+        </div>
+      )}
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         {!isTotalEnergiesOnly && <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("rapide")}><ClipboardList size={13} />Inventaire rapide</button>}
         <button className={`somip-tab ${mainTab === "officiel" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("officiel")}><Pencil size={13} />Inventaire officiel (inopiné / mensuel)</button>
       </div>
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
-      <InventaireRapidePrintPanel sites={sites} inventaires={inventaires} />
+      <InventaireRapidePrintPanel sites={scopedSites} inventaires={scopedInventaires} />
       )}
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
@@ -6601,7 +6642,7 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
           <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} color={C.blue} />Nouvel inventaire</h3>
           <Field label="Site">
             <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              {scopedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </Field>
           <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
@@ -6770,8 +6811,8 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><History size={15} color={C.blue} />Historique des inventaires</h3>
           <select className="somip-select" style={{ width: 200 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
-            <option value="all">Tous les sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <option value="all">{isScoped ? "Tous mes sites" : "Tous les sites"}</option>
+            {scopedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </div>
         <div style={{ overflowX: "auto" }}>
@@ -6819,7 +6860,7 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
       )}
 
       {mainTab === "officiel" && (
-        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
+        <InventaireOfficielTab sites={scopedSites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={scopedInventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
       )}
     </div>
   );
