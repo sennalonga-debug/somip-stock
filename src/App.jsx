@@ -283,6 +283,19 @@ function correctVolumeTo15({ volumeAmbiant, tempC, densiteObservee }) {
 function movementQty15(m) {
   return m.volumeCorrige15 !== undefined ? m.volumeCorrige15 : m.quantity;
 }
+// Colonnes à écrire quand on AJOUTE, CORRIGE ou EFFACE la température et la densité d'une réception.
+// Les deux valeurs présentes : on recalcule la correction à 15°C (densité à 15°C, VCF, volume corrigé).
+// Une seule des deux : on l'enregistre telle quelle — la valeur saisie n'est plus perdue —, mais sans
+// correction à 15°C, qui exige les deux. Aucune des deux : on efface tout (champs vidés volontairement).
+function tempDensiteUpdateRow(quantity, temperatureC, densiteObservee) {
+  const has = (v) => v !== "" && v !== null && v !== undefined && Number.isFinite(Number(v));
+  const hasTemp = has(temperatureC), hasDens = has(densiteObservee);
+  if (hasTemp && hasDens) {
+    const corr = correctVolumeTo15({ volumeAmbiant: quantity, tempC: Number(temperatureC), densiteObservee: Number(densiteObservee) });
+    return { temperature_c: Number(temperatureC), densite_observee: Number(densiteObservee), densite15: corr ? corr.densite15 : null, vcf: corr ? corr.vcf : null, volume_corrige15: corr ? corr.volume15 : null };
+  }
+  return { temperature_c: hasTemp ? Number(temperatureC) : null, densite_observee: hasDens ? Number(densiteObservee) : null, densite15: null, vcf: null, volume_corrige15: null };
+}
 
 /* ------------------------------------------------------------------ */
 /* Rapports — fonctions de calcul par période                          */
@@ -3302,20 +3315,7 @@ export default function App() {
   const editMovementTempDensite = ({ id, temperatureC, densiteObservee }) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
     if (!m) throw new Error("Mouvement introuvable.");
-    const hasTemp = temperatureC !== "" && temperatureC !== null && temperatureC !== undefined;
-    const hasDens = densiteObservee !== "" && densiteObservee !== null && densiteObservee !== undefined;
-    let row;
-    if (hasTemp && hasDens) {
-      const corr = correctVolumeTo15({ volumeAmbiant: m.quantity, tempC: Number(temperatureC), densiteObservee: Number(densiteObservee) });
-      row = {
-        temperature_c: Number(temperatureC), densite_observee: Number(densiteObservee),
-        densite15: corr ? corr.densite15 : null, vcf: corr ? corr.vcf : null, volume_corrige15: corr ? corr.volume15 : null,
-      };
-    } else {
-      // Effacement volontaire (champs vidés) : on retire aussi la correction à 15°C, qui n'a
-      // plus de sens sans les deux valeurs d'origine.
-      row = { temperature_c: null, densite_observee: null, densite15: null, vcf: null, volume_corrige15: null };
-    }
+    const row = tempDensiteUpdateRow(m.quantity, temperatureC, densiteObservee);
     const { data, error } = await supabase.from("movements").update(row).eq("id", id).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("Modification refusée par la base de données (droits insuffisants) — rien n'a été changé.");
@@ -3941,7 +3941,7 @@ export default function App() {
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "vcf" && <VcfView />}
-          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
+          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
@@ -7713,7 +7713,7 @@ function VcfView() {
 /* même contenu, les mêmes filtres et les mêmes exports partout.          */
 /* ------------------------------------------------------------------ */
 function renderReportTab(tab, ctx) {
-  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds } = ctx;
+  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite } = ctx;
   // Déjà filtré en amont (la page Rapports est ouverte à tous sauf les comptes TotalEnergies,
   // et "Documents & suivis" a son propre contrôle par page) — cette barrière ne doit donc pas
   // exclure en plus un compte Lecture seule sans site attribué, qui doit tout voir comme un
@@ -7727,7 +7727,7 @@ function renderReportTab(tab, ctx) {
     case "synthese_station_jour_15": return <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
-    case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
+    case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} canManage={canManage} editMovementTempDensite={editMovementTempDensite} /> : null;
     case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
@@ -9932,11 +9932,23 @@ function RetoursChargementsReport({ sites, movements, assignedSiteIds }) {
   );
 }
 
-function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
+function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, editMovementTempDensite }) {
   const [filterSite, setFilterSite] = useState("all");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [search, setSearch] = useState("");
+  // Ajout / correction de la température et de la densité d'un bon (Superviseur uniquement : même
+  // règle que dans la Saisie journalière, contrôlée aussi par la base de données).
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({ temperatureC: "", densiteObservee: "" });
+  const startEdit = (m) => {
+    setEditingId(m.id);
+    setForm({ temperatureC: m.temperatureC !== undefined && m.temperatureC !== null ? String(m.temperatureC) : "", densiteObservee: m.densiteObservee !== undefined && m.densiteObservee !== null ? String(m.densiteObservee) : "" });
+  };
+  const saveEdit = () => {
+    editMovementTempDensite({ id: editingId, temperatureC: form.temperatureC, densiteObservee: form.densiteObservee });
+    setEditingId(null);
+  };
   // Un bon de livraison concerne la réception de carburant d'un SITE ; les camions n'en ont pas
   // (leur « réception » est un simple chargement à une station), ils sont donc exclus ici.
   const fixedSiteIds = new Set(sites.filter((s) => !s.isMobile).map((s) => s.id));
@@ -9994,10 +10006,16 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température</th><th style={{ textAlign: "right" }}>Densité observée</th></tr></thead>
+            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température</th><th style={{ textAlign: "right" }}>Densité observée</th>{canManage && <th className="somip-no-print" />}</tr></thead>
             <tbody>
-              {rows.length === 0 && <EmptyRow colSpan={8} text="Aucune réception trouvée." />}
-              {rows.map((m) => (
+              {rows.length === 0 && <EmptyRow colSpan={canManage ? 9 : 8} text="Aucune réception trouvée." />}
+              {rows.map((m) => {
+                // Température et densité n'existent que pour le gasoil (pas pour les lubrifiants).
+                const editable = canManage && !!editMovementTempDensite && (m.product || "gasoil") === "gasoil";
+                const editing = editable && editingId === m.id;
+                const densNum = Number(form.densiteObservee);
+                const densOutOfRange = editing && form.densiteObservee !== "" && Number.isFinite(densNum) && (densNum < VCF_MIN_DENSITY || densNum > VCF_MAX_DENSITY);
+                return (
                 <tr key={m.id}>
                   <td className="somip-mono">{m.date}</td>
                   <td style={{ fontWeight: 600 }}>{sites.find((s) => s.id === m.siteId)?.name || m.siteId}</td>
@@ -10005,15 +10023,40 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
                   <td className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{m.ref || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+{fmt(m.quantity)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmtTemp(m.temperatureC)}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmtDens(m.densiteObservee)}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>
+                    {editing
+                      ? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 80, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="°C" value={form.temperatureC} onChange={(e) => setForm({ ...form, temperatureC: e.target.value })} />
+                      : fmtTemp(m.temperatureC)}
+                  </td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>
+                    {editing
+                      ? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 110, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="kg/m³" value={form.densiteObservee} onChange={(e) => setForm({ ...form, densiteObservee: e.target.value })} />
+                      : fmtDens(m.densiteObservee)}
+                    {densOutOfRange && <span className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600 }}>Hors plage ({VCF_MIN_DENSITY}–{VCF_MAX_DENSITY} kg/m³) : pas de correction à 15°C</span>}
+                  </td>
+                  {canManage && (
+                    <td className="somip-no-print" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      {editing && (
+                        <>
+                          <button onClick={saveEdit} style={{ border: "none", background: C.blue, color: "#fff", borderRadius: 5, padding: "4px 8px", fontSize: 11, cursor: "pointer", marginRight: 6 }}>OK</button>
+                          <button onClick={() => setEditingId(null)} style={{ border: "none", background: "none", color: C.sub, cursor: "pointer", fontSize: 11 }}>Annuler</button>
+                        </>
+                      )}
+                      {!editing && editable && (
+                        <button onClick={() => startEdit(m)} title="Ajouter ou corriger la température et la densité" style={{ border: "none", background: "none", cursor: "pointer", padding: 4, display: "inline-flex" }}>
+                          <Pencil size={13} color={C.blue} />
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : celles saisies avec la réception ; « — » si elles n'ont pas été renseignées.
+          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : celles saisies avec la réception ; « — » si elles n'ont pas été renseignées.{canManage && " Pour les ajouter ou les corriger (gasoil), utilise le crayon à droite de la ligne : la quantité à 15°C est recalculée."}
         </p>
       </div>
     </div>
