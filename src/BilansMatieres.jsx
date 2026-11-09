@@ -9,9 +9,9 @@
 // mois, le bilan du mois précédent, la densité de vente). Les réceptions et transferts viennent
 // des mouvements déjà chargés par l'application : aucune requête supplémentaire.
 // =====================================================================
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { supabase } from "./supabaseClient.js";
-import { receptionsDuMois, transfertsNetsDuMois, calculerBilan, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
+import { receptionsDuMois, transfertsNetsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
 
 const MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -32,7 +32,9 @@ const clsSigne = (n) => (n > 0 ? "sap-gain" : n < 0 ? "sap-loss" : "");
 // Message lisible pour une erreur Supabase (script SQL de l'étape 1 non exécuté, droits, réseau…).
 function erreurLisible(e) {
   const t = `${e?.message || ""} ${e?.code || ""}`;
-  if (/column .* does not exist|statut|stock_debut|42703/i.test(t)) return "La base n'est pas à jour : exécute le script supabase_bilan_sap_etape1.sql dans Supabase.";
+  // Uniquement les vraies erreurs « colonne ou table absente » : le mot « statut » seul apparaît aussi dans le message
+  // légitime de verrouillage (« Bilan verrouillé (statut : valide) … ») qui ne doit pas être pris pour une base obsolète.
+  if (/does not exist|42703|42P01|PGRST205|schema cache/i.test(t)) return "La base n'est pas à jour : exécute le script supabase_bilan_sap_etape1.sql dans Supabase.";
   if (/row-level security|permission denied|42501/i.test(t)) return "Droits insuffisants pour cette opération (site non attribué à ton compte ?).";
   if (/Failed to fetch|NetworkError|network/i.test(t)) return "Connexion impossible : vérifie ta connexion internet puis réessaie.";
   return e?.message || "Erreur inconnue.";
@@ -76,8 +78,173 @@ const STYLE = `
 .sap-status { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 5px 12px; background: #f2f4f5; border-top: 1px solid #d9dde0; font-size: 12px; color: #4b5057; }
 .sap-msg { font-weight: 600; }
 .sap-msg-ok { color: #107e3e; } .sap-msg-warn { color: #8a5a00; } .sap-msg-err { color: #bb0000; }
+.sap-gridwrap { max-height: 62vh; overflow: auto; border: 1px solid #cfd4d9; }
+.sap-grid { margin: 0; }
+.sap-grid thead th { position: sticky; top: 0; z-index: 2; }
+.sap-grid tfoot td { position: sticky; bottom: 0; z-index: 2; }
+.sap-grid td { padding: 0; }
+.sap-grid td.sap-d { padding: 3px 9px; white-space: nowrap; }
+.sap-cell { width: 100%; box-sizing: border-box; border: 1px solid transparent; background: #fff; padding: 4px 8px; font-size: 12.5px; text-align: right; font-family: inherit; font-variant-numeric: tabular-nums; }
+.sap-cell:focus { outline: 2px solid #0a6ed1; outline-offset: -2px; background: #fff; }
+.sap-cell:disabled { background: #f1f2f3; color: #5b6168; }
+.sap-cell-err { border-color: #bb0000; background: #fdeaea; }
+.sap-cell-warn { background: #fff7d1; }
+.sap-ro { background: #e9ebed !important; color: #4b5057; padding: 4px 9px !important; }
+.sap-mark { width: 26px; text-align: center; padding: 0 !important; }
+.sap-row-dirty td.sap-d { border-left: 3px solid #0a6ed1; }
 @media print { .sap-toolbar { display: none; } }
 `;
+
+
+// ---------------------------------------------------------------------
+// Grille des ventes journalières (une ligne par jour du mois, éditable comme une grille ALV)
+//   Saisie : volume (L ambiants) + température du jour. La densité de vente est fixe (grisée).
+//   Calculé : densité à 15 °C, coefficient, volume à 15 °C (même fonction que « Correction 15 °C »).
+//   Clavier : Tab / Entrée = cellule suivante ; flèches haut/bas = ligne précédente / suivante.
+//   Collage : Ctrl+V d'une plage copiée dans Excel (1 ou 2 colonnes : volume, température).
+//   Enregistrement : seules les lignes modifiées sont envoyées ; une ligne vidée est supprimée.
+// ---------------------------------------------------------------------
+const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userName, siteName, setMsg, onDirty, onStats, onSaved, appendAudit, flash }, ref) {
+  const jours = useMemo(() => joursDuMois(bilan.period_key), [bilan.period_key]);
+  const densite = num(bilan.densite_vente) || DENSITE_VENTE_DEFAUT;
+  const [vals, setVals] = useState({});   // jour -> { volume, temp } (texte saisi)
+  const [saved, setSaved] = useState({}); // jour -> { volume, temp } (valeurs enregistrées en base)
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const refs = useRef({});
+
+  useEffect(() => {
+    let off = false;
+    (async () => {
+      const r = await supabase.from("bilan_ventes").select("jour, volume_ambiant, temperature_c").eq("bilan_id", bilan.id).order("jour");
+      if (off) return;
+      if (r.error) { setMsg({ type: "err", text: erreurLisible(r.error) }); setLoading(false); return; }
+      const v = {}, s = {};
+      (r.data || []).forEach((l) => {
+        v[l.jour] = { volume: String(l.volume_ambiant), temp: l.temperature_c === null ? "" : String(l.temperature_c) };
+        s[l.jour] = { volume: Number(l.volume_ambiant), temp: l.temperature_c === null ? null : Number(l.temperature_c) };
+      });
+      setVals(v); setSaved(s); setLoading(false);
+    })();
+    return () => { off = true; };
+  }, [bilan.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const calc = useMemo(() => Object.fromEntries(jours.map((j) => [j, calculerVente(vals[j] || {}, densite)])), [jours, vals, densite]);
+  const totaux = useMemo(() => totauxVentes(jours.map((j) => calc[j])), [jours, calc]);
+  const modifiee = (j) => {
+    const c = calc[j], s = saved[j];
+    if (!c.saisi) return !!s;
+    if (!c.ok) return true;
+    return !s || s.volume !== c.volume || s.temp !== c.temp;
+  };
+  const nbModifiees = jours.filter(modifiee).length;
+  useEffect(() => { if (onDirty) onDirty(nbModifiees); }, [nbModifiees]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (onStats) onStats(totaux.joursSaisis); }, [totaux.joursSaisis]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const setCell = (j, champ, valeur) => setVals((p) => ({ ...p, [j]: { ...(p[j] || {}), [champ]: valeur } }));
+  const aller = (i, col) => { const el = refs.current[`${i}-${col}`]; if (el) { el.focus(); } };
+  const onKeyDown = (e, i, col) => {
+    if (e.key === "Enter") { e.preventDefault(); if (col === 0) aller(i, 1); else aller(i + 1, 0); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); aller(i + 1, col); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); aller(i - 1, col); }
+  };
+  const onPaste = (e, i, col) => {
+    const brut = (e.clipboardData && e.clipboardData.getData("text")) || "";
+    const texte = brut.replace(/\r/g, "").replace(/\n+$/, "");
+    if (!/[\n\t]/.test(texte)) return; // valeur simple : collage normal
+    e.preventDefault();
+    const lignes = texte.split("\n").map((l) => l.split("\t"));
+    const suivant = { ...vals }; let ignorees = 0, remplies = 0;
+    lignes.forEach((cols, k) => {
+      const idx = i + k;
+      if (idx >= jours.length) { ignorees += 1; return; }
+      cols.forEach((cell, d) => {
+        const c2 = col + d; if (c2 > 1) return;
+        suivant[jours[idx]] = { ...(suivant[jours[idx]] || {}), [c2 === 0 ? "volume" : "temp"]: cell.trim() };
+      });
+      remplies += 1;
+    });
+    setVals(suivant);
+    setMsg(ignorees ? { type: "warn", text: `${remplies} jour(s) collé(s) ; ${ignorees} ligne(s) ignorée(s) (au-delà de la fin du mois).` } : { type: "ok", text: `${remplies} jour(s) collé(s) depuis le presse-papiers. Pense à enregistrer.` });
+  };
+
+  const save = async () => {
+    if (!editable || saving) return;
+    const erreurs = jours.filter((j) => calc[j].saisi && !calc[j].ok);
+    if (erreurs.length) {
+      setMsg({ type: "err", text: `${erreurs.length} ligne(s) en erreur (${erreurs.slice(0, 3).map(fmtJour).join(", ")}${erreurs.length > 3 ? "…" : ""}) : enregistrement bloqué.` });
+      return;
+    }
+    const aSauver = jours.filter((j) => calc[j].saisi && calc[j].ok && (!saved[j] || saved[j].volume !== calc[j].volume || saved[j].temp !== calc[j].temp));
+    const aSupprimer = jours.filter((j) => !calc[j].saisi && saved[j]);
+    if (!aSauver.length && !aSupprimer.length) { setMsg({ type: "warn", text: "Aucune modification à enregistrer." }); return; }
+    setSaving(true);
+    try {
+      if (aSauver.length) {
+        const payload = aSauver.map((j) => ({ bilan_id: bilan.id, jour: j, volume_ambiant: calc[j].volume, temperature_c: calc[j].temp, densite_obs: calc[j].densiteObs, densite15: calc[j].densite15, vcf: calc[j].vcf, volume15: calc[j].volume15, updated_by: userName || null }));
+        const r = await supabase.from("bilan_ventes").upsert(payload, { onConflict: "bilan_id,jour" });
+        if (r.error) throw r.error;
+      }
+      if (aSupprimer.length) {
+        const r = await supabase.from("bilan_ventes").delete().eq("bilan_id", bilan.id).in("jour", aSupprimer);
+        if (r.error) throw r.error;
+      }
+      setSaved((p) => { const n = { ...p }; aSauver.forEach((j) => { n[j] = { volume: calc[j].volume, temp: calc[j].temp }; }); aSupprimer.forEach((j) => { delete n[j]; }); return n; });
+      // Totaux : recalculés par la base ; on relit uniquement les 4 champs du bilan (en-tête et synthèse à jour).
+      const h = await supabase.from("bilan_matieres").update({ modified_by: userName || null }).eq("id", bilan.id).select("ventes15, ventes_ambiant, modified_at, modified_by").single();
+      if (!h.error && h.data && onSaved) onSaved(h.data);
+      setMsg({ type: "ok", text: `Bilan enregistré (${aSauver.length} ligne(s) enregistrée(s)${aSupprimer.length ? `, ${aSupprimer.length} supprimée(s)` : ""}).` });
+      if (flash) flash("Bilan enregistré.");
+      if (appendAudit) appendAudit("Ventes du bilan matières enregistrées", `${siteName} — ${bilan.period_key} : ${aSauver.length} ligne(s), ${aSupprimer.length} suppression(s)`);
+    } catch (e) {
+      setMsg({ type: "err", text: erreurLisible(e) });
+    } finally { setSaving(false); }
+  };
+  useImperativeHandle(ref, () => ({ save }));
+
+  if (loading) return <p className="sap-muted" data-testid="grille-chargement">Chargement des ventes du mois…</p>;
+  return (
+    <div>
+      {!editable && <p className="sap-muted" style={{ margin: "0 0 8px" }} data-testid="grille-lecture">Bilan verrouillé : la grille est en lecture seule.</p>}
+      <div className="sap-gridwrap" data-testid="sap-grille">
+        <table className="sap-table sap-grid">
+          <thead><tr><th>Date</th><th className="sap-num">Volume vendu (L) *</th><th className="sap-num">Température (°C) *</th><th className="sap-num">Densité</th><th className="sap-num">Densité à 15 °C</th><th className="sap-num">Coefficient</th><th className="sap-num">Volume 15 °C (L)</th><th className="sap-mark"></th></tr></thead>
+          <tbody>
+            {jours.map((j, i) => {
+              const c = calc[j]; const err = c.saisi && !c.ok; const warn = c.ok && c.avertissement;
+              const jourSem = new Date(`${j}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "short" });
+              return (
+                <tr key={j} data-jour={j} className={modifiee(j) ? "sap-row-dirty" : ""}>
+                  <td className="sap-d">{fmtJour(j)} <span className="sap-muted">{jourSem}</span></td>
+                  {[["volume", 0, "Volume"], ["temp", 1, "Température"]].map(([champ, col, lib]) => (
+                    <td key={champ}>
+                      <input ref={(el) => { refs.current[`${i}-${col}`] = el; }} className={`sap-cell ${err ? "sap-cell-err" : warn && champ === "temp" ? "sap-cell-warn" : ""}`}
+                        value={vals[j]?.[champ] ?? ""} disabled={!editable} inputMode="decimal" aria-label={`${lib} ${j}`} data-testid={`${champ}-${j}`} title={err ? c.erreur : warn && champ === "temp" ? c.avertissement : undefined}
+                        onChange={(e) => setCell(j, champ, e.target.value)} onKeyDown={(e) => onKeyDown(e, i, col)} onPaste={(e) => onPaste(e, i, col)} onFocus={(e) => e.target.select()} />
+                    </td>
+                  ))}
+                  <td className="sap-num sap-ro" data-testid={`dens-${j}`}>{fmtL(densite)}</td>
+                  <td className="sap-num sap-ro" data-testid={`d15-${j}`}>{c.saisi && c.ok && c.densite15 !== null && c.densite15 !== undefined ? c.densite15.toLocaleString("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : ""}</td>
+                  <td className="sap-num sap-ro" data-testid={`vcf-${j}`}>{c.saisi && c.ok && c.vcf ? c.vcf.toFixed(4).replace(".", ",") : ""}</td>
+                  <td className="sap-num sap-ro" data-testid={`v15-${j}`}>{c.saisi && c.ok ? fmtL(c.volume15) : ""}</td>
+                  <td className="sap-mark" title={err ? c.erreur : warn ? c.avertissement : ""} data-testid={`mark-${j}`}>{err ? <span className="sap-msg-err">✖</span> : warn ? <span className="sap-msg-warn">⚠</span> : ""}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="sap-total">
+              <td className="sap-d" data-testid="grille-jours">Total ({totaux.joursSaisis} / {jours.length} jours)</td>
+              <td className="sap-num" data-testid="grille-total-ambiant">{fmtL(totaux.ambiant)}</td><td></td><td></td><td></td><td></td>
+              <td className="sap-num" data-testid="grille-total15">{fmtL(totaux.volume15)}</td><td></td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="sap-muted" style={{ fontSize: 11.5, margin: "8px 0 0" }}>Tab / Entrée : cellule suivante · ↑ ↓ : changer de ligne · Ctrl+V : coller une plage depuis Excel (volume ⇥ température) · densité de vente fixe : {fmtL(densite)} kg/m³.</p>
+    </div>
+  );
+});
 
 export default function BilansMatieresSap({ sites = [], movements = [], canManage = false, canEdit = false, assignedSiteIds = [], userName = "", appendAudit, flash }) {
   const selectableSites = useMemo(() => sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id))), [sites, assignedSiteIds]);
@@ -87,6 +254,11 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const [tab, setTab] = useState("synthese");
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null); // { type: "ok" | "warn" | "err", text }
+  const [ventesOuvert, setVentesOuvert] = useState(false); // la grille n'est chargée qu'à la première ouverture de l'onglet
+  const [nbModifiees, setNbModifiees] = useState(0);
+  const [joursSaisis, setJoursSaisis] = useState(0);
+  const gridRef = useRef(null);
+  const [paramVal, setParamVal] = useState("");
   const [bilan, setBilan] = useState(null);
   const [prec, setPrec] = useState(null);
   const siteId = sel.siteId || selectableSites[0]?.id || "";
@@ -127,7 +299,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           row = again.data;
         } else if (ins.error) throw ins.error; else { row = ins.data; cree = true; }
       }
-      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan");
+      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifiees(0); setJoursSaisis(0);
       if (cree) {
         if (appendAudit) appendAudit("Bilan matières créé", `${siteName} — ${MOIS[sel.month - 1]} ${sel.year}`);
         if (flash) flash("Bilan créé en brouillon.");
@@ -139,7 +311,25 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       setMsg({ type: "err", text: erreurLisible(e) });
     } finally { setLoading(false); }
   };
-  const retour = () => { setScreen("select"); setBilan(null); setPrec(null); setMsg(null); };
+  const retour = () => {
+    if (nbModifiees > 0 && typeof window !== "undefined" && !window.confirm("Des modifications ne sont pas enregistrées. Quitter quand même ?")) return;
+    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVentesOuvert(false); setNbModifiees(0);
+  };
+  // Paramètre « densité de vente » (Superviseur) : chargé à l'ouverture de l'écran de sélection.
+  useEffect(() => {
+    if (!canManage || screen !== "select" || paramVal !== "") return; // chargé une seule fois par session
+    let off = false;
+    supabase.from("bilan_parametres").select("valeur").eq("cle", "densite_vente").maybeSingle().then((r) => { if (!off && !r.error) setParamVal(r.data ? String(r.data.valeur) : String(DENSITE_VENTE_DEFAUT)); });
+    return () => { off = true; };
+  }, [canManage, screen]);
+  const enregistrerParam = async () => {
+    const v = Number(String(paramVal).replace(",", "."));
+    if (!Number.isFinite(v) || v < 653 || v > 1075) { setMsg({ type: "err", text: "Densité de vente invalide (entre 653 et 1075 kg/m³)." }); return; }
+    const r = await supabase.from("bilan_parametres").upsert({ cle: "densite_vente", valeur: v, updated_by: userName || null }, { onConflict: "cle" });
+    if (r.error) { setMsg({ type: "err", text: erreurLisible(r.error) }); return; }
+    setMsg({ type: "ok", text: `Densité de vente enregistrée : ${v} kg/m³. Elle s'applique aux bilans créés à partir de maintenant.` });
+    if (appendAudit) appendAudit("Paramètre bilan matières modifié", `Densité de vente : ${v} kg/m³`);
+  };
 
   // ---------------- Calculs de la synthèse (tout à 15 °C) ----------------
   const hist = bilan?.statut === "historique";
@@ -157,7 +347,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     syn = { stockDebut, stockDebutPropose: stockDebutSaisi === null && precFin !== null, stockFin, receptions, ventes, transferts, calc, complet };
   }
   const lignesSynthese = syn ? 8 : 0;
-  const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : 0;
+  const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : 0;
+  const editable = bilan?.statut === "brouillon" && canEdit;
   const st = bilan ? STATUTS[bilan.statut] || STATUTS.historique : null;
   const bientot = "Disponible aux étapes suivantes";
 
@@ -187,6 +378,16 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
             Si le bilan existe déjà, il s'ouvre ; sinon il est créé en statut Brouillon{canEdit ? "" : " (création réservée aux comptes autorisés)"}.
           </p>
         </div>
+        {canManage && (
+          <div className="sap-form" style={{ marginTop: 4 }} data-testid="sap-param">
+            <div className="sap-row"><label className="sap-label" htmlFor="sap-densite">Densité de vente</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input id="sap-densite" className="sap-input" inputMode="decimal" value={paramVal} onChange={(e) => setParamVal(e.target.value)} />
+                <button className="sap-btn" onClick={enregistrerParam}>Modifier</button>
+              </div></div>
+            <p className="sap-muted" style={{ margin: 0, fontSize: 12 }}>kg/m³ à l'ambiance, identique pour toutes les ventes. Paramètre réservé au Superviseur ; la valeur est figée dans chaque bilan à sa création.</p>
+          </div>
+        )}
         <div className="sap-status">
           <span className={msg ? `sap-msg sap-msg-${msg.type}` : "sap-muted"} role="status" data-testid="sap-msg">
             {msg ? `${{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]} ${msg.text}` : "Prêt."}
@@ -212,7 +413,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       <div className="sap-shell"><span>Bilan matières — {site?.name || bilan.site_id} — {periodLabel}</span><span className={`sap-badge ${st.cls}`} data-testid="sap-statut">{st.label}</span></div>
       <div className="sap-toolbar">
         <button className="sap-btn" onClick={retour} title="Retour à la sélection">◀ Retour</button>
-        {["Enregistrer", "Vérifier", "Valider", "Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
+        <button className="sap-btn" onClick={() => gridRef.current && gridRef.current.save()} disabled={!(editable && ventesOuvert)} title={editable ? (ventesOuvert ? "Enregistrer les ventes modifiées" : "Ouvre l'onglet Ventes journalières") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
+        {["Vérifier", "Valider", "Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
       </div>
       <div className="sap-header" data-testid="sap-entete">
         <div className="sap-hrow"><b>Site</b><span>{site?.name || bilan.site_id}</span></div>
@@ -225,7 +427,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       {hist && <div className="sap-banner" data-testid="sap-historique">Bilan historique (saisi avec l'ancien module) : affiché en lecture seule, avec les valeurs enregistrées.</div>}
       <div className="sap-tabs" role="tablist">
         {[["synthese", "Synthèse"], ["ventes", "Ventes journalières"], ["receptions", "Réceptions"], ["stocks", "Stocks début / fin"]].map(([id, label]) => (
-          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => setTab(id)}>{label}</button>
+          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); }}>{label}</button>
         ))}
       </div>
       <div className="sap-body">
@@ -268,8 +470,15 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
             )}
           </div>
         )}
-        {(tab === "ventes" || tab === "stocks") && (
-          <p className="sap-muted" data-testid="sap-bientot">{tab === "ventes" ? "La grille des ventes journalières (une ligne par jour, saisie au clavier, collage depuis Excel)" : "La saisie des stocks de début et de fin de mois"} sera disponible à l'étape suivante du déploiement.</p>
+        {ventesOuvert && !hist && (
+          <div style={{ display: tab === "ventes" ? "block" : "none" }}>
+            <VentesGrille ref={gridRef} bilan={bilan} editable={editable} userName={userName} siteName={site?.name || bilan.site_id} setMsg={setMsg} onDirty={setNbModifiees} onStats={setJoursSaisis}
+              onSaved={(h) => setBilan((b) => ({ ...b, ...h }))} appendAudit={appendAudit} flash={flash} />
+          </div>
+        )}
+        {tab === "ventes" && hist && <p className="sap-muted" data-testid="sap-ventes-hist">Bilan historique : les ventes ont été saisies en un total mensuel avec l'ancien module (pas de détail journalier).</p>}
+        {tab === "stocks" && (
+          <p className="sap-muted" data-testid="sap-bientot">La saisie des stocks de début et de fin de mois sera disponible à l'étape suivante du déploiement.</p>
         )}
       </div>
       <div className="sap-status">
