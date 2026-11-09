@@ -239,6 +239,7 @@ const CONFORMITE_META = {
 
 /* ------------------------------------------------------------------ */
 /* Correction de volume à 15°C — ASTM D1250 / API MPMS Chapitre 11.1   */
+/* (+ convention GESTOCK pour la plage du gasoil : voir gestockVcf)     */
 /* Table 53B (densité observée -> densité à 15°C) et Table 54B         */
 /* (volume -> volume à 15°C), "produits généralisés", plage 653–1075   */
 /* kg/m³. Formule officielle : VCF = e^(-ALPHA·ΔT·(1+0.8·ALPHA·ΔT))    */
@@ -247,10 +248,12 @@ const CONFORMITE_META = {
 const VCF_MIN_DENSITY = 653;
 const VCF_MAX_DENSITY = 1075;
 
+// Seuils de zone de la norme (ASTM D1250 / API MPMS 11.1) : 770,5 / 787,5 / 838,5 kg/m³ de densité à 15 °C.
+// (Corrigés : ils étaient à 770 / 778 / 839, ce qui faussait la formule pour les produits légers de 778 à 787,5.)
 function vcfAlpha(den15) {
-  if (den15 < 770) return (346.42278 + 0.43884 * den15) / (den15 * den15);
-  if (den15 < 778) return -0.0033612 + 2680.32 / (den15 * den15); // zone de transition
-  if (den15 < 839) return 594.5418 / (den15 * den15);
+  if (den15 < 770.5) return (346.42278 + 0.43884 * den15) / (den15 * den15);
+  if (den15 < 787.5) return -0.0033612 + 2680.32 / (den15 * den15); // zone de transition
+  if (den15 < 838.5) return 594.5418 / (den15 * den15);
   return (186.9696 + 0.48618 * den15) / (den15 * den15);
 }
 function vcfFactor(den15, tempC) {
@@ -268,14 +271,71 @@ function densityAt15FromObserved(densiteObservee, tempC) {
   }
   return d15;
 }
+// ---- Convention GESTOCK pour le coefficient de correction (VCF) ----
+// GESTOCK calcule le volume à 15 °C avec une macro `vcf(densité, température)` qui :
+//   1. arrondit la densité à l'unité (arrondi VBA : à l'entier pair en cas d'égalité, 830,5 -> 830) ;
+//   2. arrondit la température au quart de degré (seuils 0,149 / 0,399 / 0,649 / 0,899) ;
+//   3. lit le coefficient dans une table à 4 décimales (feuille cachée « TABLE »).
+// La formule continue donne des coefficients qui diffèrent d'un dix-millième (≈ 2 L pour 20 000 L) : on reprend donc la table
+// pour la plage utile du gasoil (densité 788-870 kg/m³, 15 à 45 °C). Hors plage, la formule continue s'applique
+// (GESTOCK, lui, renverrait 0). Une case erronée de la table GESTOCK a été corrigée à la construction : 15 °C / densité 869
+// (GESTOCK : 0,9764 ; valeur correcte : 1,0000). Coefficient = 1 - n/10000 ; table stockée par différences successives.
+const GESTOCK_VCF_DENS_MIN = 788, GESTOCK_VCF_DENS_MAX = 870, GESTOCK_VCF_TEMP_MIN = 15, GESTOCK_VCF_TEMP_MAX = 45;
+const GESTOCK_VCF_COLS = 83, GESTOCK_VCF_ROWS = 121;
+const GESTOCK_VCF_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", GESTOCK_VCF_OFFSET = 3;
+const GESTOCK_VCF_FIRST = [0, 2, 5, 7, 10, 12, 14, 17, 19, 21, 24, 26, 29, 31, 33, 36, 38, 40, 43, 45, 48, 50, 52, 55, 57, 59, 62, 64, 66, 69, 71, 73, 76, 78, 80, 83, 85, 87, 90, 92, 94, 97, 99, 101, 104, 106, 106, 110, 113, 115, 117, 120, 122, 124, 126, 129, 131, 133, 136, 138, 140, 143, 145, 147, 149, 152, 154, 156, 158, 161, 163, 165, 168, 170, 172, 174, 177, 179, 181, 183, 186, 188, 190, 192, 195, 197, 199, 201, 204, 206, 208, 210, 213, 215, 217, 219, 221, 224, 226, 228, 230, 232, 235, 237, 239, 241, 244, 246, 248, 250, 252, 255, 257, 259, 261, 263, 265, 268, 270, 272, 274];
+const GESTOCK_VCF_DELTAS = "3333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333233333333333333333333333333333333331533333333333333333333333333333333153333333333333333333333333332333333333333333333333333333333333333333333332333333333333333333333333333333333333333333332333333333333333333333333333333333333333333333333233333333333333333333333333333333333333233333333333333333333333333333333333333333333333333323333333333333333333333333333333333323333333333333333333333333323333333333333333333333333233333333333333333333333333333332333333333333333333333333333333323333333333333315333332333333153333333333333333333333233333333333333333333333333333333332333333333315333333323333333333333333333333333333233333333333333333332333333333153333323333333333333333333233333333333333333333333333233333333333333333333332333333333333333323333333333333333233333333333333333333333332333333333333233333333333332333333333333332333333333333333233333333333333333333333323333333333333332333333333333323333333333333233333333333333233333333333333333333333233333333333333333323333333333332333333333333233333333333333233333333333333333333332333333333323333333333233333333333233333333333323333333333333233333333333333333333233333333333332333333333323333333333233333333333233333333333333233333333333333333332333333333333333323333333332333333333323333333333231533333333333233333333333333333233333333323333333323333333333233333333323333333333233333333333332333333333333333332333333333332333333332333333333233333333233333333323333333333333323333333333333333233333323333333233333333233333333233333333233333333323333333333333233333333333333323333333323333333233333333233333333233333333233333333233333333333333233333333333333233333333332333333323333333233333332333333332333333332333333333333323333333333333323333323333332333333323333333233333332333333323333333332333333333333233333333333314333333323333332333333323333332333333323333333233333333323333333333332333333333333233333333332333333233333323333332333333233333332333333333233333333333233333333333323333323333332333333233333233333323333333233333323333333332333333333332333333333332333333323333332333332333333233333233333332333333233333333323333333333323333333333323333333323333332333332333332333333233333323333332333333333233333333332333333333332333323333323333323333323333332333332333333233333233333333332333333333323333333333233333323333323333323333323333323333323333332333332333333333323333333332333333333323333333323333053333233333233333233333233333233333323333333332333333333233333333332333323333233333233333233332333332333332333332333333233333333323333333332333333333233333323333233332333332333323333323333323333323333332333333333233333333233333333323333333323333233332333323333323333233333233332333153323333333323333333323333333332333323333233332333323333233333233332333332333323333333233333333233333333233333333233333323332333323333233332333323333323333215333233333332333333323333333323333333305333333233332333323333233323333233333233332315323333333233333332333333332333333332333323332333323333233323333323332333323333233333233333332333333323333333233333333233333323332333233305333233332333323333233332333332333333323333333233333332333333323333333233323333233323333233323333233332333233333233333332333333323333333233333332333323332333233323333233323333233332333233332333332333333233333332333333323333333233333233323332333323332333233332333233332333233333233333332333333323333332333333323333332333233332333233323332333323332333233332333332333333233333332333333233333332333323323332333233323332333323332333323332333233333323333332333333233333323333333233333233323332332333233323333233323332333233332333332333333323333323333333233333323153532332333233323332333233323333233323332333233333323333332333332333333233333332333333323332332333233323332333233323332333233332333332333333233333323333332333333233332333233323323332333233323332333233233332333233333323333332333332333333233333323333323332332333233323332333233233323332333233332333332333333233333233333323333323333333323323323332333233233323332332333323332333323333323333323333323333332315333233332332333233323323332332333233233323332333233332333332333332333333233333233333323333323323332332332333233323323332333233233323333323333323333323333323333323333323333333233233323323323332332333233233323332333233332333332333332333332333332333332333333332332333233233233323323323332332315233323333233333233333233333233333233333233333323323323323323305332333233215323323332332333332333332333323333323333323333323333333233233233233233233323323323332332333233323333323333233333233332333332333332333333323323323332332332332333233233233323323332333332333323333323333233333233333233333233233233233233233233323323332332332332333323333233333233332333323333323333323333232332332332332332332332332333233233233323333233332333323333233333233332333332333323323323233233323323323323323323323332332333323333233332333323333323333233333233332233232332332332332332332333233233233233233332333323333233333233332333323333323333223323323323323323305323323323323323323332333323333233332333323333233332333332333323233233232332333233232332332332332333233233332333323333233332333323333233333233332332332332323323323323323323323323323323332333233332333323333233332333323333233332323233323233233233232332332332332332332333233332333323332333323333233332333323333233232332332323323323323323323323233233233323333233332333233332333323333233332333323332323323233233232332332332332332332332333231523333233332333233332333323333233332333232333232332323323323233233233233233233323333233323333233332333233332333323333232332323323233233232332332332332323323143332333323332333323332333323333233332333233323233233232332323323233233233053233233233323332333323332333323332333323333233323332332323323323233232332332323323323233323332333323332333323332333233332333323332332323323214332323323323323233232332332332333233332333233314333233323333233323333233233232332323323233232332323323233233233323332333233323333233323332333323332333323332323323232332332323323233232332323323332333233323333233323332333323332333323332333323232332323233232332332323323215232333233323332333323332333233323333233323332333232332323233232323323233232332323323323332333233323332333233323332333323332333233323323232323323323232332321523233232332333233323332333233323332333323332333233323333232323323232332323233233232323323233233323332333233323332333233323333233323332333323053232332323233232323323232332332332333233233323332333233323332333323332333233323232323233232332323233232323323233233233323323332333233332315233323332333233323332332323232323323232323323233232332323323332333233323323332333233323332333233332333323232332323232323323232323323232332333233233323332333233323332332333233332333233332323323232323233232323323232323323233323323332333233323323333233323332333233323332323232323233232323232332323323232323332333233233323332333233233323332333233323332232323233232323232332323232323323233233323323332332333233323332332333233323332333232323232323232323323232323305232323323323152333233233323332333233323323332333233323232323232332323232323232332323233232333233233323332332333233323323332333233323332232323232323232323232332323232323233323323332332333233233323332332333233323332333223232323232323214323323232323233232332332333233233323323332332153323323332333233322332323232323232323232323233232323233233323323323332332333233323323332332333233323323232323232323232323232323233232323323332332333233233323323332332333233323323332323223232323232323233232323232323232333233233233323323323332332333233323332332333232322332323232323232323232323232323323323323332332332333233233323323332332333233233232323232323232323232323232323232332332332333233233323323323332332333233233323323332323223232323232323232323232323233233233323323323323332332332333233323323332332333232323232323223232323232323233232332332332332332333233233233323323323332332333233052232323232323232323232323232323232333233233233323323323323332332332333233233323323232322323232323232323232323232323323323323323323332332332332333233233323323332332323232323232232323232323232323232332332332333233233233233233233323323323332332333323223232323223323223232323230523233053233233233323321523323332332332333233233233332323232232323232232323322323232332332332332332332332332332332333233233233323323332232323232322323232323223232323233233233233233233233233233233233323323323323332332230522323232232323232323232232323323323323323323323323323323332332332332332333233223232323223232322323232323232322332332332332332332332332332332332333233233323323323223232143232232323223232323223323323233233233233233233233233233323323323323323323223232232322323232323223052323232323323323323323323323323332332332332332332332332322323232232323223232322332232323233233233232332332332332332332332332332333233233232322323223322323223232322323232323323323323323323233233233233233233233233323323323322323223232232323223232322323232332332332323323321523323323323323323332332332332332232323223232232322323232322323323233233233233232332332332332332332332332333233232232232322323232232322323223232332332323323323323323233233233233233233233233233233232232232322322323232322323232233233232332332332323323332323323323323323323143323323223232232322322323223232323232323323323233233233232332332332332332332332332332332323223223223322322323223232322332332332332323323323323233233233233233233233233233322323223223223232232323223232233323233232332332332323323323323323323323323323323332232233223223223232232322323232332323323323233233232332332332332332323323323323332232232232322323223052232232323233232332332332323323323233233233233232332332332332232232232232232322323223232232323323323233232332332323323323323323323233233233233223223223232232232322322323232233232332323323323233233232332332323323323323323323323223223223223232232232322322323323233232332332323323323233233053232332332332332323";
+let gestockVcfTable = null;
+function gestockTable() {
+  if (gestockVcfTable) return gestockVcfTable;
+  const t = new Int16Array(GESTOCK_VCF_ROWS * GESTOCK_VCF_COLS);
+  for (let i = 0; i < GESTOCK_VCF_ROWS; i++) {
+    let n = GESTOCK_VCF_FIRST[i];
+    t[i * GESTOCK_VCF_COLS] = n;
+    for (let j = 1; j < GESTOCK_VCF_COLS; j++) {
+      n += GESTOCK_VCF_ALPHABET.indexOf(GESTOCK_VCF_DELTAS[i * (GESTOCK_VCF_COLS - 1) + j - 1]) - GESTOCK_VCF_OFFSET;
+      t[i * GESTOCK_VCF_COLS + j] = n;
+    }
+  }
+  gestockVcfTable = t;
+  return t;
+}
+// Arrondi de VBA (« banker's rounding ») : 0,5 va à l'entier pair.
+function vbaRound(x) {
+  const f = Math.floor(x), d = x - f;
+  if (d < 0.5) return f;
+  if (d > 0.5) return f + 1;
+  return f % 2 === 0 ? f : f + 1;
+}
+// Température au quart de degré, comme la macro GESTOCK.
+function gestockSnapTemp(t) {
+  const fx = Math.trunc(t), dec = t - fx;
+  if (dec >= 0 && dec <= 0.149) return fx;
+  if (dec > 0.149 && dec <= 0.399) return fx + 0.25;
+  if (dec > 0.399 && dec <= 0.649) return fx + 0.5;
+  if (dec > 0.649 && dec <= 0.899) return fx + 0.75;
+  return fx + 1;
+}
+// Coefficient GESTOCK pour une densité observée et une température, ou null hors de la plage couverte.
+function gestockVcf(densiteObservee, tempC) {
+  if (typeof densiteObservee !== "number" || typeof tempC !== "number" || isNaN(densiteObservee) || isNaN(tempC)) return null;
+  const d = vbaRound(densiteObservee), t = gestockSnapTemp(tempC);
+  if (d < GESTOCK_VCF_DENS_MIN || d > GESTOCK_VCF_DENS_MAX || t < GESTOCK_VCF_TEMP_MIN || t > GESTOCK_VCF_TEMP_MAX) return null;
+  const n = gestockTable()[Math.round((t - GESTOCK_VCF_TEMP_MIN) * 4) * GESTOCK_VCF_COLS + (d - GESTOCK_VCF_DENS_MIN)];
+  return { vcf: (10000 - n) / 10000, densiteRetenue: d, tempRetenue: t };
+}
 function correctVolumeTo15({ volumeAmbiant, tempC, densiteObservee }) {
   const vOk = typeof volumeAmbiant === "number" && volumeAmbiant > 0;
   const tOk = typeof tempC === "number" && !isNaN(tempC);
   const dOk = typeof densiteObservee === "number" && densiteObservee >= VCF_MIN_DENSITY && densiteObservee <= VCF_MAX_DENSITY;
   if (!vOk || !tOk || !dOk) return null;
   const densite15 = densityAt15FromObserved(densiteObservee, tempC);
-  const { vcf, alpha } = vcfFactor(densite15, tempC);
-  return { densite15, alpha, vcf, volume15: volumeAmbiant * vcf };
+  const calc = vcfFactor(densite15, tempC);
+  // Convention GESTOCK quand elle s'applique (densité 788-870 kg/m³, 15 à 45 °C) : mêmes volumes à 15 °C que dans GESTOCK.
+  // Sinon : formule continue ci-dessus.
+  const g = gestockVcf(densiteObservee, tempC);
+  const vcf = g ? g.vcf : calc.vcf;
+  return { densite15, alpha: calc.alpha, vcf, volume15: volumeAmbiant * vcf, methode: g ? "gestock" : "formule" };
 }
 // Quantité "officielle" d'un mouvement pour la comptabilisation à 15°C :
 // le volume corrigé s'il a été renseigné (température + densité), sinon le
@@ -1691,6 +1751,339 @@ async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
   await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_TousSites_${periodType}_${periodKey}.pptx` });
 }
 
+/* ------------------------------------------------------------------ */
+/* Présentation PowerPoint du Bilan matière — format SOMIP             */
+/* (chiffres calculés depuis les Bilans saisis + textes rédigés)       */
+/* ------------------------------------------------------------------ */
+const DECK = { NAVY: "0E3D60", BLUE: "0071BD", ORANGE: "F16B16", GREEN: "1E8A6E", PANEL: "EEF3F8", PANEL2: "F7FAFC", PEACH: "FCE9DC", GREY: "6B7580", INK: "1A2733", GRID: "EAEEF2", BORDER: "E2E8EE", PALE: "D6E4F0", MUTED: "9FB4C8", SOFT: "E4EDF5" };
+const DECK_PIE_COLORS = ["0071BD", "F16B16", "1E8A6E", "6FA8D8", "F4A15A", "8FC1AC", "0E3D60", "C9D6E3"];
+const AUTONOMIE_ALERTE_JOURS = 2;
+const NATURE_SUGGESTIONS = ["Instrumentale", "Camions laitiers", "Camions laitiers / instrumentale", "Incident matériel", "À investiguer", "Aucune cause identifiée"];
+
+// Libellés de période réutilisés dans les titres et sous-titres de la présentation.
+function bilanPeriodLabels(periodType, periodKey) {
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const elide = (name) => (/^[aeiouhâéèêîôû]/i.test(name) ? "d'" : "de ");
+  const monthParts = (ym) => { const [y, m] = String(ym).split("-").map(Number); return { name: FRENCH_MONTHS[(m || 1) - 1] || "", year: y }; };
+  if (periodType === "trimestriel") {
+    const [y, q] = String(periodKey).split("-Q");
+    const tag = `T${q} ${y}`;
+    return { upper: tag, short: tag, lower: tag, phrase: `trimestre ${tag}`, cumul: `cumul du trimestre ${tag}`, volumes: `du trimestre ${tag}` };
+  }
+  if (periodType === "decadaire") {
+    const [ym, d] = String(periodKey).split("-D");
+    const { name, year } = monthParts(ym);
+    const phrase = `${d === "1" ? "1ère" : `${d}e`} décade ${elide(name)}${name} ${year}`;
+    return { upper: phrase.toUpperCase(), short: cap(phrase), lower: phrase, phrase, cumul: `cumul de la ${phrase}`, volumes: `de la ${phrase}` };
+  }
+  const { name, year } = monthParts(periodKey);
+  const phrase = `mois ${elide(name)}${name} ${year}`;
+  return { upper: `${name.toUpperCase()} ${year}`, short: `${cap(name)} ${year}`, lower: `${name} ${year}`, phrase, cumul: `cumul du ${phrase}`, volumes: `du ${phrase}` };
+}
+
+const isRasText = (s) => /^\s*(r\.?a\.?s\.?|rien à signaler)\s*[.!]?\s*$/i.test(s || "");
+const deckNumOrNull = (v) => (v === "" || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+const deckSigned = (n) => `${n > 0 ? "+" : ""}${fmt(n)}`;
+const deckTaux = (t) => (t === null ? "N/D" : `${t > 0 ? "+" : ""}${t.toFixed(1)}`);
+// Coupe un texte trop long avec « … » (titres, sous-titres, pastilles) pour qu'il ne déborde jamais de sa zone.
+const deckClip = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1).trimEnd()}…` : String(s));
+const DECK_MAX_LIGNES = 12, DECK_MAX_RECOS = 8;
+
+// Modèle de la présentation : tout ce qui s'affiche, calculé une fois pour toutes (testable sans PowerPoint).
+// rows = lignes « Tous les sites » du module Bilans matières ; texts = textes rédigés enregistrés pour la période.
+function buildBilanDeckModel({ rows, periodType, periodKey, texts, seuil = 3, preparePar = "" }) {
+  const t = texts || {};
+  const autonomies = t.autonomies || {};
+  const natures = t.natures || {};
+  const labels = bilanPeriodLabels(periodType, periodKey);
+  const totalVentes = rows.reduce((a, r) => a + (r.ventes15 || 0), 0);
+  const sites = rows.map((r) => {
+    const ventes = r.ventes15 || 0;
+    const observationBrute = (r.commentaire || "").trim() || "RAS.";
+    const observation = deckClip(observationBrute, 600); // tableau des observations
+    const observationSynthese = deckClip(observationBrute, 330); // synthèse : le texte complet reste dans le tableau des observations
+    const natureSaisie = String(natures[r.site.id] || "").trim();
+    return {
+      id: r.site.id, name: r.site.name, theo: r.stockTheorique, phys: r.stockFin15, ecart: r.ecart,
+      taux: ventes > 0 ? (r.ecart / ventes) * 1000 : null,
+      autonomie: deckNumOrNull(autonomies[r.site.id]),
+      entrees: r.reception15 || 0, sorties: ventes, part: totalVentes > 0 ? (ventes / totalVentes) * 100 : 0,
+      observation, observationSynthese, nature: deckClip(natureSaisie || (isRasText(observation) ? "Aucune cause identifiée" : "À qualifier"), 50), natureSaisie: !!natureSaisie,
+      photos: r.photoUrls || [],
+    };
+  });
+  const sum = (k) => sites.reduce((a, s) => a + s[k], 0);
+  const alertes = sites.filter((s) => s.autonomie !== null && s.autonomie <= AUTONOMIE_ALERTE_JOURS).map((s) => ({ name: s.name, jours: s.autonomie }));
+  const sansAutonomie = sites.filter((s) => s.autonomie === null).map((s) => s.name);
+  const top2 = [...sites].sort((a, b) => b.part - a.part).slice(0, 2);
+  const justificatifs = (t.justificatifs || []).map((j) => {
+    const site = sites.find((s) => s.id === j.siteId);
+    if (!site) return null;
+    const lignes = (j.lignes || []).filter((l) => (l.libelle || "").trim() !== "" || deckNumOrNull(l.montant) !== null).map((l) => ({ libelle: (l.libelle || "").trim(), montant: deckNumOrNull(l.montant) || 0 })).slice(0, DECK_MAX_LIGNES);
+    const total = lignes.reduce((a, l) => a + l.montant, 0);
+    return {
+      siteName: site.name, title: deckClip(`Justificatif — ${site.name} : ${(j.sujet || "").trim() || "détail de l'écart"}`, 76), accroche: deckClip((j.accroche || "").trim(), 200),
+      brut: site.ecart, lignes, total, solde: site.ecart - total,
+      totalLibelle: deckClip((j.totalLibelle || "").trim() || "Total des imputations", 70), soldeLibelle: deckClip((j.soldeLibelle || "").trim() || "Solde résiduel", 70), texte: deckClip((j.texte || "").trim(), 900),
+    };
+  }).filter((j) => j && j.lignes.length > 0);
+  const photoSlides = sites.filter((s) => s.photos.length > 0).map((s) => ({ title: `Justificatif — ${s.name} : photos justificatives`, subtitle: isRasText(s.observation) ? "" : deckClip(s.observation, 200), urls: s.photos.slice(0, 6) }));
+  const conclusion = deckClip(String(t.conclusion || "").trim().replace(/^conclusion\s*:\s*/i, ""), 700);
+  return {
+    labels, seuil, preparePar: String(preparePar || t.preparePar || "").trim(), sites, nSites: sites.length,
+    // « Écart global » = stock physique cumulé − stock théorique cumulé : toujours cohérent avec les deux autres indicateurs.
+    kpis: { theo: sum("theo"), phys: sum("phys"), ecart: sum("phys") - sum("theo"), ventes: sum("sorties"), critiques: alertes.length, total: sites.length },
+    alertes, sansAutonomie, top2: top2.length === 2 ? { names: top2.map((s) => s.name), pct: Math.round(top2[0].part + top2[1].part) } : null,
+    justificatifs, photoSlides, conclusion, recommandations: (t.recommandations || []).map((r) => deckClip(String(r).trim(), 400)).filter((r) => r !== "").slice(0, DECK_MAX_RECOS),
+  };
+}
+
+// Brouillon de conclusion, uniquement factuel (chiffres de la période) : le Superviseur le complète avec les causes.
+function draftBilanConclusion(model) {
+  const { labels, kpis, sites, seuil, alertes } = model;
+  const tauxGlobal = kpis.ventes > 0 ? (kpis.ecart / kpis.ventes) * 1000 : null;
+  const parts = [`pour le ${labels.phrase}, l'écart global ressort à ${kpis.ecart > 0 ? "+" : ""}${fmt(kpis.ecart)} L${tauxGlobal !== null ? ` (${deckTaux(tauxGlobal)}‰ des ventes)` : ""} sur ${kpis.total} site(s).`];
+  const hors = sites.filter((s) => s.taux !== null && Math.abs(s.taux) > seuil);
+  parts.push(hors.length === 0 ? `Tous les sites restent dans le seuil de freinte de ${seuil}‰.` : `${hors.length} site(s) dépassent le seuil de freinte de ${seuil}‰ : ${hors.map((s) => `${s.name} (${deckTaux(s.taux)}‰)`).join(", ")}.`);
+  if (alertes.length > 0) parts.push(`Autonomie critique (≤ ${AUTONOMIE_ALERTE_JOURS} j) : ${alertes.map((a) => `${a.name} (${a.jours} j)`).join(", ")}.`);
+  return parts.join(" ");
+}
+
+// Nombre de lignes qu'occupera un texte dans une zone de `widthIn` pouces, au corps `fontPt` (estimation prudente, Calibri).
+function estimateTextLines(text, widthIn, fontPt) {
+  const perLine = Math.max(8, Math.floor((widthIn * 72) / (fontPt * 0.52)));
+  return String(text || "").split("\n").reduce((n, para) => n + Math.max(1, Math.ceil(para.length / perLine)), 0);
+}
+// Corps du titre selon sa longueur, pour qu'il tienne sur une ligne.
+const deckTitleSize = (text) => (text.length <= 46 ? 30 : text.length <= 56 ? 26 : text.length <= 68 ? 22 : 19);
+
+// Hauteurs des lignes de la synthèse : on réduit le corps du texte jusqu'à ce que tout tienne dans la page.
+function layoutSyntheseRows(sites, concl, availableH) {
+  const textW = 6.4;
+  const conclLines = (fontPt) => (concl ? estimateTextLines(`Conclusion : ${concl}`, 11.7, fontPt) : 0);
+  for (const fontPt of [9, 8.5, 8, 7.5, 7, 6.5]) {
+    const lineH = (fontPt * 1.25) / 72;
+    const heights = sites.map((s) => Math.max(0.4, estimateTextLines(s.observationSynthese, textW, fontPt) * lineH + 0.14));
+    const conclFont = Math.min(9.5, fontPt + 0.5);
+    const conclH = concl ? Math.max(0.7, conclLines(conclFont) * ((conclFont * 1.25) / 72) + 0.3) : 0;
+    const total = heights.reduce((a, h) => a + h + 0.06, 0) + (concl ? conclH + 0.14 : 0);
+    if (total <= availableH || fontPt === 6.5) return { fontPt, heights, conclFont, conclH, total };
+  }
+  return null;
+}
+
+async function exportBilanPresentationPptx(model) {
+  const pptx = new pptxgen();
+  pptx.layout = "LAYOUT_WIDE"; // 13,33 × 7,5 pouces
+  pptx.title = `Bilan matière — ${model.labels.short}`;
+  pptx.author = model.preparePar || "SOMIP";
+  pptx.company = "SOMIP";
+  const { labels, sites } = model;
+  const D = DECK;
+  const sign = (n) => (n < 0 ? D.ORANGE : n > 0 ? D.GREEN : D.INK);
+  let page = 1;
+  const logoRuns = [{ text: "SO", options: { color: D.BLUE } }, { text: "M", options: { color: D.ORANGE } }, { text: "IP", options: { color: D.BLUE } }];
+
+  const contentSlide = (title, subtitle) => {
+    const s = pptx.addSlide();
+    s.background = { color: "FFFFFF" };
+    page += 1;
+    s.addText(title, { x: 0.5, y: 0.35, w: 11.0, h: 0.6, fontFace: "Cambria", fontSize: deckTitleSize(title), bold: true, color: D.NAVY, margin: 0, valign: "middle", isTextBox: true });
+    if (subtitle) s.addText(subtitle, { x: 0.5, y: 0.95, w: 12.33, h: 0.35, fontFace: "Calibri", fontSize: subtitle.length > 150 ? 11 : 13, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+    s.addText(logoRuns, { x: 11.63, y: 0.35, w: 1.2, h: 0.4, fontFace: "Cambria", fontSize: 16, bold: true, align: "right", margin: 0, isTextBox: true });
+    s.addText(`SOMIP — Zone Sud-Est Gabon  |  Bilan matière ${labels.short}`, { x: 0.5, y: 7.08, w: 9, h: 0.3, fontFace: "Calibri", fontSize: 9, color: D.GREY, margin: 0, isTextBox: true });
+    s.addText(String(page), { x: 12.33, y: 7.08, w: 0.5, h: 0.3, fontFace: "Calibri", fontSize: 9, color: D.GREY, align: "right", margin: 0, isTextBox: true });
+    return s;
+  };
+  const chartBase = { catAxisLabelFontFace: "Calibri", valAxisLabelFontFace: "Calibri", catAxisLabelFontSize: 10, valAxisLabelFontSize: 10, catAxisLabelColor: D.GREY, valAxisLabelColor: D.GREY, valGridLine: { color: D.GRID, size: 0.75 }, catGridLine: { style: "none" }, dataLabelFontFace: "Calibri", dataLabelFontSize: 10, dataLabelColor: D.INK };
+  const names = sites.map((s) => s.name);
+
+  /* 1 — Titre */
+  const s1 = pptx.addSlide();
+  s1.background = { color: D.NAVY };
+  s1.addShape(pptx.ShapeType.ellipse, { x: 10.6, y: -1.8, w: 5.5, h: 5.5, fill: { color: D.BLUE, transparency: 55 }, line: { type: "none" } });
+  s1.addShape(pptx.ShapeType.ellipse, { x: 11.6, y: 4.8, w: 4.2, h: 4.2, fill: { color: "3A3A3A", transparency: 55 }, line: { type: "none" } });
+  s1.addShape(pptx.ShapeType.rect, { x: 0.6, y: 0.55, w: 2.1, h: 0.85, fill: { color: "FFFFFF" }, line: { type: "none" } });
+  s1.addText(logoRuns, { x: 0.6, y: 0.58, w: 2.1, h: 0.5, fontFace: "Cambria", fontSize: 24, bold: true, align: "center", margin: 0, isTextBox: true });
+  s1.addText("la technologie des fluides", { x: 0.6, y: 1.05, w: 2.1, h: 0.3, fontFace: "Calibri", fontSize: 7, color: D.GREY, align: "center", margin: 0, isTextBox: true });
+  s1.addText(`BILAN MATIÈRE — ${labels.upper}`, { x: 0.6, y: 2.9, w: 11.5, h: 0.9, fontFace: "Cambria", fontSize: labels.upper.length > 24 ? 32 : 38, bold: true, color: "FFFFFF", margin: 0, valign: "middle", isTextBox: true });
+  s1.addText("Suivi des stocks carburants — Sites externalisés Zone Sud-Est Gabon", { x: 0.6, y: 3.65, w: 9.5, h: 0.45, fontFace: "Calibri", fontSize: 16, color: D.PALE, margin: 0, isTextBox: true });
+  s1.addShape(pptx.ShapeType.line, { x: 0.62, y: 4.25, w: 0.8, h: 0, line: { color: D.ORANGE, width: 3 } });
+  s1.addText([{ text: `${sites.length} sites : `, options: { color: D.ORANGE, bold: true } }, { text: names.join(" · "), options: { color: D.PALE } }], { x: 0.6, y: 4.5, w: 11.5, h: 0.6, fontFace: "Calibri", fontSize: 12, margin: 0, valign: "top", isTextBox: true });
+  s1.addText(`Client TotalEnergies / Comilog${model.preparePar ? `  •  Préparé par ${model.preparePar}` : ""}`, { x: 0.6, y: 6.85, w: 11.5, h: 0.35, fontFace: "Calibri", fontSize: 11, color: D.MUTED, margin: 0, isTextBox: true });
+
+  /* 2 — Vue d'ensemble */
+  const s2 = contentSlide("Vue d'ensemble", `Situation consolidée à 15°C — ${labels.cumul} (${sites.length} sites)`);
+  const kpiCards = [
+    { v: `${fmt(model.kpis.theo)} L`, l: "Stock théorique cumulé", c: D.BLUE }, { v: `${fmt(model.kpis.phys)} L`, l: "Stock physique cumulé", c: D.BLUE },
+    { v: `${fmt(model.kpis.ecart)} L`, l: "Écart global", c: D.ORANGE }, { v: `${model.kpis.critiques} / ${model.kpis.total}`, l: `Sites en autonomie critique (≤${AUTONOMIE_ALERTE_JOURS} j)`, c: D.ORANGE },
+  ];
+  kpiCards.forEach((k, i) => {
+    const x = 0.5 + i * 3.1;
+    s2.addShape(pptx.ShapeType.rect, { x, y: 1.5, w: 2.85, h: 1.15, fill: { color: D.PANEL }, line: { type: "none" } });
+    s2.addText(k.v, { x: x + 0.15, y: 1.62, w: 2.55, h: 0.55, fontFace: "Cambria", fontSize: 26, bold: true, color: k.c, margin: 0, valign: "middle", isTextBox: true });
+    s2.addText(k.l, { x: x + 0.15, y: 2.18, w: 2.55, h: 0.4, fontFace: "Calibri", fontSize: 11, color: D.GREY, margin: 0, valign: "top", isTextBox: true });
+  });
+  // Le tableau occupe la place restante (jusqu'à y = 6,95) : lignes et corps resserrés si les sites sont nombreux.
+  const rowH = Math.min(0.42, (6.95 - 2.95) / (sites.length + 1));
+  const tFont = rowH >= 0.38 ? 11 : rowH >= 0.32 ? 10 : rowH >= 0.27 ? 9 : 8;
+  const th = (t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: D.BLUE }, align: "center", valign: "middle", fontSize: tFont } });
+  const td = (t, o = {}) => ({ text: t, options: { align: "center", valign: "middle", fontSize: tFont, color: D.INK, ...o } });
+  s2.addTable([
+    [th("Site"), th("Stock théo. 15°C (L)"), th("Stock phys. 15°C (L)"), th("Écart (L)"), th("Taux (‰)"), th("Autonomie")],
+    ...sites.map((s) => [
+      td(s.name, { align: "left", bold: true }), td(fmt(s.theo)), td(fmt(s.phys)),
+      td(deckSigned(s.ecart), { bold: true, color: sign(s.ecart) }), td(deckTaux(s.taux), { color: s.taux === null ? D.GREY : sign(s.taux) }),
+      td(s.autonomie === null ? "N/D" : `${fmt(s.autonomie)} j`, { color: s.autonomie === null ? D.GREY : D.INK }),
+    ]),
+  ], { x: 0.5, y: 2.95, w: 12.33, colW: [3.2, 2.28, 2.28, 1.79, 1.39, 1.39], rowH, fontFace: "Calibri", border: { type: "solid", pt: 0.75, color: D.BORDER },
+    // Marges en points : la bibliothèque les lit en pouces si la première vaut moins de 1 — d'où 2 et non 0.
+    margin: [2, 8, 2, 8] });
+
+  /* 3 — Écarts */
+  const s3 = contentSlide(`Écarts ${labels.short && model.labels.phrase.startsWith("mois") ? "mensuels " : ""}par site (15°C)`, "Stock physique − stock théorique, situation à 15°C (ASTM D1250 / API MPMS 11.1) — litres");
+  s3.addChart(pptx.ChartType.bar, [{ name: "Écart (L)", labels: names, values: sites.map((s) => Math.round(s.ecart)) }], {
+    ...chartBase, x: 0.5, y: 1.5, w: 12.33, h: 5.3, barDir: "col", barGapWidthPct: 150, chartColors: sites.map((s) => (s.ecart < 0 ? D.ORANGE : D.GREEN)),
+    showValue: true, dataLabelPosition: "outEnd", dataLabelFormatCode: "#,##0", valAxisLabelFormatCode: "#,##0", catAxisLabelPos: "low", showLegend: false,
+  });
+
+  /* 4 — Taux */
+  const s4 = contentSlide("Taux d'écart par site (15°C)", `En ‰ tel que reporté sur les fiches de stock mensuelles — seuil de freinte = ${model.seuil}‰`);
+  s4.addChart(pptx.ChartType.bar, [{ name: "Taux (‰)", labels: names, values: sites.map((s) => (s.taux === null ? 0 : Math.round(s.taux * 10) / 10)) }], {
+    ...chartBase, x: 0.5, y: 1.5, w: 12.33, h: 5.1, barDir: "col", barGapWidthPct: 150, chartColors: sites.map((s) => ((s.taux || 0) < 0 ? D.ORANGE : D.GREEN)),
+    showValue: true, dataLabelPosition: "outEnd", dataLabelFormatCode: "0.0", valAxisLabelFormatCode: "0", catAxisLabelPos: "low", showLegend: false,
+  });
+  s4.addText(`Seuil de freinte contractuel = ${model.seuil}‰ (en valeur absolue)`, { x: 0.5, y: 6.7, w: 12.33, h: 0.3, fontFace: "Calibri", fontSize: 9, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+
+  /* 5 — Autonomie */
+  const s5 = contentSlide("Autonomie des sites", "Nombre de jours de vente avant rupture, sur la base des stocks à 15°C");
+  const reversed = [...sites].reverse();
+  s5.addChart(pptx.ChartType.bar, [{ name: "Autonomie (j)", labels: reversed.map((s) => s.name), values: reversed.map((s) => (s.autonomie === null ? 0 : s.autonomie)) }], {
+    ...chartBase, x: 0.4, y: 1.5, w: 8.1, h: 5.3, barDir: "bar", barGapWidthPct: 150, chartColors: [D.BLUE], showValue: true, dataLabelPosition: "outEnd", dataLabelFormatCode: "0", valAxisLabelFormatCode: "0", showLegend: false,
+  });
+  s5.addShape(pptx.ShapeType.rect, { x: 8.85, y: 1.5, w: 3.98, h: 5.3, fill: { color: D.PEACH }, line: { color: D.ORANGE, width: 1 } });
+  s5.addText("SITES EN ALERTE", { x: 9.1, y: 1.75, w: 3.48, h: 0.4, fontFace: "Cambria", fontSize: 14, bold: true, color: D.NAVY, margin: 0, isTextBox: true });
+  s5.addText(`(autonomie ≤ ${AUTONOMIE_ALERTE_JOURS} jours)`, { x: 9.1, y: 2.12, w: 3.48, h: 0.3, fontFace: "Calibri", fontSize: 11, bold: true, color: D.NAVY, margin: 0, isTextBox: true });
+  if (model.alertes.length === 0) {
+    s5.addText("Aucun site en alerte ce mois-ci.", { x: 9.1, y: 2.65, w: 3.48, h: 0.4, fontFace: "Calibri", fontSize: 12, bold: true, color: D.GREEN, margin: 0, isTextBox: true });
+  } else {
+    if (model.alertes.length > 8) s5.addText(`… et ${model.alertes.length - 8} autre(s) site(s)`, { x: 9.1, y: 2.65 + 8 * 0.4, w: 3.48, h: 0.3, fontFace: "Calibri", fontSize: 11, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+    model.alertes.slice(0, 8).forEach((a, i) => s5.addText([{ text: `${a.name}  `, options: { color: D.INK } }, { text: `${fmt(a.jours)} j`, options: { color: D.ORANGE } }], { x: 9.1, y: 2.65 + i * 0.4, w: 3.48, h: 0.32, fontFace: "Calibri", fontSize: 12, bold: true, margin: 0, isTextBox: true }));
+  }
+  s5.addText("Ces sites nécessitent un suivi rapproché des livraisons pour éviter toute rupture d'approvisionnement.", { x: 9.1, y: 5.7, w: 3.48, h: 0.9, fontFace: "Calibri", fontSize: 10, italic: true, color: D.GREY, margin: 0, valign: "top", isTextBox: true });
+  if (model.sansAutonomie.length > 0) s5.addText(`${model.sansAutonomie.length <= 3 ? model.sansAutonomie.join(", ") : `${model.sansAutonomie.length} sites`} : autonomie non renseignée ce mois-ci (affichée à 0 sur le graphique).`, { x: 0.4, y: 6.85, w: 8.1, h: 0.3, fontFace: "Calibri", fontSize: 9, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+
+  /* 6 — Entrées vs sorties */
+  const s6 = contentSlide("Entrées vs sorties par site (15°C)", `Volumes cumulés ${labels.volumes}, situation à 15°C — litres`);
+  s6.addChart(pptx.ChartType.bar, [{ name: "Entrées (L)", labels: names, values: sites.map((s) => Math.round(s.entrees)) }, { name: "Sorties (L)", labels: names, values: sites.map((s) => Math.round(s.sorties)) }], {
+    ...chartBase, x: 0.5, y: 1.5, w: 12.33, h: 5.3, barDir: "col", barGapWidthPct: 40, chartColors: [D.BLUE, D.ORANGE], showValue: false, showLegend: true, legendPos: "b", legendFontSize: 11, legendFontFace: "Calibri", legendColor: D.INK, valAxisLabelFormatCode: "0",
+  });
+
+  /* 7 — Répartition */
+  const s7 = contentSlide("Répartition des volumes distribués (15°C)", "Part de chaque site dans le total des sorties du mois — litres à 15°C");
+  s7.addChart(pptx.ChartType.pie, [{ name: "Part", labels: names, values: sites.map((s) => Math.round(s.part * 10) / 10) }], {
+    x: 1.6, y: 1.4, w: 10.1, h: 5.3, chartColors: sites.map((_, i) => DECK_PIE_COLORS[i % DECK_PIE_COLORS.length]), showPercent: true, showValue: false, showLegend: true, legendPos: "r", legendFontSize: 11, legendFontFace: "Calibri", legendColor: D.INK,
+    dataLabelFormatCode: "0%", dataLabelColor: "FFFFFF", dataLabelFontSize: 10, dataLabelFontFace: "Calibri", dataBorder: { pt: 1, color: "FFFFFF" },
+  });
+  if (model.top2) s7.addText(`${model.top2.names[0]} et ${model.top2.names[1]} concentrent à eux seuls environ ${model.top2.pct}% des volumes distribués sur la zone.`, { x: 0.5, y: 6.75, w: 12.33, h: 0.3, fontFace: "Calibri", fontSize: 11, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+
+  /* 8 — Justificatifs (chiffrés, puis photos) */
+  for (const j of model.justificatifs) {
+    const sl = contentSlide(j.title, j.accroche);
+    const n = j.lignes.length;
+    const showTotal = n > 1; // avec une seule ligne, le total serait identique : on ne l'affiche pas
+    const nRows = n + (showTotal ? 1 : 0) + 1; // lignes + (total) + solde
+    const cy = 1.55, cx = 2.07, cw = 9.2, bottom = 6.9;
+    const textNeed = (f) => (j.texte ? Math.max(0.8, estimateTextLines(j.texte, 11.5, f) * ((f * 1.3) / 72) + 0.3) + 0.3 : 0);
+    // Carte et encadré orange doivent tenir ensemble : on resserre d'abord les lignes, puis le corps du texte.
+    const combos = [[0.4, 10], [0.34, 10], [0.3, 10], [0.4, 9], [0.3, 9], [0.27, 9], [0.24, 9], [0.24, 8.5]];
+    const [step, fontPt] = combos.find(([st, f]) => cy + 1.6 + st * nRows + textNeed(f) <= bottom) || combos[combos.length - 1];
+    const cardH = 1.6 + step * nRows;
+    const rowFont = step >= 0.34 ? 11 : step >= 0.27 ? 10 : 9;
+    sl.addShape(pptx.ShapeType.rect, { x: cx, y: cy, w: cw, h: cardH, fill: { color: D.PANEL }, line: { type: "none" } });
+    sl.addText(j.siteName.toUpperCase(), { x: cx + 0.3, y: cy + 0.2, w: cw - 0.6, h: 0.35, fontFace: "Cambria", fontSize: 13, bold: true, color: D.NAVY, margin: 0, isTextBox: true });
+    const line = (y, label, amount, color) => {
+      sl.addText(label, { x: cx + 0.3, y, w: cw - 2.6, h: Math.min(0.34, step - 0.02), fontFace: "Calibri", fontSize: rowFont, color: D.INK, margin: 0, valign: "middle", isTextBox: true });
+      sl.addText(`${deckSigned(amount)} L`, { x: cx + cw - 2.3, y, w: 2.0, h: Math.min(0.34, step - 0.02), fontFace: "Calibri", fontSize: rowFont, bold: true, color, align: "right", margin: 0, valign: "middle", isTextBox: true });
+    };
+    let y = cy + 0.65;
+    line(y, "Écart brut constaté (mois, 15°C)", j.brut, D.INK);
+    y += 0.45; sl.addShape(pptx.ShapeType.line, { x: cx + 0.3, y, w: cw - 0.6, h: 0, line: { color: "D5DDE5", width: 0.75 } });
+    y += 0.15; j.lignes.forEach((l) => { line(y, l.libelle, l.montant, sign(l.montant)); y += step; });
+    y += 0.05; sl.addShape(pptx.ShapeType.line, { x: cx + 0.3, y, w: cw - 0.6, h: 0, line: { color: "D5DDE5", width: 0.75 } });
+    y += 0.15;
+    if (showTotal) { line(y, j.totalLibelle, j.total, sign(j.total)); y += step; }
+    line(y, j.soldeLibelle, j.solde, sign(j.solde));
+    if (j.texte) {
+      const by = cy + cardH + 0.3, boxH = Math.min(bottom - by, textNeed(fontPt) - 0.3);
+      sl.addShape(pptx.ShapeType.rect, { x: 0.5, y: by, w: 12.33, h: boxH, fill: { color: D.PEACH }, line: { type: "none" } });
+      sl.addText(j.texte, { x: 0.8, y: by, w: 11.73, h: boxH, fontFace: "Calibri", fontSize: fontPt, italic: true, color: D.INK, margin: 0, valign: "middle", isTextBox: true });
+    }
+  }
+  for (const p of model.photoSlides) {
+    const sl = contentSlide(p.title, p.subtitle);
+    const cols = p.urls.length <= 2 ? p.urls.length : 3, rowsN = Math.ceil(p.urls.length / cols);
+    const gap = 0.2, h = Math.min(4.2, (5.3 - gap * (rowsN - 1)) / rowsN);
+    const w = Math.min((12.33 - gap * (cols - 1)) / cols, h * 1.6); // pas plus large qu'une photo ordinaire : évite un recadrage excessif
+    const x0 = 0.5 + (12.33 - (w * cols + gap * (cols - 1))) / 2;
+    p.urls.forEach((u, i) => {
+      const cx = x0 + (i % cols) * (w + gap), cy = 1.5 + Math.floor(i / cols) * (h + gap);
+      try { sl.addImage({ path: u, x: cx, y: cy, w, h, sizing: { type: "cover", w, h } }); } catch (e) { /* photo indisponible : on continue sans */ }
+    });
+  }
+
+  /* 9 — Observations par site */
+  const obsFont = [10, 9.5, 9, 8.5, 8, 7.5, 7].find((f) => sites.reduce((a, s) => a + Math.max(0.34, estimateTextLines(s.observation, 9.0, f) * ((f * 1.25) / 72) + 0.14), 0.34) <= 5.35) || 7;
+  const so = contentSlide("Observations complémentaires par site", `Justificatifs relevés dans le bilan matière de chaque site — ${labels.lower}`);
+  const oth = (t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: D.BLUE }, fontSize: 10, valign: "middle" } });
+  so.addTable([[oth("Site"), oth("Observation")], ...sites.map((s) => [
+    { text: s.name, options: { bold: true, color: D.INK, fontSize: obsFont + 0.5, valign: "middle" } },
+    { text: s.observation, options: { color: D.INK, fontSize: obsFont, valign: "middle" } },
+  ])], { x: 0.5, y: 1.5, w: 12.33, colW: [3.3, 9.03], fontFace: "Calibri", border: { type: "solid", pt: 0.75, color: D.BORDER }, margin: [3, 8, 3, 8], rowH: 0.34 });
+
+  /* 10 — Synthèse : nature des écarts */
+  const lay = layoutSyntheseRows(sites, model.conclusion, 6.95 - 1.42);
+  const ss = contentSlide("Synthèse — Nature des écarts constatés", "Causes techniques, logistiques ou en cours d'investigation, par site");
+  let yy = 1.42;
+  sites.forEach((s, i) => {
+    const h = lay.heights[i];
+    ss.addShape(pptx.ShapeType.rect, { x: 0.5, y: yy, w: 12.33, h, fill: { color: i % 2 === 0 ? D.PANEL2 : D.PANEL }, line: { type: "none" } });
+    ss.addText(s.name, { x: 0.7, y: yy, w: 2.9, h, fontFace: "Calibri", fontSize: 11, bold: true, color: D.NAVY, margin: 0, valign: "middle", isTextBox: true });
+    ss.addText(s.observationSynthese, { x: 3.7, y: yy, w: 6.6, h, fontFace: "Calibri", fontSize: lay.fontPt, color: D.INK, margin: 0, valign: "middle", isTextBox: true });
+    const pillY = yy + (h - 0.36) / 2;
+    ss.addShape(pptx.ShapeType.roundRect, { x: 10.45, y: pillY, w: 2.2, h: 0.36, rectRadius: 0.18, fill: { color: D.PEACH }, line: { type: "none" } });
+    ss.addText(s.nature, { x: 10.45, y: pillY, w: 2.2, h: 0.36, fontFace: "Calibri", fontSize: s.nature.length > 30 ? 7 : 8, bold: true, color: /^(Aucune cause|À qualifier)/.test(s.nature) ? D.GREY : D.ORANGE, align: "center", margin: 0, valign: "middle", isTextBox: true });
+    yy += h + 0.06;
+  });
+  if (model.conclusion) {
+    yy += 0.08;
+    ss.addShape(pptx.ShapeType.roundRect, { x: 0.5, y: yy, w: 12.33, h: lay.conclH, rectRadius: 0.08, fill: { color: "FFFFFF" }, line: { color: D.BLUE, width: 1 } });
+    ss.addText([{ text: "Conclusion : ", options: { bold: true } }, { text: model.conclusion, options: { bold: false } }], { x: 0.72, y: yy, w: 11.9, h: lay.conclH, fontFace: "Calibri", fontSize: lay.conclFont, color: D.NAVY, margin: 0, valign: "middle", isTextBox: true });
+  }
+
+  /* 11 — Recommandations */
+  if (model.recommandations.length > 0) {
+    const sr = pptx.addSlide();
+    sr.background = { color: D.NAVY };
+    sr.addShape(pptx.ShapeType.ellipse, { x: -1.6, y: 4.6, w: 5.2, h: 5.2, fill: { color: D.BLUE, transparency: 55 }, line: { type: "none" } });
+    sr.addText("Recommandations & prochaines étapes", { x: 0.6, y: 0.6, w: 11.5, h: 0.7, fontFace: "Cambria", fontSize: 32, bold: true, color: "FFFFFF", margin: 0, valign: "middle", isTextBox: true });
+    sr.addShape(pptx.ShapeType.line, { x: 0.62, y: 1.35, w: 0.8, h: 0, line: { color: D.ORANGE, width: 3 } });
+    const recos = model.recommandations.slice(0, 8), step = Math.min(1.0, 5.0 / recos.length);
+    const rFont = [13, 12, 11, 10].find((f) => recos.every((r) => estimateTextLines(r, 11.3, f) * ((f * 1.25) / 72) <= step - 0.1)) || 10;
+    recos.forEach((r, i) => {
+      const ry = 1.75 + i * step;
+      sr.addShape(pptx.ShapeType.ellipse, { x: 0.6, y: ry, w: 0.45, h: 0.45, fill: { color: D.ORANGE }, line: { type: "none" } });
+      sr.addText(String(i + 1), { x: 0.6, y: ry, w: 0.45, h: 0.45, fontFace: "Calibri", fontSize: 14, bold: true, color: "FFFFFF", align: "center", margin: 0, valign: "middle", isTextBox: true });
+      sr.addText(r, { x: 1.3, y: ry - 0.05, w: 11.3, h: step - 0.05, fontFace: "Calibri", fontSize: rFont, color: D.SOFT, margin: 0, valign: "top", isTextBox: true });
+    });
+    sr.addText("SOMIP — la technologie des fluides", { x: 0.6, y: 6.9, w: 5.0, h: 0.35, fontFace: "Calibri", fontSize: 10, italic: true, color: D.MUTED, margin: 0, isTextBox: true });
+  }
+
+  // Nom de fichier sans accent ni espace (« Août 2026 » -> « Aout_2026 ») : sûr sur tous les systèmes et dans les messageries.
+  const safeLabel = labels.short.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_");
+  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matiere_${safeLabel}.pptx` });
+}
+
 function ReportHeader({ title, period, showEditedDate = true }) {
   return (
     <>
@@ -1961,6 +2354,18 @@ const bilanToRow = (b) => ({
   transferts_ambiant: b.transfertsAmbiant ?? null, stock_fin_ambiant: b.stockFinAmbiant ?? null,
   transfert_site_id: b.transfertSiteId || null,
   commentaire: b.commentaire ?? null, photo_urls: b.photoUrls || [], created_by: b.createdBy ?? null,
+});
+
+// Textes rédigés de la présentation PowerPoint du bilan, par période (table réservée au Superviseur).
+const COLS_BILAN_PRESENTATIONS = "id, period_type, period_key, autonomies, natures, justificatifs, conclusion, recommandations, prepare_par, updated_at";
+const rowToBilanPresentation = (r) => ({
+  id: r.id, periodType: r.period_type, periodKey: r.period_key,
+  autonomies: r.autonomies || {}, natures: r.natures || {}, justificatifs: r.justificatifs || [],
+  conclusion: r.conclusion || "", recommandations: r.recommandations || [], preparePar: r.prepare_par || "", updatedAt: r.updated_at,
+});
+const bilanPresentationToRow = (p, userName) => ({
+  period_type: p.periodType, period_key: p.periodKey, autonomies: p.autonomies || {}, natures: p.natures || {}, justificatifs: p.justificatifs || [],
+  conclusion: p.conclusion || null, recommandations: p.recommandations || [], prepare_par: p.preparePar || null, updated_at: new Date().toISOString(), updated_by: userName || null,
 });
 
 const rowToInventaireOfficiel = (r) => ({
@@ -2495,6 +2900,9 @@ export default function App() {
   const [productStocks, setProductStocks] = useState([]);
   const [siteMeters, setSiteMeters] = useState([]);
   const [bilans, setBilans] = useState([]);
+  // Textes de la présentation du bilan : chargés à la demande (Superviseur, page Bilans matières), table à part.
+  const [bilanPresentations, setBilanPresentations] = useState([]);
+  const [bilanPresStatus, setBilanPresStatus] = useState("idle"); // idle | loading | ready | unavailable | error
   const [inventairesOfficiels, setInventairesOfficiels] = useState([]);
   const [siteTanks, setSiteTanks] = useState([]);
   const [siteDepotageMeters, setSiteDepotageMeters] = useState([]);
@@ -2631,6 +3039,16 @@ export default function App() {
   const currentUserName = profile?.name || session?.user?.email || "Utilisateur";
   const currentRole = profile?.role || "lecture";
   const perms = permsFor(currentRole);
+  useEffect(() => {
+    if (view !== "doc_bilans" || !perms.canManage || bilanPresStatus !== "idle") return;
+    setBilanPresStatus("loading");
+    fetchTable("bilan_presentations", rowToBilanPresentation, null, false, COLS_BILAN_PRESENTATIONS)
+      .then((rows) => { setBilanPresentations(rows); setBilanPresStatus("ready"); })
+      // « unavailable » = table pas encore créée (script SQL non exécuté) ; « error » = chargement impossible (connexion…).
+      // Dans les deux cas la présentation reste générable, mais l'enregistrement est interdit : un panneau resté vide par
+      // erreur pourrait sinon écraser des textes déjà enregistrés.
+      .catch((e) => setBilanPresStatus(/bilan_presentations|schema cache|does not exist|42P01|PGRST205/i.test(`${e?.message || ""} ${e?.code || ""}`) ? "unavailable" : "error"));
+  }, [view, perms.canManage, bilanPresStatus]);
   const isAdmin = currentRole === "superviseur" && !!profile?.isAdmin;
   // Un opérateur ou chauffeur avec un/des site(s) attribué(s) est limité à une vue simplifiée,
   // centrée sur son propre site — le Superviseur et les comptes sans site attribué gardent
@@ -3092,6 +3510,19 @@ export default function App() {
     });
     appendAudit("Bilan Matières", `${sites.find((s) => s.id === siteId)?.name || siteId} — ${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
     flash("Bilan Matières enregistré.");
+  });
+  // Enregistre (ou met à jour) les textes de la présentation d'une période. Renvoie true/false (withSync).
+  const saveBilanPresentation = ({ periodType, periodKey, patch }) => withSync(async () => {
+    const existing = bilanPresentations.find((p) => p.periodType === periodType && p.periodKey === periodKey);
+    const merged = { autonomies: {}, natures: {}, justificatifs: [], conclusion: "", recommandations: [], preparePar: "", ...(existing || {}), ...patch, periodType, periodKey };
+    const { data, error } = await supabase.from("bilan_presentations").upsert(bilanPresentationToRow(merged, currentUserName), { onConflict: "period_type,period_key" }).select().maybeSingle();
+    if (error) throw error;
+    if (!data) throw new Error("Les textes de la présentation n'ont pas pu être confirmés par le serveur — réessaie.");
+    const saved = rowToBilanPresentation(data);
+    setBilanPresentations((prev) => (prev.some((p) => p.periodType === periodType && p.periodKey === periodKey) ? prev.map((p) => (p.periodType === periodType && p.periodKey === periodKey ? saved : p)) : [...prev, saved]));
+    setBilanPresStatus("ready");
+    appendAudit("Présentation du bilan matière", `${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`);
+    flash("Textes de la présentation enregistrés.");
   });
   const deleteBilan = (bilan) => withSync(async () => {
     const { data, error } = await supabase.from("bilan_matieres").delete().eq("id", bilan.id).select();
@@ -3941,7 +4372,7 @@ export default function App() {
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "vcf" && <VcfView />}
-          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} />}
+          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={settings.objectifFreinte} presenterName={currentUserName} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
@@ -7649,6 +8080,7 @@ function VcfView() {
         <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Thermometer size={15} color={C.blue} />Volume ambiant → Température → Densité → Volume à 15°C</h3>
         <p style={{ margin: "0 0 16px", fontSize: 12.5, color: C.sub }}>
           Formule ASTM D1250 / API MPMS Chapitre 11.1 (Tables 53B/54B, produits pétroliers généralisés) — plage valide {VCF_MIN_DENSITY} à {VCF_MAX_DENSITY} kg/m³.
+          {" "}Pour une densité de {GESTOCK_VCF_DENS_MIN} à {GESTOCK_VCF_DENS_MAX} kg/m³ et une température de {GESTOCK_VCF_TEMP_MIN} à {GESTOCK_VCF_TEMP_MAX} °C, le coefficient suit la convention GESTOCK (densité arrondie à l'unité, température au quart de degré, 4 décimales) : mêmes volumes à 15 °C que dans GESTOCK.
         </p>
         <Field label="Volume à température ambiante (L)">
           <input type="number" className="somip-input" value={volumeAmbiant} onChange={(e) => setVolumeAmbiant(e.target.value)} placeholder="Ex : 10000" />
@@ -7713,7 +8145,7 @@ function VcfView() {
 /* même contenu, les mêmes filtres et les mêmes exports partout.          */
 /* ------------------------------------------------------------------ */
 function renderReportTab(tab, ctx) {
-  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite } = ctx;
+  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, presenterName } = ctx;
   // Déjà filtré en amont (la page Rapports est ouverte à tous sauf les comptes TotalEnergies,
   // et "Documents & suivis" a son propre contrôle par page) — cette barrière ne doit donc pas
   // exclure en plus un compte Lecture seule sans site attribué, qui doit tout voir comme un
@@ -7728,7 +8160,7 @@ function renderReportTab(tab, ctx) {
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} canManage={canManage} editMovementTempDensite={editMovementTempDensite} /> : null;
-    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} /> : null;
+    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} presenterName={presenterName} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
     case "retours_chargements": return canSee ? <RetoursChargementsReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
@@ -9267,7 +9699,146 @@ function BilanCell({ ambiant, v15, color, bold, sign }) {
   );
 }
 
-function BilanMatieresView({ sites, bilans, movements, saveBilan, deleteBilan, canManage, assignedSiteIds }) {
+/* ---- Présentation PowerPoint du bilan : textes à saisir + génération (Superviseur) ---- */
+function BilanPresentationPanel({ rows, periodType, periodKey, saved, status, onSave, defaultPreparePar, seuil }) {
+  const labels = bilanPeriodLabels(periodType, periodKey);
+  const init = saved || {};
+  const [autonomies, setAutonomies] = useState(() => Object.fromEntries(rows.map((r) => [r.site.id, init.autonomies?.[r.site.id] ?? ""])));
+  const [natures, setNatures] = useState(() => Object.fromEntries(rows.map((r) => [r.site.id, init.natures?.[r.site.id] || ""])));
+  const [justificatifs, setJustificatifs] = useState(() => (init.justificatifs || []).map((j) => ({ ...j, lignes: (j.lignes || []).map((l) => ({ ...l })) })));
+  const [conclusion, setConclusion] = useState(init.conclusion || "");
+  const [recoText, setRecoText] = useState((init.recommandations || []).join("\n"));
+  const [preparePar, setPreparePar] = useState(init.preparePar || defaultPreparePar || "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const collect = () => ({
+    autonomies: Object.fromEntries(Object.entries(autonomies).filter(([, v]) => v !== "" && Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])),
+    natures: Object.fromEntries(Object.entries(natures).filter(([, v]) => String(v).trim() !== "").map(([k, v]) => [k, String(v).trim()])),
+    justificatifs, conclusion, recommandations: recoText.split("\n").map((s) => s.trim()).filter(Boolean), preparePar: preparePar.trim(),
+  });
+  const buildModel = () => buildBilanDeckModel({ rows, periodType, periodKey, texts: collect(), seuil, preparePar });
+  const canSave = status === "ready"; // jamais d'enregistrement tant que les textes existants ne sont pas chargés (risque d'écrasement)
+  const saveOnly = async () => { if (!canSave) return; setBusy(true); setMsg(""); const ok = await onSave({ periodType, periodKey, patch: collect() }); setBusy(false); setMsg(ok ? "Textes enregistrés." : ""); };
+  const generate = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const model = buildModel(); // figé avant l'enregistrement : la présentation reflète exactement ce qui est à l'écran
+      const saved = canSave ? await onSave({ periodType, periodKey, patch: collect() }) : false;
+      await exportBilanPresentationPptx(model);
+      setMsg(saved ? "Présentation générée et textes enregistrés." : "Présentation générée. Les textes n'ont pas pu être enregistrés — ils seront à ressaisir.");
+    } catch (e) {
+      setMsg(`Erreur lors de la génération : ${e?.message || e}`);
+    } finally { setBusy(false); }
+  };
+  const proposeConclusion = () => {
+    if (conclusion.trim() && !window.confirm("Remplacer la conclusion actuelle par un brouillon calculé ?")) return;
+    setConclusion(draftBilanConclusion(buildModel()));
+  };
+  const newJustif = () => ({ siteId: rows[0]?.site.id || "", sujet: "", accroche: "", lignes: [{ libelle: "", montant: "" }], totalLibelle: "", soldeLibelle: "", texte: "" });
+  const setJ = (i, patch) => setJustificatifs((prev) => prev.map((j, k) => (k === i ? { ...j, ...patch } : j)));
+  const setLigne = (i, li, patch) => setJustificatifs((prev) => prev.map((j, k) => (k === i ? { ...j, lignes: j.lignes.map((l, m) => (m === li ? { ...l, ...patch } : l)) } : j)));
+  const small = { fontSize: 12.5, padding: "6px 8px" };
+
+  return (
+    <div className="somip-panel somip-no-print" style={{ padding: 18, marginTop: 18 }} data-panel="presentation">
+      <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Présentation PowerPoint — {labels.short}</h3>
+      <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>
+        Les chiffres (stocks, écarts, taux en ‰, entrées/sorties, répartition) viennent des Bilans saisis. Complète ci-dessous ce qui ne se calcule pas, puis génère la présentation au format SOMIP.
+      </p>
+      {status === "unavailable" && (
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.warning, fontWeight: 600 }}>
+          Les textes ne peuvent pas encore être enregistrés : exécute une fois le script « supabase_bilan_presentation.sql » dans Supabase. Tu peux déjà générer la présentation avec ce que tu saisis ici.
+        </p>
+      )}
+      {status === "error" && (
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.warning, fontWeight: 600 }}>
+          Les textes déjà enregistrés n'ont pas pu être chargés (connexion ?). Recharge la page avant de les modifier : l'enregistrement est bloqué pour ne pas les écraser. Tu peux quand même générer la présentation.
+        </p>
+      )}
+      {(status === "idle" || status === "loading") && (
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>Chargement des textes enregistrés…</p>
+      )}
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Par site</h4>
+      <div style={{ overflowX: "auto", marginBottom: 6 }}>
+        <table className="somip-table">
+          <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Écart</th><th style={{ textAlign: "right" }}>Taux</th><th>Autonomie (jours)</th><th>Nature de l'écart</th></tr></thead>
+          <tbody>
+            {rows.map((r) => {
+              const taux = r.ventes15 > 0 ? (r.ecart / r.ventes15) * 1000 : null;
+              return (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name}<div style={{ fontSize: 11, color: C.sub, fontWeight: 400, maxWidth: 260 }}>{(r.commentaire || "").trim() || "RAS."}</div></td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>{deckSigned(r.ecart)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: taux !== null && Math.abs(taux) > seuil ? C.danger : C.sub }}>{taux === null ? "—" : `${deckTaux(taux)}‰`}</td>
+                  <td><input type="number" min="0" className="somip-input" style={{ ...small, width: 90 }} placeholder="N/D" value={autonomies[r.site.id] ?? ""} onChange={(e) => setAutonomies({ ...autonomies, [r.site.id]: e.target.value })} aria-label={`Autonomie ${r.site.name}`} /></td>
+                  <td><input list="bilan-natures" className="somip-input" style={{ ...small, minWidth: 200 }} placeholder="Auto" value={natures[r.site.id] ?? ""} onChange={(e) => setNatures({ ...natures, [r.site.id]: e.target.value })} aria-label={`Nature de l'écart ${r.site.name}`} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <datalist id="bilan-natures">{NATURE_SUGGESTIONS.map((n) => <option key={n} value={n} />)}</datalist>
+      </div>
+      <p style={{ margin: "0 0 16px", fontSize: 11, color: C.sub }}>
+        Autonomie : laisse vide si elle n'est pas calculée (affichée « N/D »). Nature de l'écart : laissée vide, elle devient « Aucune cause identifiée » si l'observation est « RAS », sinon « À qualifier ». L'observation de chaque site est le Commentaire de sa saisie de Bilan Matières.
+      </p>
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Justificatifs chiffrés (optionnel)</h4>
+      {justificatifs.map((j, i) => {
+        const row = rows.find((r) => r.site.id === j.siteId);
+        const lignes = (j.lignes || []);
+        const total = lignes.reduce((a, l) => a + (deckNumOrNull(l.montant) || 0), 0);
+        return (
+          <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <select className="somip-select" style={{ ...small, maxWidth: 220 }} value={j.siteId} onChange={(e) => setJ(i, { siteId: e.target.value })} aria-label="Site du justificatif">
+                {rows.map((r) => <option key={r.site.id} value={r.site.id}>{r.site.name}</option>)}
+              </select>
+              <input className="somip-input" style={{ ...small, flex: "1 1 200px" }} placeholder="Sujet (ex. camions laitiers)" value={j.sujet} onChange={(e) => setJ(i, { sujet: e.target.value })} />
+              <button className="somip-btn somip-btn-ghost" onClick={() => setJustificatifs((prev) => prev.filter((_, k) => k !== i))} title="Supprimer ce justificatif"><X size={14} /> Supprimer</button>
+            </div>
+            <input className="somip-input" style={{ ...small, width: "100%", marginBottom: 8 }} placeholder="Phrase sous le titre (ex. L'écart brut du site s'explique par…)" value={j.accroche} onChange={(e) => setJ(i, { accroche: e.target.value })} />
+            {lignes.map((l, li) => (
+              <div key={li} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <input className="somip-input" style={{ ...small, flex: "1 1 200px" }} placeholder="Libellé (ex. Camion laitier FK254AA)" value={l.libelle} onChange={(e) => setLigne(i, li, { libelle: e.target.value })} />
+                <input type="number" className="somip-input" style={{ ...small, width: 130 }} placeholder="Litres (+ ou −)" value={l.montant} onChange={(e) => setLigne(i, li, { montant: e.target.value })} />
+                <button className="somip-btn somip-btn-ghost" style={{ padding: "4px 8px" }} onClick={() => setJ(i, { lignes: lignes.filter((_, m) => m !== li) })} title="Retirer la ligne"><X size={13} /></button>
+              </div>
+            ))}
+            <button className="somip-btn somip-btn-ghost" style={{ marginBottom: 8 }} onClick={() => setJ(i, { lignes: [...lignes, { libelle: "", montant: "" }] })}><Plus size={13} /> Ajouter une ligne</button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <input className="somip-input" style={{ ...small, flex: "1 1 220px" }} placeholder="Libellé du total (ex. Total pertes imputées aux camions)" value={j.totalLibelle} onChange={(e) => setJ(i, { totalLibelle: e.target.value })} />
+              <input className="somip-input" style={{ ...small, flex: "1 1 220px" }} placeholder="Libellé du solde (ex. Solde net résiduel)" value={j.soldeLibelle} onChange={(e) => setJ(i, { soldeLibelle: e.target.value })} />
+            </div>
+            {row && <p className="somip-mono" style={{ margin: "0 0 8px", fontSize: 11.5, color: C.sub }}>Écart brut {deckSigned(row.ecart)} L − imputations {deckSigned(total)} L = solde {deckSigned(row.ecart - total)} L (calculé automatiquement)</p>}
+            <textarea className="somip-input" style={{ ...small, width: "100%", minHeight: 70 }} placeholder="Explication (encadré orange sous le tableau)" value={j.texte} onChange={(e) => setJ(i, { texte: e.target.value })} />
+          </div>
+        );
+      })}
+      <button className="somip-btn somip-btn-ghost" style={{ marginBottom: 16 }} onClick={() => setJustificatifs((prev) => [...prev, newJustif()])}><Plus size={14} /> Ajouter un justificatif</button>
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Conclusion de la synthèse</h4>
+      <textarea className="somip-input" style={{ ...small, width: "100%", minHeight: 90, marginBottom: 6 }} placeholder="Ex. les écarts du mois restent dominés par des causes instrumentales…" value={conclusion} onChange={(e) => setConclusion(e.target.value)} />
+      <button className="somip-btn somip-btn-ghost" style={{ marginBottom: 16 }} onClick={proposeConclusion}>Proposer un brouillon (chiffres seulement)</button>
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Recommandations & prochaines étapes</h4>
+      <textarea className="somip-input" style={{ ...small, width: "100%", minHeight: 90, marginBottom: 4 }} placeholder="Une recommandation par ligne" value={recoText} onChange={(e) => setRecoText(e.target.value)} />
+      <p style={{ margin: "0 0 16px", fontSize: 11, color: C.sub }}>Une recommandation par ligne. Sans recommandation, la dernière diapositive n'est pas créée.</p>
+
+      <Field label="Préparé par (page de titre)"><input className="somip-input" value={preparePar} onChange={(e) => setPreparePar(e.target.value)} placeholder="Ex. LONGA Jérôme Albain — Superviseur Sites Externalisés" /></Field>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
+        <button className="somip-btn somip-btn-primary" disabled={busy} onClick={generate}><Download size={14} /> {busy ? "Génération…" : "Générer la présentation (PowerPoint)"}</button>
+        <button className="somip-btn somip-btn-ghost" disabled={busy || !canSave} onClick={saveOnly}>Enregistrer les textes</button>
+        {msg && <span style={{ fontSize: 12, color: C.sub, fontWeight: 600 }} role="status">{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+function BilanMatieresView({ sites, bilans, movements, saveBilan, deleteBilan, canManage, assignedSiteIds, bilanPresentations = [], bilanPresStatus = "idle", saveBilanPresentation, objectifFreinte = 3, presenterName = "" }) {
   const fixedSites = sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [periodType, setPeriodType] = useState("mensuel");
@@ -9685,6 +10256,14 @@ function BilanMatieresView({ sites, bilans, movements, saveBilan, deleteBilan, c
           Rassemble la saisie de chaque site pour la période choisie ci-dessus (indépendante de celle du panneau de saisie). Un site sans saisie pour cette période n'apparaît pas dans le tableau. Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts.
         </p>
       </div>
+      {canManage && allSitesRows.length > 0 && (
+        <BilanPresentationPanel
+          key={`${allPeriodType}|${allPeriodKey}|${bilanPresStatus === "ready" || bilanPresStatus === "unavailable" || bilanPresStatus === "error" ? "loaded" : "loading"}`}
+          rows={allSitesRows} periodType={allPeriodType} periodKey={allPeriodKey}
+          saved={bilanPresentations.find((p) => p.periodType === allPeriodType && p.periodKey === allPeriodKey)}
+          status={bilanPresStatus} onSave={saveBilanPresentation}
+          defaultPreparePar={presenterName ? `${presenterName} — Superviseur Sites Externalisés` : "Superviseur Sites Externalisés"} seuil={objectifFreinte} />
+      )}
     </div>
   );
 }
