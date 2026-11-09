@@ -1,126 +1,119 @@
 // =====================================================================
-// SOMIP Stock — Conversion des volumes à 15 °C (module partagé)
+// SOMIP Stock — Bilan matières (refonte style SAP) : CALCULS
 //
-// Ce fichier contient, SANS AUCUNE MODIFICATION, le bloc « Correction de volume à 15°C »
-// qui se trouvait dans App.jsx : formule ASTM D1250 / API MPMS 11.1 et convention GESTOCK
-// (table au quart de degré, 4 décimales). Il a été déplacé ici pour que l'application et
-// le module « Bilans matières » utilisent exactement la même fonction : correctVolumeTo15.
+// Fonctions pures (aucun accès base, aucun écran) : elles sont utilisées par l'écran de saisie,
+// les exports Excel/PDF et la présentation PowerPoint, pour que tous affichent les mêmes chiffres.
+// Toute conversion à 15 °C passe par correctVolumeTo15 (vcf15.js), la même fonction que le module
+// « Correction 15 °C » : la densité observée à la température du produit est d'abord ramenée à
+// la densité à 15 °C, puis le coefficient de correction est appliqué.
 // =====================================================================
+import { correctVolumeTo15, VCF_MIN_DENSITY, VCF_MAX_DENSITY } from "./vcf15.js";
 
-/* ------------------------------------------------------------------ */
-/* Correction de volume à 15°C — ASTM D1250 / API MPMS Chapitre 11.1   */
-/* (+ convention GESTOCK pour la plage du gasoil : voir gestockVcf)     */
-/* Table 53B (densité observée -> densité à 15°C) et Table 54B         */
-/* (volume -> volume à 15°C), "produits généralisés", plage 653–1075   */
-/* kg/m³. Formule officielle : VCF = e^(-ALPHA·ΔT·(1+0.8·ALPHA·ΔT))    */
-/* avec ALPHA = f(densité à 15°C), déterminé par zone de densité.      */
-/* ------------------------------------------------------------------ */
-const VCF_MIN_DENSITY = 653;
-const VCF_MAX_DENSITY = 1075;
+export const DENSITE_VENTE_DEFAUT = 820; // densité observée des ventes (paramètre modifiable par le Superviseur)
+export const TEMP_MIN_PLAUSIBLE = 15;
+export const TEMP_MAX_PLAUSIBLE = 45;
 
-// Seuils de zone de la norme (ASTM D1250 / API MPMS 11.1) : 770,5 / 787,5 / 838,5 kg/m³ de densité à 15 °C.
-// (Corrigés : ils étaient à 770 / 778 / 839, ce qui faussait la formule pour les produits légers de 778 à 787,5.)
-function vcfAlpha(den15) {
-  if (den15 < 770.5) return (346.42278 + 0.43884 * den15) / (den15 * den15);
-  if (den15 < 787.5) return -0.0033612 + 2680.32 / (den15 * den15); // zone de transition
-  if (den15 < 838.5) return 594.5418 / (den15 * den15);
-  return (186.9696 + 0.48618 * den15) / (den15 * den15);
+// « 2026-10 » -> ["2026-10-01", …, "2026-10-31"] (années bissextiles comprises).
+export function joursDuMois(periodKey) {
+  const [y, m] = String(periodKey).split("-").map(Number);
+  if (!y || !m || m < 1 || m > 12) return [];
+  const n = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const mm = String(m).padStart(2, "0");
+  return Array.from({ length: n }, (_, i) => `${y}-${mm}-${String(i + 1).padStart(2, "0")}`);
 }
-function vcfFactor(den15, tempC) {
-  const dT = tempC - 15;
-  const alpha = vcfAlpha(den15);
-  return { vcf: Math.exp(-alpha * dT * (1 + 0.8 * alpha * dT)), alpha };
-}
-// La densité à 15°C est l'inconnue de sa propre formule (ALPHA en dépend) :
-// on résout par itération, convergence en quelques passes (écart de température modéré).
-function densityAt15FromObserved(densiteObservee, tempC) {
-  let d15 = densiteObservee;
-  for (let i = 0; i < 12; i++) {
-    const { vcf } = vcfFactor(d15, tempC);
-    d15 = densiteObservee / vcf;
+
+// Nombre saisi au clavier ou collé depuis Excel : « 1 234,5 », « 1234.5 », « 1.234,5 », « 1,234.5 ».
+// Vide -> null (non saisi) ; texte non numérique -> NaN (erreur à signaler).
+export function lireNombre(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  let s = String(v).replace(/[\s\u00a0\u202f]/g, "");
+  if (s === "") return null;
+  const lastComma = s.lastIndexOf(","), lastDot = s.lastIndexOf(".");
+  if (lastComma >= 0 && lastDot >= 0) {
+    // les deux séparateurs : le dernier est le séparateur décimal, l'autre sépare les milliers
+    s = lastComma > lastDot ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
+  } else if (lastComma >= 0) {
+    s = s.replace(",", ".");
   }
-  return d15;
-}
-// ---- Convention GESTOCK pour le coefficient de correction (VCF) ----
-// GESTOCK calcule le volume à 15 °C avec une macro `vcf(densité, température)` qui :
-//   1. arrondit la densité à l'unité (arrondi VBA : à l'entier pair en cas d'égalité, 830,5 -> 830) ;
-//   2. arrondit la température au quart de degré (seuils 0,149 / 0,399 / 0,649 / 0,899) ;
-//   3. lit le coefficient dans une table à 4 décimales (feuille cachée « TABLE »).
-// La formule continue donne des coefficients qui diffèrent d'un dix-millième (≈ 2 L pour 20 000 L) : on reprend donc la table
-// pour la plage utile du gasoil (densité 788-870 kg/m³, 15 à 45 °C). Hors plage, la formule continue s'applique
-// (GESTOCK, lui, renverrait 0). Une case erronée de la table GESTOCK a été corrigée à la construction : 15 °C / densité 869
-// (GESTOCK : 0,9764 ; valeur correcte : 1,0000). Coefficient = 1 - n/10000 ; table stockée par différences successives.
-const GESTOCK_VCF_DENS_MIN = 788, GESTOCK_VCF_DENS_MAX = 870, GESTOCK_VCF_TEMP_MIN = 15, GESTOCK_VCF_TEMP_MAX = 45;
-const GESTOCK_VCF_COLS = 83, GESTOCK_VCF_ROWS = 121;
-const GESTOCK_VCF_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", GESTOCK_VCF_OFFSET = 3;
-const GESTOCK_VCF_FIRST = [0, 2, 5, 7, 10, 12, 14, 17, 19, 21, 24, 26, 29, 31, 33, 36, 38, 40, 43, 45, 48, 50, 52, 55, 57, 59, 62, 64, 66, 69, 71, 73, 76, 78, 80, 83, 85, 87, 90, 92, 94, 97, 99, 101, 104, 106, 106, 110, 113, 115, 117, 120, 122, 124, 126, 129, 131, 133, 136, 138, 140, 143, 145, 147, 149, 152, 154, 156, 158, 161, 163, 165, 168, 170, 172, 174, 177, 179, 181, 183, 186, 188, 190, 192, 195, 197, 199, 201, 204, 206, 208, 210, 213, 215, 217, 219, 221, 224, 226, 228, 230, 232, 235, 237, 239, 241, 244, 246, 248, 250, 252, 255, 257, 259, 261, 263, 265, 268, 270, 272, 274];
-const GESTOCK_VCF_DELTAS = "3333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333333233333333333333333333333333333333331533333333333333333333333333333333153333333333333333333333333332333333333333333333333333333333333333333333332333333333333333333333333333333333333333333332333333333333333333333333333333333333333333333333233333333333333333333333333333333333333233333333333333333333333333333333333333333333333333323333333333333333333333333333333333323333333333333333333333333323333333333333333333333333233333333333333333333333333333332333333333333333333333333333333323333333333333315333332333333153333333333333333333333233333333333333333333333333333333332333333333315333333323333333333333333333333333333233333333333333333332333333333153333323333333333333333333233333333333333333333333333233333333333333333333332333333333333333323333333333333333233333333333333333333333332333333333333233333333333332333333333333332333333333333333233333333333333333333333323333333333333332333333333333323333333333333233333333333333233333333333333333333333233333333333333333323333333333332333333333333233333333333333233333333333333333333332333333333323333333333233333333333233333333333323333333333333233333333333333333333233333333333332333333333323333333333233333333333233333333333333233333333333333333332333333333333333323333333332333333333323333333333231533333333333233333333333333333233333333323333333323333333333233333333323333333333233333333333332333333333333333332333333333332333333332333333333233333333233333333323333333333333323333333333333333233333323333333233333333233333333233333333233333333323333333333333233333333333333323333333323333333233333333233333333233333333233333333233333333333333233333333333333233333333332333333323333333233333332333333332333333332333333333333323333333333333323333323333332333333323333333233333332333333323333333332333333333333233333333333314333333323333332333333323333332333333323333333233333333323333333333332333333333333233333333332333333233333323333332333333233333332333333333233333333333233333333333323333323333332333333233333233333323333333233333323333333332333333333332333333333332333333323333332333332333333233333233333332333333233333333323333333333323333333333323333333323333332333332333332333333233333323333332333333333233333333332333333333332333323333323333323333323333332333332333333233333233333333332333333333323333333333233333323333323333323333323333323333323333332333332333333333323333333332333333333323333333323333053333233333233333233333233333233333323333333332333333333233333333332333323333233333233333233332333332333332333332333333233333333323333333332333333333233333323333233332333332333323333323333323333323333332333333333233333333233333333323333333323333233332333323333323333233333233332333153323333333323333333323333333332333323333233332333323333233333233332333332333323333333233333333233333333233333333233333323332333323333233332333323333323333215333233333332333333323333333323333333305333333233332333323333233323333233333233332315323333333233333332333333332333333332333323332333323333233323333323332333323333233333233333332333333323333333233333333233333323332333233305333233332333323333233332333332333333323333333233333332333333323333333233323333233323333233323333233332333233333233333332333333323333333233333332333323332333233323333233323333233332333233332333332333333233333332333333323333333233333233323332333323332333233332333233332333233333233333332333333323333332333333323333332333233332333233323332333323332333233332333332333333233333332333333233333332333323323332333233323332333323332333323332333233333323333332333333233333323333333233333233323332332333233323333233323332333233332333332333333323333323333333233333323153532332333233323332333233323333233323332333233333323333332333332333333233333332333333323332332333233323332333233323332333233332333332333333233333323333332333333233332333233323323332333233323332333233233332333233333323333332333332333333233333323333323332332333233323332333233233323332333233332333332333333233333233333323333323333333323323323332333233233323332332333323332333323333323333323333323333332315333233332332333233323323332332333233233323332333233332333332333332333333233333233333323333323323332332332333233323323332333233233323333323333323333323333323333323333323333333233233323323323332332333233233323332333233332333332333332333332333332333332333333332332333233233233323323323332332315233323333233333233333233333233333233333233333323323323323323305332333233215323323332332333332333332333323333323333323333323333333233233233233233233323323323332332333233323333323333233333233332333332333332333333323323323332332332332333233233233323323332333332333323333323333233333233333233333233233233233233233233323323332332332332333323333233333233332333323333323333323333232332332332332332332332332333233233233323333233332333323333233333233332333332333323323323233233323323323323323323323332332333323333233332333323333323333233333233332233232332332332332332332333233233233233233332333323333233333233332333323333323333223323323323323323305323323323323323323332333323333233332333323333233332333332333323233233232332333233232332332332332333233233332333323333233332333323333233333233332332332332323323323323323323323323323323332333233332333323333233332333323333233332323233323233233233232332332332332332332333233332333323332333323333233332333323333233232332332323323323323323323323233233233323333233332333233332333323333233332333323332323323233233232332332332332332332332333231523333233332333233332333323333233332333232333232332323323323233233233233233233323333233323333233332333233332333323333232332323323233233232332332332332323323143332333323332333323332333323333233332333233323233233232332323323233233233053233233233323332333323332333323332333323333233323332332323323323233232332332323323323233323332333323332333323332333233332333323332332323323214332323323323323233232332332332333233332333233314333233323333233323333233233232332323323233232332323323233233233323332333233323333233323332333323332333323332323323232332332323323233232332323323332333233323333233323332333323332333323332333323232332323233232332332323323215232333233323332333323332333233323333233323332333232332323233232323323233232332323323323332333233323332333233323332333323332333233323323232323323323232332321523233232332333233323332333233323332333323332333233323333232323323232332323233233232323323233233323332333233323332333233323333233323332333323053232332323233232323323232332332332333233233323332333233323332333323332333233323232323233232332323233232323323233233233323323332333233332315233323332333233323332332323232323323232323323233232332323323332333233323323332333233323332333233332333323232332323232323323232323323232332333233233323332333233323332332333233332333233332323323232323233232323323232323323233323323332333233323323333233323332333233323332323232323233232323232332323323232323332333233233323332333233233323332333233323332232323233232323232332323232323323233233323323332332333233323332332333233323332333232323232323232323323232323305232323323323152333233233323332333233323323332333233323232323232332323232323232332323233232333233233323332332333233323323332333233323332232323232323232323232332323232323233323323332332333233233323332332333233323332333223232323232323214323323232323233232332332333233233323323332332153323323332333233322332323232323232323232323233232323233233323323323332332333233323323332332333233323323232323232323232323232323233232323323332332333233233323323332332333233323323332323223232323232323233232323232323232333233233233323323323332332333233323332332333232322332323232323232323232323232323323323323332332332333233233323323332332333233233232323232323232323232323232323232332332332333233233323323323332332333233233323323332323223232323232323232323232323233233233323323323323332332332333233323323332332333232323232323223232323232323233232332332332332332333233233233323323323332332333233052232323232323232323232323232323232333233233233323323323323332332332333233233323323232322323232323232323232323232323323323323323323332332332332333233233323323332332323232323232232323232323232323232332332332333233233233233233233323323323332332333323223232323223323223232323230523233053233233233323321523323332332332333233233233332323232232323232232323322323232332332332332332332332332332332333233233233323323332232323232322323232323223232323233233233233233233233233233233233323323323323332332230522323232232323232323232232323323323323323323323323323323332332332332332333233223232323223232322323232323232322332332332332332332332332332332332333233233323323323223232143232232323223232323223323323233233233233233233233233233323323323323323323223232232322323232323223052323232323323323323323323323323332332332332332332332332322323232232323223232322332232323233233233232332332332332332332332332332333233233232322323223322323223232322323232323323323323323323233233233233233233233233323323323322323223232232323223232322323232332332332323323321523323323323323323332332332332332232323223232232322323232322323323233233233233232332332332332332332332332333233232232232322323232232322323223232332332323323323323323233233233233233233233233233233232232232322322323232322323232233233232332332332323323332323323323323323323143323323223232232322322323223232323232323323323233233233232332332332332332332332332332332323223223223322322323223232322332332332332323323323323233233233233233233233233233322323223223223232232323223232233323233232332332332323323323323323323323323323323332232233223223223232232322323232332323323323233233232332332332332332323323323323332232232232322323223052232232323233232332332332323323323233233233233232332332332332232232232232232322323223232232323323323233232332332323323323323323323233233233233223223223232232232322322323232233232332323323323233233232332332323323323323323323323223223223223232232232322322323323233232332332323323323233233053232332332332332323";
-let gestockVcfTable = null;
-function gestockTable() {
-  if (gestockVcfTable) return gestockVcfTable;
-  const t = new Int16Array(GESTOCK_VCF_ROWS * GESTOCK_VCF_COLS);
-  for (let i = 0; i < GESTOCK_VCF_ROWS; i++) {
-    let n = GESTOCK_VCF_FIRST[i];
-    t[i * GESTOCK_VCF_COLS] = n;
-    for (let j = 1; j < GESTOCK_VCF_COLS; j++) {
-      n += GESTOCK_VCF_ALPHABET.indexOf(GESTOCK_VCF_DELTAS[i * (GESTOCK_VCF_COLS - 1) + j - 1]) - GESTOCK_VCF_OFFSET;
-      t[i * GESTOCK_VCF_COLS + j] = n;
-    }
-  }
-  gestockVcfTable = t;
-  return t;
-}
-// Arrondi de VBA (« banker's rounding ») : 0,5 va à l'entier pair.
-function vbaRound(x) {
-  const f = Math.floor(x), d = x - f;
-  if (d < 0.5) return f;
-  if (d > 0.5) return f + 1;
-  return f % 2 === 0 ? f : f + 1;
-}
-// Température au quart de degré, comme la macro GESTOCK.
-function gestockSnapTemp(t) {
-  const fx = Math.trunc(t), dec = t - fx;
-  if (dec >= 0 && dec <= 0.149) return fx;
-  if (dec > 0.149 && dec <= 0.399) return fx + 0.25;
-  if (dec > 0.399 && dec <= 0.649) return fx + 0.5;
-  if (dec > 0.649 && dec <= 0.899) return fx + 0.75;
-  return fx + 1;
-}
-// Coefficient GESTOCK pour une densité observée et une température, ou null hors de la plage couverte.
-function gestockVcf(densiteObservee, tempC) {
-  if (typeof densiteObservee !== "number" || typeof tempC !== "number" || isNaN(densiteObservee) || isNaN(tempC)) return null;
-  const d = vbaRound(densiteObservee), t = gestockSnapTemp(tempC);
-  if (d < GESTOCK_VCF_DENS_MIN || d > GESTOCK_VCF_DENS_MAX || t < GESTOCK_VCF_TEMP_MIN || t > GESTOCK_VCF_TEMP_MAX) return null;
-  const n = gestockTable()[Math.round((t - GESTOCK_VCF_TEMP_MIN) * 4) * GESTOCK_VCF_COLS + (d - GESTOCK_VCF_DENS_MIN)];
-  return { vcf: (10000 - n) / 10000, densiteRetenue: d, tempRetenue: t };
-}
-function correctVolumeTo15({ volumeAmbiant, tempC, densiteObservee }) {
-  const vOk = typeof volumeAmbiant === "number" && volumeAmbiant > 0;
-  const tOk = typeof tempC === "number" && !isNaN(tempC);
-  const dOk = typeof densiteObservee === "number" && densiteObservee >= VCF_MIN_DENSITY && densiteObservee <= VCF_MAX_DENSITY;
-  if (!vOk || !tOk || !dOk) return null;
-  const densite15 = densityAt15FromObserved(densiteObservee, tempC);
-  const calc = vcfFactor(densite15, tempC);
-  // Convention GESTOCK quand elle s'applique (densité 788-870 kg/m³, 15 à 45 °C) : mêmes volumes à 15 °C que dans GESTOCK.
-  // Sinon : formule continue ci-dessus.
-  const g = gestockVcf(densiteObservee, tempC);
-  const vcf = g ? g.vcf : calc.vcf;
-  return { densite15, alpha: calc.alpha, vcf, volume15: volumeAmbiant * vcf, methode: g ? "gestock" : "formule" };
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)$/.test(s)) return NaN;
+  return Number(s);
 }
 
-export {
-  VCF_MIN_DENSITY,
-  VCF_MAX_DENSITY,
-  GESTOCK_VCF_DENS_MIN,
-  GESTOCK_VCF_DENS_MAX,
-  GESTOCK_VCF_TEMP_MIN,
-  GESTOCK_VCF_TEMP_MAX,
-  correctVolumeTo15,
-  vcfAlpha,
-  vcfFactor,
-  densityAt15FromObserved,
-  gestockVcf,
-  gestockTable,
-  vbaRound,
-  gestockSnapTemp,
-};
+// Conversion d'une mesure (volume ambiant, température, densité observée) à 15 °C.
+export function convertir15({ ambiant, temp, densite }) {
+  if (!Number.isFinite(ambiant) || ambiant < 0) return { ok: false, erreur: "Volume invalide" };
+  if (!Number.isFinite(temp)) return { ok: false, erreur: "Température obligatoire" };
+  if (!Number.isFinite(densite) || densite < VCF_MIN_DENSITY || densite > VCF_MAX_DENSITY) {
+    return { ok: false, erreur: `Densité hors plage (${VCF_MIN_DENSITY} à ${VCF_MAX_DENSITY} kg/m³)` };
+  }
+  if (ambiant === 0) return { ok: true, volume15: 0, densite15: null, vcf: null, methode: null };
+  const r = correctVolumeTo15({ volumeAmbiant: ambiant, tempC: temp, densiteObservee: densite });
+  if (!r) return { ok: false, erreur: "Conversion à 15 °C impossible" };
+  return { ok: true, volume15: r.volume15, densite15: r.densite15, vcf: r.vcf, methode: r.methode };
+}
+
+// Une ligne de ventes journalières : volume vendu (L ambiants) + température du jour ; densité de vente fixe.
+// `saisi` = false si la ligne est entièrement vide (jour sans saisie : avertissement, pas une erreur).
+export function calculerVente({ volume, temp }, densiteVente = DENSITE_VENTE_DEFAUT) {
+  const v = lireNombre(volume), t = lireNombre(temp);
+  if (v === null && t === null) return { saisi: false, ok: true };
+  if (Number.isNaN(v) || Number.isNaN(t)) return { saisi: true, ok: false, erreur: "Valeur non numérique" };
+  if (v !== null && v < 0) return { saisi: true, ok: false, erreur: "Volume négatif" };
+  if (v === null) return { saisi: true, ok: false, erreur: "Volume obligatoire" };
+  if (t === null) return { saisi: true, ok: false, erreur: "Température obligatoire" };
+  const c = convertir15({ ambiant: v, temp: t, densite: densiteVente });
+  if (!c.ok) return { saisi: true, ok: false, erreur: c.erreur };
+  const hors = t < TEMP_MIN_PLAUSIBLE || t > TEMP_MAX_PLAUSIBLE;
+  return {
+    saisi: true, ok: true, volume: v, temp: t, densiteObs: densiteVente, densite15: c.densite15, vcf: c.vcf, volume15: c.volume15, methode: c.methode,
+    avertissement: hors ? `Température hors plage plausible (${TEMP_MIN_PLAUSIBLE} à ${TEMP_MAX_PLAUSIBLE} °C)` : undefined,
+  };
+}
+
+// Totaux des ventes du mois à partir des lignes calculées (calculerVente). Les lignes en erreur ne comptent pas.
+export function totauxVentes(lignesCalculees) {
+  let ambiant = 0, volume15 = 0, joursSaisis = 0, erreurs = 0;
+  for (const l of lignesCalculees) {
+    if (!l || !l.saisi) continue;
+    if (!l.ok) { erreurs += 1; continue; }
+    joursSaisis += 1; ambiant += l.volume; volume15 += l.volume15;
+  }
+  return { ambiant, volume15, joursSaisis, erreurs };
+}
+
+// Le compte de stock du mois, tout à 15 °C.
+//   Stock théorique fin = Stock début + Réceptions − Ventes (+ Transferts nets, 0 s'il n'y en a pas)
+//   Écart               = Stock physique fin − Stock théorique fin   (> 0 : gain, < 0 : perte)
+//   Écart en %          = Écart ÷ Ventes du mois × 100              (null si aucune vente)
+export function calculerBilan({ stockDebut15, receptions15, ventes15, transferts15 = 0, stockFin15 }) {
+  const n = (x) => (Number.isFinite(x) ? x : 0);
+  const theorique = n(stockDebut15) + n(receptions15) - n(ventes15) + n(transferts15);
+  const ecart = n(stockFin15) - theorique;
+  return { theorique, ecart, ecartPct: n(ventes15) > 0 ? (ecart / n(ventes15)) * 100 : null, sens: ecart > 0 ? "gain" : ecart < 0 ? "perte" : "nul" };
+}
+
+// Volume « officiel » d'un mouvement à 15 °C : celui enregistré avec le bon (registre des bons de livraison) ;
+// à défaut (température ou densité non saisies), le volume ambiant.
+const volume15Mouvement = (m) => (m.volumeCorrige15 !== undefined && m.volumeCorrige15 !== null ? m.volumeCorrige15 : m.quantity);
+const estGasoil = (m) => (m.product || "gasoil") === "gasoil";
+
+// Réceptions du site et du mois, reprises du registre des bons de livraison (aucune ressaisie).
+export function receptionsDuMois(movements, siteId, periodKey) {
+  const lignes = movements
+    .filter((m) => m.type === "reception" && m.siteId === siteId && estGasoil(m) && String(m.date).startsWith(`${periodKey}-`))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || "").localeCompare(b.createdAt || "")))
+    .map((m) => ({
+      id: m.id, date: m.date, ref: m.ref || "", quantity: m.quantity, temperatureC: m.temperatureC, densiteObservee: m.densiteObservee,
+      volume15: volume15Mouvement(m), converti: m.volumeCorrige15 !== undefined && m.volumeCorrige15 !== null,
+    }));
+  return { lignes, total15: lignes.reduce((a, l) => a + l.volume15, 0), totalAmbiant: lignes.reduce((a, l) => a + l.quantity, 0), nbSansMesure: lignes.filter((l) => !l.converti).length };
+}
+
+// Transferts nets du site et du mois (entrées − sorties), à 15 °C quand la mesure existe.
+export function transfertsNetsDuMois(movements, siteId, periodKey) {
+  const lignes = movements
+    .filter((m) => m.type === "transfert" && m.siteId === siteId && estGasoil(m) && String(m.date).startsWith(`${periodKey}-`))
+    .map((m) => ({ id: m.id, date: m.date, siteLie: m.relatedSiteId, sens: m.delta < 0 ? -1 : 1, volume15: volume15Mouvement(m), converti: m.volumeCorrige15 !== undefined && m.volumeCorrige15 !== null }));
+  return { lignes, net15: lignes.reduce((a, l) => a + l.sens * l.volume15, 0), nbSansMesure: lignes.filter((l) => !l.converti).length };
+}
