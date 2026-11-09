@@ -11,12 +11,13 @@
 // =====================================================================
 import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { supabase } from "./supabaseClient.js";
-import { receptionsDuMois, transfertsNetsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
+import { receptionsDuMois, transfertsNetsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
 
 const MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
 const pad2 = (n) => String(n).padStart(2, "0");
 const COLS = "id, site_id, period_type, period_key, statut, reception15, ventes15, transferts15, stock_fin15, stock_debut_ambiant, stock_debut_temp, stock_debut_densite, stock_debut15, stock_fin_ambiant, stock_fin_temp, stock_fin_densite, densite_vente, ventes_ambiant, commentaire, created_by, created_at, modified_by, modified_at, valide_par, valide_le";
-const COLS_PREC = "id, statut, period_key, stock_fin15, stock_fin_ambiant";
+const COLS_PREC = "id, statut, period_key, stock_fin15, stock_fin_ambiant, stock_fin_temp, stock_fin_densite";
+const COLS_STOCKS = "stock_debut_ambiant, stock_debut_temp, stock_debut_densite, stock_debut15, stock_fin_ambiant, stock_fin_temp, stock_fin_densite, stock_fin15, modified_at, modified_by";
 const STATUTS = {
   brouillon: { label: "Brouillon", cls: "sap-st-draft" },
   valide: { label: "Validé 🔒", cls: "sap-st-ok" },
@@ -89,6 +90,7 @@ const STYLE = `
 .sap-cell:disabled { background: #f1f2f3; color: #5b6168; }
 .sap-cell-err { border-color: #bb0000; background: #fdeaea; }
 .sap-cell-warn { background: #fff7d1; }
+.sap-cell-prop { font-style: italic; color: #6a6d70; }
 .sap-ro { background: #e9ebed !important; color: #4b5057; padding: 4px 9px !important; }
 .sap-mark { width: 26px; text-align: center; padding: 0 !important; }
 .sap-row-dirty td.sap-d { border-left: 3px solid #0a6ed1; }
@@ -168,16 +170,18 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
     setMsg(ignorees ? { type: "warn", text: `${remplies} jour(s) collé(s) ; ${ignorees} ligne(s) ignorée(s) (au-delà de la fin du mois).` } : { type: "ok", text: `${remplies} jour(s) collé(s) depuis le presse-papiers. Pense à enregistrer.` });
   };
 
-  const save = async () => {
-    if (!editable || saving) return;
+  // Contrôle sans écriture : renvoie le message d'erreur à afficher, ou null.
+  const verifier = () => {
+    if (!editable) return null;
     const erreurs = jours.filter((j) => calc[j].saisi && !calc[j].ok);
-    if (erreurs.length) {
-      setMsg({ type: "err", text: `${erreurs.length} ligne(s) en erreur (${erreurs.slice(0, 3).map(fmtJour).join(", ")}${erreurs.length > 3 ? "…" : ""}) : enregistrement bloqué.` });
-      return;
-    }
+    return erreurs.length ? `${erreurs.length} ligne(s) en erreur (${erreurs.slice(0, 3).map(fmtJour).join(", ")}${erreurs.length > 3 ? "…" : ""}) : enregistrement bloqué.` : null;
+  };
+  // Enregistrement des seules lignes modifiées. Renvoie { statut: "rien" | "ok" | "erreur", texte }.
+  const save = async () => {
+    if (!editable || saving) return { statut: "rien" };
     const aSauver = jours.filter((j) => calc[j].saisi && calc[j].ok && (!saved[j] || saved[j].volume !== calc[j].volume || saved[j].temp !== calc[j].temp));
     const aSupprimer = jours.filter((j) => !calc[j].saisi && saved[j]);
-    if (!aSauver.length && !aSupprimer.length) { setMsg({ type: "warn", text: "Aucune modification à enregistrer." }); return; }
+    if (!aSauver.length && !aSupprimer.length) return { statut: "rien" };
     setSaving(true);
     try {
       if (aSauver.length) {
@@ -193,14 +197,14 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
       // Totaux : recalculés par la base ; on relit uniquement les 4 champs du bilan (en-tête et synthèse à jour).
       const h = await supabase.from("bilan_matieres").update({ modified_by: userName || null }).eq("id", bilan.id).select("ventes15, ventes_ambiant, modified_at, modified_by").single();
       if (!h.error && h.data && onSaved) onSaved(h.data);
-      setMsg({ type: "ok", text: `Bilan enregistré (${aSauver.length} ligne(s) enregistrée(s)${aSupprimer.length ? `, ${aSupprimer.length} supprimée(s)` : ""}).` });
       if (flash) flash("Bilan enregistré.");
       if (appendAudit) appendAudit("Ventes du bilan matières enregistrées", `${siteName} — ${bilan.period_key} : ${aSauver.length} ligne(s), ${aSupprimer.length} suppression(s)`);
+      return { statut: "ok", texte: `${aSauver.length} ligne(s) enregistrée(s)${aSupprimer.length ? `, ${aSupprimer.length} supprimée(s)` : ""}` };
     } catch (e) {
-      setMsg({ type: "err", text: erreurLisible(e) });
+      return { statut: "erreur", texte: erreurLisible(e) };
     } finally { setSaving(false); }
   };
-  useImperativeHandle(ref, () => ({ save }));
+  useImperativeHandle(ref, () => ({ save, verifier }));
 
   if (loading) return <p className="sap-muted" data-testid="grille-chargement">Chargement des ventes du mois…</p>;
   return (
@@ -246,6 +250,139 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
   );
 });
 
+
+// ---------------------------------------------------------------------
+// Onglet « Stocks début / fin » : volume ambiant, température et densité observée, ramenés à 15 °C
+// (même fonction que « Correction 15 °C » : densité à 15 °C d'abord, puis coefficient).
+//   • Stock début : proposé = stock fin du mois précédent ; modifiable par le Superviseur seul.
+//   • Stock fin   : jaugeage du dernier jour, saisi par le Superviseur ou l'opérateur du site.
+// ---------------------------------------------------------------------
+const CHAMPS_STOCK = ["ambiant", "temp", "densite"];
+const tousVides = (f) => CHAMPS_STOCK.every((k) => String(f[k] ?? "").trim() === "");
+const enTexte = (o) => ({ ambiant: String(o.ambiant), temp: String(o.temp), densite: String(o.densite) });
+const VIDE = { ambiant: "", temp: "", densite: "" };
+function evalBloc(f) {
+  if (tousVides(f)) return { vide: true };
+  const a = lireNombre(f.ambiant), t = lireNombre(f.temp), d = lireNombre(f.densite);
+  if ([a, t, d].some((x) => Number.isNaN(x))) return { ok: false, erreur: "Valeur non numérique" };
+  if (a === null || t === null || d === null) return { ok: false, erreur: "Volume, température et densité sont obligatoires" };
+  const cv = convertir15({ ambiant: a, temp: t, densite: d });
+  if (!cv.ok) return { ok: false, erreur: cv.erreur };
+  return { ok: true, a, t, d, conv: cv, avertissement: t < TEMP_MIN_PLAUSIBLE || t > TEMP_MAX_PLAUSIBLE ? `Température hors plage plausible (${TEMP_MIN_PLAUSIBLE} à ${TEMP_MAX_PLAUSIBLE} °C)` : undefined };
+}
+const memeBloc = (x, y) => {
+  if (!x && !y) return true; if (!x || !y) return false;
+  return ["ambiant", "temp", "densite", "v15"].every((k) => (x[k] === null && y[k] === null) || (x[k] !== null && y[k] !== null && Math.abs(x[k] - y[k]) < 1e-6));
+};
+
+const StocksPanel = forwardRef(function StocksPanel({ bilan, prec, editable, canManage, userName, siteName, onDirty, onSaved, appendAudit, flash }, ref) {
+  const editableDeb = editable && canManage;
+  const prop = prec && (prec.statut === "historique" || (prec.stock_fin_ambiant !== null && prec.stock_fin_ambiant !== undefined))
+    ? { ambiant: num(prec.stock_fin_ambiant), temp: num(prec.stock_fin_temp), densite: num(prec.stock_fin_densite), v15: num(prec.stock_fin15) } : null;
+  const propComplet = !!prop && prop.ambiant !== null && prop.temp !== null && prop.densite !== null;
+  const prevV15 = prop ? prop.v15 : null;
+  const savedDeb = bilan.stock_debut15 !== null && bilan.stock_debut15 !== undefined ? { ambiant: num(bilan.stock_debut_ambiant), temp: num(bilan.stock_debut_temp), densite: num(bilan.stock_debut_densite), v15: num(bilan.stock_debut15) } : null;
+  const savedFin = bilan.stock_fin_ambiant !== null && bilan.stock_fin_ambiant !== undefined ? { ambiant: num(bilan.stock_fin_ambiant), temp: num(bilan.stock_fin_temp), densite: num(bilan.stock_fin_densite), v15: num(bilan.stock_fin15) } : null;
+
+  const [deb, setDeb] = useState(() => (savedDeb && savedDeb.ambiant !== null ? enTexte(savedDeb) : !savedDeb && propComplet ? enTexte(prop) : VIDE));
+  const [debSource, setDebSource] = useState(() => (!savedDeb ? "propose" : savedDeb.ambiant !== null ? "saisi" : "report"));
+  const [debReport, setDebReport] = useState(() => (savedDeb && savedDeb.ambiant === null ? savedDeb.v15 : null));
+  const [fin, setFin] = useState(() => (savedFin ? enTexte(savedFin) : VIDE));
+  const [saving, setSaving] = useState(false);
+  const refs = useRef({});
+
+  const debEval = evalBloc(deb), finEval = evalBloc(fin);
+  // Cible d'écriture : undefined = rien à écrire ; null = effacer ; "erreur" ; ou le bloc à enregistrer.
+  let debTarget;
+  if (debSource === "saisi") debTarget = debEval.vide ? (savedDeb ? null : undefined) : debEval.ok ? { ambiant: debEval.a, temp: debEval.t, densite: debEval.d, v15: debEval.conv.volume15 } : "erreur";
+  else if (debSource === "report") debTarget = { ambiant: null, temp: null, densite: null, v15: debReport };
+  const finTarget = finEval.vide ? (savedFin ? null : undefined) : finEval.ok ? { ambiant: finEval.a, temp: finEval.t, densite: finEval.d, v15: finEval.conv.volume15 } : "erreur";
+  const dirty = (t, s) => t === "erreur" || (t === null && !!s) || (!!t && t !== "erreur" && !memeBloc(t, s));
+  const dirtyDeb = editableDeb && dirty(debTarget, savedDeb), dirtyFin = editable && dirty(finTarget, savedFin);
+  const nbDirty = (dirtyDeb ? 1 : 0) + (dirtyFin ? 1 : 0);
+  useEffect(() => { if (onDirty) onDirty(nbDirty); }, [nbDirty]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const ordre = ["deb-ambiant", "deb-temp", "deb-densite", "fin-ambiant", "fin-temp", "fin-densite"];
+  const aller = (cle, sens) => { const dispo = ordre.filter((k) => refs.current[k] && !refs.current[k].disabled); const i = dispo.indexOf(cle); const nxt = dispo[i + sens]; if (nxt) refs.current[nxt].focus(); };
+  const onKeyDown = (e, cle) => { if (e.key === "Enter") { e.preventDefault(); aller(cle, 1); } };
+  const setChamp = (bloc, k, v) => { if (bloc === "deb") { setDeb((p) => ({ ...p, [k]: v })); setDebSource("saisi"); } else setFin((p) => ({ ...p, [k]: v })); };
+  const reprendre = () => {
+    if (propComplet) { setDeb(enTexte(prop)); setDebSource("saisi"); setDebReport(null); }
+    else { setDeb(VIDE); setDebSource("report"); setDebReport(prevV15); }
+  };
+
+  const verifier = () => {
+    if (dirtyDeb && debTarget === "erreur") return `Stock début : ${debEval.erreur}`;
+    if (dirtyFin && finTarget === "erreur") return `Stock fin : ${finEval.erreur}`;
+    return null;
+  };
+  const save = async () => {
+    if (saving || !(dirtyDeb || dirtyFin)) return { statut: "rien" };
+    const payload = { modified_by: userName || null };
+    if (dirtyDeb) { const t = debTarget; payload.stock_debut_ambiant = t ? t.ambiant : null; payload.stock_debut_temp = t ? t.temp : null; payload.stock_debut_densite = t ? t.densite : null; payload.stock_debut15 = t ? t.v15 : null; }
+    if (dirtyFin) { const t = finTarget; payload.stock_fin_ambiant = t ? t.ambiant : null; payload.stock_fin_temp = t ? t.temp : null; payload.stock_fin_densite = t ? t.densite : null; payload.stock_fin15 = t ? t.v15 : 0; }
+    setSaving(true);
+    try {
+      const r = await supabase.from("bilan_matieres").update(payload).eq("id", bilan.id).select(COLS_STOCKS).single();
+      if (r.error) throw r.error;
+      if (onSaved) onSaved(r.data);
+      if (dirtyDeb && debTarget === null) { setDeb(propComplet ? enTexte(prop) : VIDE); setDebSource("propose"); setDebReport(null); }
+      const parts = [dirtyDeb ? "stock début" : null, dirtyFin ? "stock fin" : null].filter(Boolean).join(" et ");
+      if (flash) flash("Bilan enregistré.");
+      if (appendAudit) appendAudit("Stocks du bilan matières enregistrés", `${siteName} — ${bilan.period_key} : ${parts}`);
+      return { statut: "ok", texte: parts };
+    } catch (e) {
+      return { statut: "erreur", texte: erreurLisible(e) };
+    } finally { setSaving(false); }
+  };
+  useImperativeHandle(ref, () => ({ save, verifier }));
+
+  const debV15 = !debEval.vide && debEval.ok ? debEval.conv.volume15 : debSource === "report" ? debReport : debSource === "propose" ? prevV15 : null;
+  const debRemarque = debSource === "saisi" ? (savedDeb && !dirtyDeb ? "Saisi (enregistré)" : debEval.vide ? "Vide : retour à la proposition du mois précédent" : "Saisi — à enregistrer")
+    : debSource === "report" ? `Report du stock fin à 15 °C du mois précédent (sans détail ambiant)${dirtyDeb ? " — à enregistrer" : ""}`
+    : prevV15 !== null ? `Proposé : stock fin du mois précédent (${fmtL(prevV15)} L à 15 °C)` : "Non disponible : pas de stock fin au mois précédent — saisie manuelle par le Superviseur";
+  const finRemarque = savedFin && !dirtyFin ? "Jaugeage enregistré" : finEval.vide ? "Non saisi" : dirtyFin ? "À enregistrer" : "";
+
+  const ligne = (cle, titre, f, ev, enabled, proposeStyle, v15, remarque) => {
+    const err = ev.ok === false, warn = ev.ok && ev.avertissement;
+    return (
+      <tr key={cle} data-testid={`stk-${cle}`}>
+        <td className="sap-d" style={{ fontWeight: 600 }}>{titre}</td>
+        {CHAMPS_STOCK.map((k) => (
+          <td key={k}>
+            <input ref={(el) => { refs.current[`${cle}-${k}`] = el; }} className={`sap-cell ${err ? "sap-cell-err" : warn && k === "temp" ? "sap-cell-warn" : ""} ${proposeStyle ? "sap-cell-prop" : ""}`}
+              value={f[k]} disabled={!enabled} inputMode="decimal" aria-label={`${titre} — ${k}`} data-testid={`stk-${cle}-${k}`} title={err ? ev.erreur : warn && k === "temp" ? ev.avertissement : undefined}
+              onChange={(e) => setChamp(cle, k, e.target.value)} onKeyDown={(e) => onKeyDown(e, `${cle}-${k}`)} onFocus={(e) => e.target.select()} />
+          </td>
+        ))}
+        <td className="sap-num sap-ro" data-testid={`stk-${cle}-d15`}>{ev.ok && ev.conv.densite15 !== null && ev.conv.densite15 !== undefined ? ev.conv.densite15.toLocaleString("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : ""}</td>
+        <td className="sap-num sap-ro" data-testid={`stk-${cle}-vcf`}>{ev.ok && ev.conv.vcf ? ev.conv.vcf.toFixed(4).replace(".", ",") : ""}</td>
+        <td className="sap-num sap-ro" data-testid={`stk-${cle}-v15`} style={{ fontWeight: 600 }}>{v15 !== null && v15 !== undefined ? fmtL(v15) : ""}</td>
+        <td className="sap-mark" title={err ? ev.erreur : warn ? ev.avertissement : ""} data-testid={`stk-${cle}-mark`}>{err ? <span className="sap-msg-err">✖</span> : warn ? <span className="sap-msg-warn">⚠</span> : ""}</td>
+        <td className="sap-d sap-muted" style={{ whiteSpace: "normal", minWidth: 240 }} data-testid={`stk-${cle}-remarque`}>{remarque}</td>
+      </tr>
+    );
+  };
+  return (
+    <div>
+      {!editable && <p className="sap-muted" style={{ margin: "0 0 8px" }} data-testid="stk-lecture">Bilan verrouillé : les stocks sont en lecture seule.</p>}
+      <div className="sap-gridwrap" style={{ maxHeight: "none" }}>
+        <table className="sap-table sap-grid" data-testid="sap-stocks">
+          <thead><tr><th>Poste</th><th className="sap-num">Volume ambiant (L) *</th><th className="sap-num">Température (°C) *</th><th className="sap-num">Densité observée *</th><th className="sap-num">Densité à 15 °C</th><th className="sap-num">Coefficient</th><th className="sap-num">Volume 15 °C (L)</th><th className="sap-mark"></th><th>Remarque</th></tr></thead>
+          <tbody>
+            {ligne("deb", "Stock début de mois", deb, debEval, editableDeb, debSource === "propose" && propComplet, debV15, debRemarque)}
+            {ligne("fin", "Stock fin de mois (jaugeage)", fin, finEval, editable, false, !finEval.vide && finEval.ok ? finEval.conv.volume15 : null, finRemarque)}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 10 }}>
+        {editableDeb && prevV15 !== null && <button className="sap-btn" onClick={reprendre} data-testid="stk-reprendre">Reprendre le stock fin du mois précédent</button>}
+        <span className="sap-muted" style={{ fontSize: 12 }}>Le stock début est proposé automatiquement ; seul le Superviseur peut le modifier. La densité observée est celle mesurée à la température du produit : elle est d'abord ramenée à 15 °C, puis le coefficient est appliqué.</span>
+      </div>
+    </div>
+  );
+});
+
 export default function BilansMatieresSap({ sites = [], movements = [], canManage = false, canEdit = false, assignedSiteIds = [], userName = "", appendAudit, flash }) {
   const selectableSites = useMemo(() => sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id))), [sites, assignedSiteIds]);
   const d0 = new Date(); const dPrev = new Date(d0.getFullYear(), d0.getMonth() - 1, 1); // par défaut : le mois qui vient de se terminer
@@ -255,7 +392,11 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(null); // { type: "ok" | "warn" | "err", text }
   const [ventesOuvert, setVentesOuvert] = useState(false); // la grille n'est chargée qu'à la première ouverture de l'onglet
-  const [nbModifiees, setNbModifiees] = useState(0);
+  const [nbModifVentes, setNbModifVentes] = useState(0);
+  const [nbModifStocks, setNbModifStocks] = useState(0);
+  const [stocksOuvert, setStocksOuvert] = useState(false);
+  const stocksRef = useRef(null);
+  const nbModifiees = nbModifVentes + nbModifStocks;
   const [joursSaisis, setJoursSaisis] = useState(0);
   const gridRef = useRef(null);
   const [paramVal, setParamVal] = useState("");
@@ -299,7 +440,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           row = again.data;
         } else if (ins.error) throw ins.error; else { row = ins.data; cree = true; }
       }
-      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifiees(0); setJoursSaisis(0);
+      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setJoursSaisis(0);
       if (cree) {
         if (appendAudit) appendAudit("Bilan matières créé", `${siteName} — ${MOIS[sel.month - 1]} ${sel.year}`);
         if (flash) flash("Bilan créé en brouillon.");
@@ -313,7 +454,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   };
   const retour = () => {
     if (nbModifiees > 0 && typeof window !== "undefined" && !window.confirm("Des modifications ne sont pas enregistrées. Quitter quand même ?")) return;
-    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVentesOuvert(false); setNbModifiees(0);
+    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0);
   };
   // Paramètre « densité de vente » (Superviseur) : chargé à l'ouverture de l'écran de sélection.
   useEffect(() => {
@@ -322,6 +463,20 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     supabase.from("bilan_parametres").select("valeur").eq("cle", "densite_vente").maybeSingle().then((r) => { if (!off && !r.error) setParamVal(r.data ? String(r.data.valeur) : String(DENSITE_VENTE_DEFAUT)); });
     return () => { off = true; };
   }, [canManage, screen]);
+  // Enregistre ventes ET stocks d'un coup : contrôle des deux, puis écriture des seules modifications.
+  const enregistrer = async () => {
+    const comps = [["ventes", gridRef.current], ["stocks", stocksRef.current]].filter(([, r]) => r);
+    for (const [, r] of comps) { const e = r.verifier(); if (e) { setMsg({ type: "err", text: e }); return; } }
+    setMsg(null);
+    const parts = [];
+    for (const [nom, r] of comps) {
+      const res = await r.save();
+      if (res.statut === "erreur") { setMsg({ type: "err", text: res.texte }); return; }
+      if (res.statut === "ok") parts.push([nom, res.texte]);
+    }
+    if (!parts.length) setMsg({ type: "warn", text: "Aucune modification à enregistrer." });
+    else setMsg({ type: "ok", text: parts.length === 1 ? `Bilan enregistré (${parts[0][1]}).` : `Bilan enregistré (${parts.map(([n, t]) => `${n} : ${t}`).join(" ; ")}).` });
+  };
   const enregistrerParam = async () => {
     const v = Number(String(paramVal).replace(",", "."));
     if (!Number.isFinite(v) || v < 653 || v > 1075) { setMsg({ type: "err", text: "Densité de vente invalide (entre 653 et 1075 kg/m³)." }); return; }
@@ -347,7 +502,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     syn = { stockDebut, stockDebutPropose: stockDebutSaisi === null && precFin !== null, stockFin, receptions, ventes, transferts, calc, complet };
   }
   const lignesSynthese = syn ? 8 : 0;
-  const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : 0;
+  const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : tab === "stocks" ? 2 : 0;
   const editable = bilan?.statut === "brouillon" && canEdit;
   const st = bilan ? STATUTS[bilan.statut] || STATUTS.historique : null;
   const bientot = "Disponible aux étapes suivantes";
@@ -413,7 +568,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       <div className="sap-shell"><span>Bilan matières — {site?.name || bilan.site_id} — {periodLabel}</span><span className={`sap-badge ${st.cls}`} data-testid="sap-statut">{st.label}</span></div>
       <div className="sap-toolbar">
         <button className="sap-btn" onClick={retour} title="Retour à la sélection">◀ Retour</button>
-        <button className="sap-btn" onClick={() => gridRef.current && gridRef.current.save()} disabled={!(editable && ventesOuvert)} title={editable ? (ventesOuvert ? "Enregistrer les ventes modifiées" : "Ouvre l'onglet Ventes journalières") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
+        <button className="sap-btn" onClick={enregistrer} disabled={!(editable && (ventesOuvert || stocksOuvert))} title={editable ? (ventesOuvert || stocksOuvert ? "Enregistrer les modifications" : "Ouvre l'onglet Ventes journalières ou Stocks début / fin") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
         {["Vérifier", "Valider", "Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
       </div>
       <div className="sap-header" data-testid="sap-entete">
@@ -427,7 +582,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       {hist && <div className="sap-banner" data-testid="sap-historique">Bilan historique (saisi avec l'ancien module) : affiché en lecture seule, avec les valeurs enregistrées.</div>}
       <div className="sap-tabs" role="tablist">
         {[["synthese", "Synthèse"], ["ventes", "Ventes journalières"], ["receptions", "Réceptions"], ["stocks", "Stocks début / fin"]].map(([id, label]) => (
-          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); }}>{label}</button>
+          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); if (id === "stocks" && !hist) setStocksOuvert(true); }}>{label}</button>
         ))}
       </div>
       <div className="sap-body">
@@ -472,13 +627,19 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         )}
         {ventesOuvert && !hist && (
           <div style={{ display: tab === "ventes" ? "block" : "none" }}>
-            <VentesGrille ref={gridRef} bilan={bilan} editable={editable} userName={userName} siteName={site?.name || bilan.site_id} setMsg={setMsg} onDirty={setNbModifiees} onStats={setJoursSaisis}
+            <VentesGrille ref={gridRef} bilan={bilan} editable={editable} userName={userName} siteName={site?.name || bilan.site_id} setMsg={setMsg} onDirty={setNbModifVentes} onStats={setJoursSaisis}
               onSaved={(h) => setBilan((b) => ({ ...b, ...h }))} appendAudit={appendAudit} flash={flash} />
           </div>
         )}
         {tab === "ventes" && hist && <p className="sap-muted" data-testid="sap-ventes-hist">Bilan historique : les ventes ont été saisies en un total mensuel avec l'ancien module (pas de détail journalier).</p>}
-        {tab === "stocks" && (
-          <p className="sap-muted" data-testid="sap-bientot">La saisie des stocks de début et de fin de mois sera disponible à l'étape suivante du déploiement.</p>
+        {stocksOuvert && !hist && (
+          <div style={{ display: tab === "stocks" ? "block" : "none" }}>
+            <StocksPanel ref={stocksRef} bilan={bilan} prec={prec} editable={editable} canManage={canManage} userName={userName} siteName={site?.name || bilan.site_id}
+              onDirty={setNbModifStocks} onSaved={(h) => setBilan((b) => ({ ...b, ...h }))} appendAudit={appendAudit} flash={flash} />
+          </div>
+        )}
+        {tab === "stocks" && hist && (
+          <p className="sap-muted" data-testid="sap-stocks-hist">Bilan historique : stock fin enregistré directement à 15 °C ({fmtL(num(bilan.stock_fin15))} L), sans détail de volume ambiant, température ni densité.</p>
         )}
       </div>
       <div className="sap-status">
