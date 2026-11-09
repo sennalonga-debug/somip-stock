@@ -9,6 +9,7 @@ import {
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import ReunionsView from "./Reunions";
+import BilansMatieresSap from "./BilansMatieres";
 import autoTable from "jspdf-autotable";
 import pptxgen from "pptxgenjs";
 import {
@@ -3970,7 +3971,7 @@ export default function App() {
   // classement plus clair : Opérations, Documents & suivis, Rapports, Administration.
   const NAV_GROUPS = [
     { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "dashboard_lub", "saisie", "engins", "inventaires", "vcf"] },
-    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_lubrifiants"] },
+    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_bilan_sap", "doc_lubrifiants"] },
     { label: null, ids: ["rapports"] },
     { label: null, ids: ["reunions"] },
     { label: null, ids: ["stock_jour"] },
@@ -4274,7 +4275,7 @@ export default function App() {
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "vcf" && <VcfView />}
-          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={settings.objectifFreinte} presenterName={currentUserName} />}
+          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={settings.objectifFreinte} presenterName={currentUserName} appendAudit={appendAudit} flash={flash} />}
           {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
@@ -8047,7 +8048,7 @@ function VcfView() {
 /* même contenu, les mêmes filtres et les mêmes exports partout.          */
 /* ------------------------------------------------------------------ */
 function renderReportTab(tab, ctx) {
-  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, presenterName } = ctx;
+  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, presenterName, appendAudit, flash } = ctx;
   // Déjà filtré en amont (la page Rapports est ouverte à tous sauf les comptes TotalEnergies,
   // et "Documents & suivis" a son propre contrôle par page) — cette barrière ne doit donc pas
   // exclure en plus un compte Lecture seule sans site attribué, qui doit tout voir comme un
@@ -8062,6 +8063,7 @@ function renderReportTab(tab, ctx) {
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} canManage={canManage} editMovementTempDensite={editMovementTempDensite} /> : null;
+    case "bilansap": return canSee ? <BilansMatieresSap sites={sites} movements={movements} canManage={canManage} canEdit={!!(canManage || isSiteRestricted)} assignedSiteIds={assignedSiteIds} userName={presenterName} appendAudit={appendAudit} flash={flash} /> : null;
     case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} presenterName={presenterName} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
@@ -8090,6 +8092,11 @@ const DOC_PAGES = {
   doc_bilans: {
     label: "Bilans matières", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
     tabs: [{ id: "bilan", label: "Bilan Matières" }],
+  },
+  // Nouveau module style SAP (refonte en cours) : cohabite avec l'ancien jusqu'à son remplacement complet.
+  doc_bilan_sap: {
+    label: "Bilan matières (nouveau)", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    tabs: [{ id: "bilansap", label: "Bilan matières" }],
   },
   doc_lubrifiants: {
     label: "Lubrifiants", icon: Fuel, allowed: () => true,
