@@ -11,12 +11,13 @@
 // =====================================================================
 import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { supabase } from "./supabaseClient.js";
-import { receptionsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, transfertsParDecade, messagesVentes, messagesTransferts, messagesGeneraux, trierMessages, compterMessages, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
+import { receptionsDuMois, calculerSynthese, lignePresentation, construireDocumentBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, transfertsParDecade, messagesVentes, messagesTransferts, messagesGeneraux, trierMessages, compterMessages, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
 
 const MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
 const pad2 = (n) => String(n).padStart(2, "0");
 const COLS = "id, site_id, period_type, period_key, statut, reception15, ventes15, transferts15, stock_fin15, stock_debut_ambiant, stock_debut_temp, stock_debut_densite, stock_debut15, stock_fin_ambiant, stock_fin_temp, stock_fin_densite, densite_vente, ventes_ambiant, commentaire, created_by, created_at, modified_by, modified_at, valide_par, valide_le";
 const COLS_PREC = "id, statut, period_key, stock_fin15, stock_fin_ambiant, stock_fin_temp, stock_fin_densite";
+const COLS_PRES = COLS + ", photo_urls";
 const COLS_STOCKS = "stock_debut_ambiant, stock_debut_temp, stock_debut_densite, stock_debut15, stock_fin_ambiant, stock_fin_temp, stock_fin_densite, stock_fin15, modified_at, modified_by";
 const STATUTS = {
   brouillon: { label: "Brouillon", cls: "sap-st-draft" },
@@ -103,7 +104,12 @@ const STYLE = `
 .sap-msgitem:hover, .sap-msgitem:focus { background: #eaf2fb; outline: none; }
 .sap-banner-ok { padding: 7px 14px; background: #e1f3e8; color: #0b5d2d; border-bottom: 1px solid #b9dfc7; font-size: 12.5px; }
 .sap-msg-link { cursor: pointer; text-decoration: underline dotted; }
-@media print { .sap-toolbar { display: none; } .sap-msgpanel { display: none; } }
+.sap-printonly { display: none; }
+.sap-printonly h2 { margin: 0 0 2px; font-size: 18px; } .sap-printonly h3 { margin: 12px 0 4px; font-size: 13px; background: #1f3a5f; color: #fff; padding: 3px 8px; }
+.sap-printonly table { border-collapse: collapse; width: 100%; font-size: 10.5px; margin-bottom: 6px; }
+.sap-printonly th, .sap-printonly td { border: 1px solid #b9c0c7; padding: 2px 6px; text-align: right; } .sap-printonly th:first-child, .sap-printonly td:first-child { text-align: left; }
+.sap-printonly thead th { background: #eef1f4; } .sap-printonly tfoot td { font-weight: 700; background: #f6f8f9; }
+@media print { .sap-root > *:not(.sap-printonly):not(style) { display: none !important; } .sap-printonly { display: block !important; } .sap-root { border: none !important; } }
 `;
 
 
@@ -213,7 +219,8 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
       return { statut: "erreur", texte: erreurLisible(e) };
     } finally { setSaving(false); }
   };
-  useImperativeHandle(ref, () => ({ save, verifier, pret: () => !loading, messages: (aujourdhui) => messagesVentes(jours.map((j) => ({ jour: j, calc: calc[j] })), aujourdhui) }));
+  useImperativeHandle(ref, () => ({ save, verifier, pret: () => !loading, messages: (aujourdhui) => messagesVentes(jours.map((j) => ({ jour: j, calc: calc[j] })), aujourdhui),
+    donnees: () => ({ densite, lignes: jours.map((j) => (calc[j].saisi && calc[j].ok ? { jour: j, saisi: true, volume: calc[j].volume, temp: calc[j].temp, densite15: calc[j].densite15, vcf: calc[j].vcf, volume15: calc[j].volume15 } : { jour: j, saisi: false })), totaux }) }));
 
   if (loading) return <p className="sap-muted" data-testid="grille-chargement">Chargement des ventes du mois…</p>;
   return (
@@ -346,7 +353,8 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
       return { statut: "erreur", texte: erreurLisible(e) };
     } finally { setSaving(false); }
   };
-  useImperativeHandle(ref, () => ({ save, verifier, pret: () => !loading, messages: () => messagesTransferts(decades.map((d) => ({ n: d.n, calc: calc[d.n] }))) }));
+  useImperativeHandle(ref, () => ({ save, verifier, pret: () => !loading, messages: () => messagesTransferts(decades.map((d) => ({ n: d.n, calc: calc[d.n] }))),
+    donnees: () => ({ decades: decades.map((d) => ({ n: d.n, debut: d.debut, fin: d.fin, saisi: calc[d.n].saisi && calc[d.n].ok, envoyes: calc[d.n].envoyes, recus: calc[d.n].recus, net: calc[d.n].net })), tot }) }));
 
   if (loading) return <p className="sap-muted" data-testid="tr-chargement">Chargement des transferts du mois…</p>;
   const fmtInfo = (x) => {
@@ -505,7 +513,11 @@ const StocksPanel = forwardRef(function StocksPanel({ bilan, prec, editable, can
     bloc("Stock fin", finEval, !finEval.vide && finEval.ok ? finEval.conv.volume15 : null, "fin", "Stock fin de mois non saisi (obligatoire pour valider)");
     return out;
   };
-  useImperativeHandle(ref, () => ({ save, verifier, pret: () => true, messages }));
+  const donnees = () => {
+    const bloc = (ev, v15, remarque) => (ev.ok ? { ambiant: ev.a, temp: ev.t, densite: ev.d, d15: ev.conv.densite15, vcf: ev.conv.vcf, v15, remarque } : { ambiant: null, temp: null, densite: null, d15: null, vcf: null, v15, remarque });
+    return { deb: bloc(debEval, debV15, debRemarque), fin: bloc(finEval, !finEval.vide && finEval.ok ? finEval.conv.volume15 : null, finRemarque) };
+  };
+  useImperativeHandle(ref, () => ({ save, verifier, pret: () => true, messages, donnees }));
 
   const ligne = (cle, titre, f, ev, enabled, proposeStyle, v15, remarque) => {
     const err = ev.ok === false, warn = ev.ok && ev.avertissement;
@@ -547,7 +559,114 @@ const StocksPanel = forwardRef(function StocksPanel({ bilan, prec, editable, can
   );
 });
 
-export default function BilansMatieresSap({ sites = [], movements = [], canManage = false, canEdit = false, assignedSiteIds = [], userName = "", appendAudit, flash }) {
+// Contenu réservé à l'impression : invisible à l'écran, seul visible sur la feuille imprimée (voir @media print).
+function DocImpression({ doc }) {
+  return (
+    <div className="sap-printonly" data-testid="sap-print">
+      <h2>{doc.title}</h2>
+      <p style={{ margin: "0 0 6px" }}>{doc.subtitle} — {doc.period}</p>
+      {doc.sections.map((sec) => (
+        <div key={sec.heading}>
+          <h3>{sec.heading}</h3>
+          <table><thead><tr>{sec.columns.map((col, i) => <th key={i}>{col}</th>)}</tr></thead>
+            <tbody>{sec.rows.map((r, i) => <tr key={i}>{r.map((x, j) => <td key={j}>{x}</td>)}</tr>)}</tbody>
+            {sec.totalsRow && <tfoot><tr>{sec.totalsRow.map((x, j) => <td key={j}>{x}</td>)}</tr></tfoot>}
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Présentation PowerPoint de PLUSIEURS sites dans un même fichier (Superviseur).
+//   On choisit le mois, on coche les sites à inclure ; les chiffres viennent des bilans du nouveau module
+//   (même synthèse que l'écran). Les textes (autonomie, natures, justificatifs, conclusion, recommandations)
+//   et la génération du .pptx sont ceux du panneau « Présentation » existant (passé en paramètre).
+// ---------------------------------------------------------------------
+function PresentationSites({ sites, movements, month, year, canManage, userName, PresentationPanel, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, onRetour }) {
+  const key = `${year}-${pad2(month)}`;
+  const prevKey = month === 1 ? `${year - 1}-12` : `${year}-${pad2(month - 1)}`;
+  const [etat, setEtat] = useState({ loading: true, erreur: null, lignes: [] });
+  const [coche, setCoche] = useState({});
+  useEffect(() => {
+    let off = false;
+    (async () => {
+      try {
+        const [cur, prev] = await Promise.all([
+          supabase.from("bilan_matieres").select(COLS_PRES).eq("period_type", "mensuel").eq("period_key", key),
+          supabase.from("bilan_matieres").select(COLS_PREC + ", site_id").eq("period_type", "mensuel").eq("period_key", prevKey),
+        ]);
+        if (cur.error) throw cur.error;
+        if (off) return;
+        const lignes = sites.map((s) => ({ site: s, ...lignePresentation({ site: s, bilan: (cur.data || []).find((b) => b.site_id === s.id) || null, prec: prev.error ? null : (prev.data || []).find((b) => b.site_id === s.id) || null, movements }) }));
+        setEtat({ loading: false, erreur: null, lignes });
+        setCoche(Object.fromEntries(lignes.filter((l) => l.etat === "ok").map((l) => [l.site.id, true])));
+      } catch (e) { if (!off) setEtat({ loading: false, erreur: erreurLisible(e), lignes: [] }); }
+    })();
+    return () => { off = true; };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  const periodeLabel = `${MOIS[month - 1]} ${year}`;
+  const ok = etat.lignes.filter((l) => l.etat === "ok");
+  const choisies = ok.filter((l) => coche[l.site.id]);
+  const rows = choisies.map((l) => l.ligne);
+  const saved = (bilanPresentations || []).find((p) => p.periodType === "mensuel" && p.periodKey === key);
+  const ready = bilanPresStatus === "ready" || bilanPresStatus === "unavailable" || bilanPresStatus === "error";
+  const brouillons = choisies.filter((l) => l.statut === "brouillon").length;
+  return (
+    <div className="sap-root" data-testid="sap-presentation">
+      <style>{STYLE}</style>
+      <div className="sap-shell"><span>Présentation PowerPoint — {periodeLabel}</span><span style={{ fontWeight: 400, fontSize: 12 }}>Plusieurs sites dans un même fichier</span></div>
+      <div className="sap-toolbar"><button className="sap-btn" onClick={onRetour}>◀ Retour</button></div>
+      <div style={{ padding: "10px 14px" }}>
+        {etat.loading && <p className="sap-muted" data-testid="pres-chargement">Chargement des bilans de {periodeLabel}…</p>}
+        {etat.erreur && <p className="sap-msg sap-msg-err" data-testid="pres-erreur">✖ {etat.erreur}</p>}
+        {!etat.loading && !etat.erreur && (
+          <>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+              <b>Sites à inclure ({choisies.length} sur {ok.length})</b>
+              <button className="sap-btn" data-testid="pres-all" onClick={() => setCoche(Object.fromEntries(ok.map((l) => [l.site.id, true])))}>Tout sélectionner</button>
+              <button className="sap-btn" data-testid="pres-none" onClick={() => setCoche({})}>Aucun</button>
+            </div>
+            <div className="sap-gridwrap" style={{ maxHeight: "none" }}>
+              <table className="sap-table" data-testid="pres-table">
+                <thead><tr><th></th><th>Site</th><th>Statut du bilan</th><th className="sap-num">Stock théorique (L)</th><th className="sap-num">Stock physique (L)</th><th className="sap-num">Écart (L)</th><th className="sap-num">Taux (‰)</th><th>Remarque</th></tr></thead>
+                <tbody>
+                  {etat.lignes.map((l) => {
+                    const l1 = l.ligne; const stt = l.statut ? (STATUTS[l.statut] || STATUTS.historique) : null;
+                    const taux = l1 && l1.ventes15 ? (l1.ecart / l1.ventes15) * 1000 : null;
+                    return (
+                      <tr key={l.site.id} data-testid={`pres-ligne-${l.site.id}`}>
+                        <td><input type="checkbox" disabled={l.etat !== "ok"} checked={!!coche[l.site.id]} onChange={(e) => setCoche((p) => ({ ...p, [l.site.id]: e.target.checked }))} aria-label={`Inclure ${l.site.name}`} data-testid={`pres-check-${l.site.id}`} /></td>
+                        <td className="sap-d" style={{ fontWeight: 600 }}>{l.site.name}</td>
+                        <td className="sap-d">{stt ? <span className={`sap-badge ${stt.cls}`}>{stt.label}</span> : "—"}</td>
+                        <td className="sap-num">{l1 ? fmtL(l1.stockTheorique) : "—"}</td>
+                        <td className="sap-num">{l1 ? fmtL(l1.stockFin15) : "—"}</td>
+                        <td className={`sap-num ${l1 ? clsSigne(l1.ecart) : ""}`} data-testid={`pres-ecart-${l.site.id}`}>{l1 ? fmtSigned(l1.ecart) : "—"}</td>
+                        <td className="sap-num">{taux === null ? "—" : `${taux > 0 ? "+" : ""}${taux.toLocaleString("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</td>
+                        <td className="sap-d sap-muted">{l.etat === "absent" ? "Aucun bilan pour ce mois" : l.etat === "incomplet" ? "Stock début ou stock fin manquant : écart non calculable" : l.statut === "brouillon" ? "Bilan non validé" : ""}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {brouillons > 0 && <p className="sap-msg sap-msg-warn" style={{ margin: "8px 0 0" }} data-testid="pres-brouillons">⚠ {brouillons} site(s) sélectionné(s) ont un bilan non validé : les chiffres peuvent encore changer.</p>}
+            <div style={{ marginTop: 12 }} data-testid="pres-panel">
+              {!PresentationPanel ? <p className="sap-muted">Génération indisponible.</p>
+                : !canManage ? <p className="sap-muted">La présentation est réservée au Superviseur.</p>
+                : rows.length === 0 ? <p className="sap-muted" data-testid="pres-aucun">Coche au moins un site pour préparer la présentation.</p>
+                : !ready ? <p className="sap-muted">Chargement des textes de la présentation…</p>
+                : <PresentationPanel key={`${key}|${rows.map((r) => r.site.id).join(",")}|${saved ? saved.updatedAt || "x" : "-"}`} rows={rows} periodType="mensuel" periodKey={key} saved={saved} status={bilanPresStatus} onSave={saveBilanPresentation} defaultPreparePar={userName ? `${userName} — Superviseur Sites Externalisés` : ""} seuil={objectifFreinte} />}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function BilansMatieresSap({ sites = [], movements = [], canManage = false, canEdit = false, assignedSiteIds = [], userName = "", appendAudit, flash, exportToExcel, exportToPdf, PresentationPanel, bilanPresentations = [], bilanPresStatus = "idle", saveBilanPresentation, objectifFreinte = 3 }) {
   const selectableSites = useMemo(() => sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id))), [sites, assignedSiteIds]);
   const d0 = new Date(); const dPrev = new Date(d0.getFullYear(), d0.getMonth() - 1, 1); // par défaut : le mois qui vient de se terminer
   const [sel, setSel] = useState({ siteId: "", month: dPrev.getMonth() + 1, year: dPrev.getFullYear() });
@@ -564,11 +683,12 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const [nbTransferts, setNbTransferts] = useState(0);
   const transfertsRef = useRef(null);
   const stocksRef = useRef(null);
-  const nbModifiees = nbModifVentes + nbModifStocks + nbModifTransferts;
   const [joursSaisis, setJoursSaisis] = useState(0);
   const gridRef = useRef(null);
   const [paramVal, setParamVal] = useState("");
   const [verif, setVerif] = useState(null); // résultat de « Vérifier » : { messages }
+  const [obs, setObs] = useState("");           // observation du mois (reprise dans la présentation PowerPoint)
+  const [docImpression, setDocImpression] = useState(null);
   const [occupe, setOccupe] = useState(false);
   const [bilan, setBilan] = useState(null);
   const [prec, setPrec] = useState(null);
@@ -580,6 +700,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
 
   const rec = useMemo(() => (bilan ? receptionsDuMois(movements, bilan.site_id, bilan.period_key) : null), [movements, bilan]);
 
+  const obsDirty = !!bilan && bilan.statut === "brouillon" && canEdit && obs !== (bilan.commentaire || "");
+  const nbModifiees = nbModifVentes + nbModifStocks + nbModifTransferts + (obsDirty ? 1 : 0);
   const executer = async () => {
     if (!siteId || loading) return;
     setLoading(true); setMsg(null);
@@ -609,7 +731,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           row = again.data;
         } else if (ins.error) throw ins.error; else { row = ins.data; cree = true; }
       }
-      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0); setNbTransferts(0); setJoursSaisis(0);
+      setBilan(row); setObs(row.commentaire || ""); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0); setNbTransferts(0); setJoursSaisis(0);
       if (cree) {
         if (appendAudit) appendAudit("Bilan matières créé", `${siteName} — ${MOIS[sel.month - 1]} ${sel.year}`);
         if (flash) flash("Bilan créé en brouillon.");
@@ -667,6 +789,12 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       if (res.statut === "erreur") return { statut: "erreur", texte: res.texte };
       if (res.statut === "ok") parts.push([nom, res.texte]);
     }
+    if (obsDirty) {
+      const u = await supabase.from("bilan_matieres").update({ commentaire: obs.trim() || null, modified_by: userName || null }).eq("id", bilan.id).select("commentaire, modified_at, modified_by").single();
+      if (u.error) return { statut: "erreur", texte: erreurLisible(u.error) };
+      setBilan((b) => ({ ...b, ...u.data }));
+      parts.push(["observation", "texte enregistré"]);
+    }
     return { statut: parts.length ? "ok" : "rien", parts };
   };
   const enregistrer = async () => {
@@ -675,6 +803,36 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     if (r.statut === "erreur") { setMsg({ type: "err", text: r.texte, cible: r.bloque ? (collecter().find((m) => m.niveau === "erreur") || {}).cible : undefined }); return; }
     if (r.statut === "rien") setMsg({ type: "warn", text: "Aucune modification à enregistrer." });
     else setMsg({ type: "ok", text: r.parts.length === 1 ? `Bilan enregistré (${r.parts[0][1]}).` : `Bilan enregistré (${r.parts.map(([n, t]) => `${n} : ${t}`).join(" ; ")}).` });
+  };
+  // Excel / PDF / impression : même contenu que l'écran (onglets Synthèse + détail). Les données enregistrées sont exportées :
+  // s'il reste des modifications non enregistrées, on propose de les enregistrer d'abord.
+  const exporter = async (format) => {
+    if (occupe || !bilan) return;
+    if (nbModifiees > 0 && editable) {
+      if (!window.confirm("Des modifications ne sont pas enregistrées. Enregistrer maintenant avant d'exporter ?")) return;
+      const r = await sauver();
+      if (r.statut === "erreur") { setMsg({ type: "err", text: r.texte }); return; }
+    }
+    setOccupe(true); setMsg(null);
+    try {
+      let det = {};
+      if (!hist) {
+        if (!(await ouvrirTout())) { setMsg({ type: "err", text: "Chargement des onglets impossible : réessaie." }); return; }
+        det = { ventes: gridRef.current.donnees(), transferts: transfertsRef.current.donnees(), stocks: stocksRef.current.donnees() };
+      }
+      const doc = construireDocumentBilan({
+        siteName: site?.name || bilan.site_id, periodKey: bilan.period_key, periodLabel, statutLabel: st.label.replace(" 🔒", ""),
+        entete: { creePar: bilan.created_by, creeLe: bilan.created_at, modifiePar: bilan.modified_by || bilan.created_by, modifieLe: bilan.modified_at || bilan.created_at, validePar: bilan.statut === "valide" ? bilan.valide_par : null, valideLe: bilan.valide_le },
+        synthese: syn, observation: bilan.commentaire || "", ventes: det.ventes || null, transferts: det.transferts || null, stocks: det.stocks || null,
+        receptions: { lignes: rec.lignes.map((l) => ({ date: l.date, ref: l.ref, quantity: l.quantity, temperatureC: l.temperatureC, densiteObservee: l.densiteObservee, volume15: l.volume15, converti: l.converti })), total15: rec.total15, totalAmbiant: rec.lignes.reduce((a, l) => a + (l.quantity || 0), 0) },
+      });
+      if (format === "excel") { exportToExcel(`${doc.filename}.xlsx`, doc.sheets); setMsg({ type: "ok", text: `Export Excel généré (${doc.filename}.xlsx).` }); }
+      else if (format === "pdf") { await exportToPdf({ filename: `${doc.filename}.pdf`, title: doc.title, subtitle: doc.subtitle, period: doc.period, sections: doc.sections }); setMsg({ type: "ok", text: `Export PDF généré (${doc.filename}.pdf).` }); }
+      else { setDocImpression(doc); setTimeout(() => window.print(), 150); setMsg({ type: "ok", text: "Impression lancée." }); }
+      if (appendAudit) appendAudit("Bilan matières exporté", `${site?.name || bilan.site_id} — ${bilan.period_key} : ${{ excel: "Excel", pdf: "PDF", print: "impression" }[format]}`);
+    } catch (e) {
+      setMsg({ type: "err", text: erreurLisible(e) });
+    } finally { setOccupe(false); }
   };
   const verifierBilan = async () => {
     if (occupe || !bilan || bilan.statut === "historique") return;
@@ -738,19 +896,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
 
   // ---------------- Calculs de la synthèse (tout à 15 °C) ----------------
   const hist = bilan?.statut === "historique";
-  let syn = null;
-  if (bilan) {
-    const stockDebutSaisi = num(bilan.stock_debut15);
-    const precFin = prec && (prec.statut === "historique" || prec.stock_fin_ambiant !== null) ? num(prec.stock_fin15) : null;
-    const stockDebut = stockDebutSaisi !== null ? stockDebutSaisi : precFin;
-    const stockFin = hist ? num(bilan.stock_fin15) : (bilan.stock_fin_ambiant !== null && bilan.stock_fin_ambiant !== undefined ? num(bilan.stock_fin15) : null);
-    const receptions = hist ? num(bilan.reception15) : rec.total15;
-    const ventes = num(bilan.ventes15) || 0;
-    const transferts = num(bilan.transferts15) || 0; // saisis dans l'onglet Transferts (total recalculé par la base)
-    const complet = stockDebut !== null && stockFin !== null;
-    const calc = complet ? calculerBilan({ stockDebut15: stockDebut, receptions15: receptions, ventes15: ventes, transferts15: transferts, stockFin15: stockFin }) : null;
-    syn = { stockDebut, stockDebutPropose: stockDebutSaisi === null && precFin !== null, stockFin, receptions, ventes, transferts, calc, complet };
-  }
+  const syn = bilan ? calculerSynthese({ bilan, prec, rec }) : null; // même définition que les exports et la présentation PowerPoint
   const lignesSynthese = syn ? 8 : 0;
   const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : tab === "stocks" ? 2 : tab === "transferts" ? nbTransferts : 0;
   const editable = bilan?.statut === "brouillon" && canEdit;
@@ -758,6 +904,10 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const bientot = "Disponible aux étapes suivantes";
 
   // ---------------- Écran de sélection ----------------
+  if (screen === "presentation") {
+    return <PresentationSites sites={selectableSites} movements={movements} month={sel.month} year={sel.year} canManage={canManage} userName={userName} PresentationPanel={PresentationPanel}
+      bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} onRetour={() => setScreen("select")} />;
+  }
   if (screen === "select") {
     return (
       <div className="sap-root" data-testid="sap-select" onKeyDown={(e) => { if (e.key === "F8") { e.preventDefault(); executer(); } }}>
@@ -765,6 +915,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         <div className="sap-shell"><span>Bilan matières — Sélection</span><span style={{ fontWeight: 400, fontSize: 12 }}>Transaction BILMAT</span></div>
         <div className="sap-toolbar">
           <button className="sap-btn sap-btn-main" onClick={executer} disabled={loading || !siteId} title="Exécuter (F8)">{loading ? "Chargement…" : "Exécuter (F8)"}</button>
+          {canManage && PresentationPanel && <button className="sap-btn" onClick={() => setScreen("presentation")} data-testid="sap-btn-presentation" title="Présentation PowerPoint de plusieurs sites, pour le mois choisi">Présentation PowerPoint (plusieurs sites)…</button>}
         </div>
         <div className="sap-form">
           <div className="sap-row"><label className="sap-label" htmlFor="sap-site">Site *</label>
@@ -824,7 +975,9 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         {bilan.statut === "valide" && canManage
           ? <button className="sap-btn" onClick={rouvrir} disabled={occupe} title="Rouvrir le bilan (Superviseur)">Rouvrir</button>
           : <button className="sap-btn" onClick={valider} disabled={!(canManage && bilan.statut === "brouillon") || occupe} title={canManage ? (bilan.statut === "brouillon" ? "Vérification complète puis verrouillage du bilan" : "Bilan non modifiable") : "Réservé au Superviseur"}>Valider</button>}
-        {["Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
+        <button className="sap-btn" onClick={() => exporter("excel")} disabled={!exportToExcel || occupe} title={exportToExcel ? "Exporter la synthèse et le détail en Excel" : "Export indisponible"}>Exporter Excel</button>
+        <button className="sap-btn" onClick={() => exporter("pdf")} disabled={!exportToPdf || occupe} title={exportToPdf ? "Exporter la synthèse et le détail en PDF" : "Export indisponible"}>Exporter PDF</button>
+        <button className="sap-btn" onClick={() => exporter("print")} disabled={occupe} title="Imprimer la synthèse et le détail">Imprimer</button>
       </div>
       <div className="sap-header" data-testid="sap-entete">
         <div className="sap-hrow"><b>Site</b><span>{site?.name || bilan.site_id}</span></div>
@@ -857,6 +1010,13 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
               {ligne("pct", "Écart en % des ventes", c ? c.ecartPct : null, c && c.ecartPct === null ? "Aucune vente sur le mois" : "Écart ÷ ventes du mois", { pct: true, cls: c ? clsSigne(c.ecart) : "" })}
             </tbody>
           </table>
+        )}
+        {tab === "synthese" && (
+          <div style={{ marginTop: 14 }} data-testid="sap-obs-bloc">
+            <label className="sap-label" htmlFor="sap-obs" style={{ display: "block", marginBottom: 4 }}>Observation du mois</label>
+            <textarea id="sap-obs" data-testid="sap-obs" className="sap-input" style={{ width: "100%", maxWidth: 640 }} rows={3} value={obs} disabled={!editable} placeholder={editable ? "Ex. : boni hors freinte, justificatif camion…" : ""} onChange={(e) => setObs(e.target.value)} />
+            <p className="sap-muted" style={{ margin: "2px 0 0", fontSize: 11.5 }}>Reprise dans la présentation PowerPoint (diapositive « Observations »). Vide = « RAS. ».</p>
+          </div>
         )}
         {tab === "receptions" && (
           <div>
@@ -925,6 +1085,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         <span className={msg ? `sap-msg sap-msg-${msg.type}${msg.cible ? " sap-msg-link" : ""}` : "sap-muted"} role="status" data-testid="sap-msg" onClick={() => msg && msg.cible && allerA(msg.cible)} title={msg && msg.cible ? "Cliquer pour aller à la cellule concernée" : undefined}>{msg ? `${{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]} ${msg.text}` : "Prêt."}</span>
         <span data-testid="sap-barre">Statut : {st.label.replace(" 🔒", "")} | {nbLignes} ligne(s) | Dernière modification : {fmtDateHeure(bilan.modified_at || bilan.created_at)}</span>
       </div>
+      {docImpression && <DocImpression doc={docImpression} />}
     </div>
   );
 }
