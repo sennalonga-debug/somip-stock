@@ -2943,7 +2943,7 @@ export default function App() {
   const currentRole = profile?.role || "lecture";
   const perms = permsFor(currentRole);
   useEffect(() => {
-    if (view !== "doc_bilans" || !perms.canManage || bilanPresStatus !== "idle") return;
+    if ((view !== "doc_bilans" && view !== "doc_bilan_sap") || !perms.canManage || bilanPresStatus !== "idle") return;
     setBilanPresStatus("loading");
     fetchTable("bilan_presentations", rowToBilanPresentation, null, false, COLS_BILAN_PRESENTATIONS)
       .then((rows) => { setBilanPresentations(rows); setBilanPresStatus("ready"); })
@@ -8063,7 +8063,8 @@ function renderReportTab(tab, ctx) {
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} canManage={canManage} editMovementTempDensite={editMovementTempDensite} /> : null;
-    case "bilansap": return canSee ? <BilansMatieresSap sites={sites} movements={movements} canManage={canManage} canEdit={!!(canManage || isSiteRestricted)} assignedSiteIds={assignedSiteIds} userName={presenterName} appendAudit={appendAudit} flash={flash} /> : null;
+    case "bilansap": return canSee ? <BilansMatieresSap sites={sites} movements={movements} canManage={canManage} canEdit={!!(canManage || isSiteRestricted)} assignedSiteIds={assignedSiteIds} userName={presenterName} appendAudit={appendAudit} flash={flash}
+      exportToExcel={exportToExcel} exportToPdf={exportToPdf} PresentationPanel={BilanPresentationPanel} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} /> : null;
     case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} presenterName={presenterName} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
