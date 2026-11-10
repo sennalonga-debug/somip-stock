@@ -11,7 +11,7 @@
 // =====================================================================
 import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { supabase } from "./supabaseClient.js";
-import { receptionsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, camionsParDecade, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
+import { receptionsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, transfertsParDecade, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
 
 const MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -255,16 +255,16 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
 
 
 // ---------------------------------------------------------------------
-// Onglet « Transferts » : saisie PAR DÉCADE, à l'AMBIANT, uniquement pour équilibrer les stocks.
+// Onglet « Transferts » : transferts ENTRE SITES, saisis PAR DÉCADE, à l'AMBIANT, uniquement pour équilibrer les stocks.
 //   Décade 1 = du 01 au 10 · décade 2 = du 11 au 20 · décade 3 = du 21 à la fin du mois.
-//   « Transferts » (chargements des camions laitiers) sortent du stock ; « Retours » (camions -> cuve) y entrent.
+//   « Envoyés » (à un autre site) sortent du stock ; « Reçus » (d'un autre site) y entrent. Le site concerné n'est pas saisi.
 //   Aucune température ni conversion à 15 °C : seules les ventes sont converties (onglet Ventes journalières).
 //   Les deux champs sont facultatifs ; une décade vide est ignorée. Enregistrement : seules les décades modifiées.
-//   Pour information (jamais compté) : ce que l'application a déjà enregistré en chargements / retours de camions.
+//   Pour information (jamais compté) : ce que l'application a déjà enregistré (transferts entre sites, chargements de camions).
 // ---------------------------------------------------------------------
 const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editable, userName, siteName, movements, setMsg, onDirty, onStats, onSaved, appendAudit, flash }, ref) {
   const decades = useMemo(() => decadesDuMois(bilan.period_key), [bilan.period_key]);
-  const info = useMemo(() => camionsParDecade(movements, bilan.site_id, bilan.period_key), [movements, bilan.site_id, bilan.period_key]);
+  const info = useMemo(() => transfertsParDecade(movements, bilan.site_id, bilan.period_key), [movements, bilan.site_id, bilan.period_key]);
   const [vals, setVals] = useState({});   // n -> { transferts, retours } (texte saisi)
   const [saved, setSaved] = useState({}); // n -> { transferts, retours } (nombres enregistrés en base)
   const [loading, setLoading] = useState(true);
@@ -279,8 +279,8 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
       if (r.error) { setMsg({ type: "err", text: erreurLisible(r.error) }); setLoading(false); return; }
       const v = {}, s = {};
       (r.data || []).forEach((l) => {
-        v[l.decade] = { transferts: String(l.transferts_ambiant), retours: String(l.retours_ambiant) };
-        s[l.decade] = { transferts: Number(l.transferts_ambiant), retours: Number(l.retours_ambiant) };
+        v[l.decade] = { envoyes: String(l.transferts_ambiant), recus: String(l.retours_ambiant) };
+        s[l.decade] = { envoyes: Number(l.transferts_ambiant), recus: Number(l.retours_ambiant) };
       });
       setVals(v); setSaved(s); setLoading(false);
     })();
@@ -293,13 +293,13 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
     const c = calc[n], s = saved[n];
     if (!c.saisi) return !!s;
     if (!c.ok) return true;
-    return !s || s.transferts !== c.transferts || s.retours !== c.retours;
+    return !s || s.envoyes !== c.envoyes || s.recus !== c.recus;
   };
   const nbModifiees = decades.filter((d) => modifiee(d.n)).length;
   useEffect(() => { if (onDirty) onDirty(nbModifiees); }, [nbModifiees]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (onStats) onStats(tot.nb); }, [tot.nb]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const champs = ["transferts", "retours"];
+  const champs = ["envoyes", "recus"];
   const setCell = (n, champ, valeur) => setVals((p) => ({ ...p, [n]: { ...(p[n] || {}), [champ]: valeur } }));
   const aller = (i, col) => { const el = refs.current[`${i}-${col}`]; if (el) el.focus(); };
   const onKeyDown = (e, i, col) => {
@@ -315,13 +315,13 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
   };
   const save = async () => {
     if (!editable || saving) return { statut: "rien" };
-    const aSauver = decades.filter((d) => calc[d.n].saisi && calc[d.n].ok && (!saved[d.n] || saved[d.n].transferts !== calc[d.n].transferts || saved[d.n].retours !== calc[d.n].retours)).map((d) => d.n);
+    const aSauver = decades.filter((d) => calc[d.n].saisi && calc[d.n].ok && (!saved[d.n] || saved[d.n].envoyes !== calc[d.n].envoyes || saved[d.n].recus !== calc[d.n].recus)).map((d) => d.n);
     const aSupprimer = decades.filter((d) => !calc[d.n].saisi && saved[d.n]).map((d) => d.n);
     if (!aSauver.length && !aSupprimer.length) return { statut: "rien" };
     setSaving(true);
     try {
       if (aSauver.length) {
-        const payload = aSauver.map((n) => ({ bilan_id: bilan.id, decade: n, transferts_ambiant: calc[n].transferts, retours_ambiant: calc[n].retours, updated_by: userName || null }));
+        const payload = aSauver.map((n) => ({ bilan_id: bilan.id, decade: n, transferts_ambiant: calc[n].envoyes, retours_ambiant: calc[n].recus, updated_by: userName || null }));
         const r = await supabase.from("bilan_transferts").upsert(payload, { onConflict: "bilan_id,decade" });
         if (r.error) throw r.error;
       }
@@ -329,7 +329,7 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
         const r = await supabase.from("bilan_transferts").delete().eq("bilan_id", bilan.id).in("decade", aSupprimer);
         if (r.error) throw r.error;
       }
-      setSaved((p) => { const n = { ...p }; aSauver.forEach((k) => { n[k] = { transferts: calc[k].transferts, retours: calc[k].retours }; }); aSupprimer.forEach((k) => { delete n[k]; }); return n; });
+      setSaved((p) => { const n = { ...p }; aSauver.forEach((k) => { n[k] = { envoyes: calc[k].envoyes, recus: calc[k].recus }; }); aSupprimer.forEach((k) => { delete n[k]; }); return n; });
       // Total net : recalculé par la base ; on relit uniquement les champs du bilan concernés.
       const h = await supabase.from("bilan_matieres").update({ modified_by: userName || null }).eq("id", bilan.id).select("transferts15, transferts_ambiant, modified_at, modified_by").single();
       if (!h.error && h.data && onSaved) onSaved(h.data);
@@ -343,13 +343,17 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
   useImperativeHandle(ref, () => ({ save, verifier }));
 
   if (loading) return <p className="sap-muted" data-testid="tr-chargement">Chargement des transferts du mois…</p>;
-  const fmtInfo = (x) => (x.nbChargements || x.nbRetours ? `Chargements : ${fmtL(x.chargements)} L (${x.nbChargements}) · Retours : ${fmtL(x.retours)} L (${x.nbRetours})` : "—");
+  const fmtInfo = (x) => {
+    const a = x.nbEnvoyes || x.nbRecus ? `Envoyés : ${fmtL(x.envoyes)} L (${x.nbEnvoyes}) · Reçus : ${fmtL(x.recus)} L (${x.nbRecus})` : null;
+    const b = x.nbChargements ? `Chargements camions : ${fmtL(x.chargements)} L (${x.nbChargements})` : null;
+    return [a, b].filter(Boolean).join(" — ") || "—";
+  };
   return (
     <div>
       {!editable && <p className="sap-muted" style={{ margin: "0 0 8px" }} data-testid="tr-lecture">Bilan verrouillé : les transferts sont en lecture seule.</p>}
       <div className="sap-gridwrap" style={{ maxHeight: "none" }} data-testid="sap-transferts">
         <table className="sap-table sap-grid">
-          <thead><tr><th>Décade</th><th className="sap-num">Transferts vers camions laitiers (L)</th><th className="sap-num">Retours camions → cuve (L)</th><th className="sap-num">Effet sur le stock (L)</th><th className="sap-mark"></th><th>Pour information : déjà enregistré dans l'application (non compté)</th></tr></thead>
+          <thead><tr><th>Décade</th><th className="sap-num">Envoyés à d'autres sites (L)</th><th className="sap-num">Reçus d'autres sites (L)</th><th className="sap-num">Effet sur le stock (L)</th><th className="sap-mark"></th><th>Pour information : déjà enregistré dans l'application (non compté)</th></tr></thead>
           <tbody>
             {decades.map((d, i) => {
               const c = calc[d.n]; const err = c.saisi && !c.ok;
@@ -359,7 +363,7 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
                   {champs.map((champ, col) => (
                     <td key={champ}>
                       <input ref={(el) => { refs.current[`${i}-${col}`] = el; }} className={`sap-cell ${err ? "sap-cell-err" : ""}`} value={vals[d.n]?.[champ] ?? ""} disabled={!editable} inputMode="decimal"
-                        aria-label={`${champ === "transferts" ? "Transferts" : "Retours"} décade ${d.n}`} data-testid={`tr-${d.n}-${champ}`} title={err ? c.erreur : undefined}
+                        aria-label={`${champ === "envoyes" ? "Transferts envoyés" : "Transferts reçus"} décade ${d.n}`} data-testid={`tr-${d.n}-${champ}`} title={err ? c.erreur : undefined}
                         onChange={(e) => setCell(d.n, champ, e.target.value)} onKeyDown={(e) => onKeyDown(e, i, col)} onFocus={(e) => e.target.select()} />
                     </td>
                   ))}
@@ -373,15 +377,15 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
           <tfoot>
             <tr className="sap-total">
               <td className="sap-d">Total du mois</td>
-              <td className="sap-num" data-testid="tr-total-transferts">{fmtL(tot.transferts)}</td>
-              <td className="sap-num" data-testid="tr-total-retours">{fmtL(tot.retours)}</td>
+              <td className="sap-num" data-testid="tr-total-envoyes">{fmtL(tot.envoyes)}</td>
+              <td className="sap-num" data-testid="tr-total-recus">{fmtL(tot.recus)}</td>
               <td className="sap-num" data-testid="tr-total-net">{fmtSigned(tot.net)}</td><td></td>
-              <td className="sap-d sap-muted" style={{ whiteSpace: "normal" }} data-testid="tr-total-info">{fmtInfo({ chargements: info.reduce((a, x) => a + x.chargements, 0), nbChargements: info.reduce((a, x) => a + x.nbChargements, 0), retours: info.reduce((a, x) => a + x.retours, 0), nbRetours: info.reduce((a, x) => a + x.nbRetours, 0) })}</td>
+              <td className="sap-d sap-muted" style={{ whiteSpace: "normal" }} data-testid="tr-total-info">{fmtInfo(Object.fromEntries(["envoyes", "nbEnvoyes", "recus", "nbRecus", "chargements", "nbChargements"].map((k) => [k, info.reduce((a, x) => a + x[k], 0)])))}</td>
             </tr>
           </tfoot>
         </table>
       </div>
-      <p className="sap-muted" style={{ fontSize: 11.5, margin: "8px 0 0" }}>Saisie à l'ambiant, sans température ni conversion à 15 °C : ces volumes servent uniquement à équilibrer les stocks (transferts = sorties du stock, retours = entrées). Les ventes restent saisies par jour, avec la température, dans l'onglet « Ventes journalières ». Les chiffres « pour information » ne sont jamais comptés.</p>
+      <p className="sap-muted" style={{ fontSize: 11.5, margin: "8px 0 0" }}>Saisie à l'ambiant, sans température ni conversion à 15 °C : ces volumes servent uniquement à équilibrer les stocks (envoyés à un autre site = sorties du stock, reçus d'un autre site = entrées ; le site concerné n'est pas saisi). Les ventes restent saisies par jour, avec la température, dans l'onglet « Ventes journalières ». Les chiffres « pour information » ne sont jamais comptés.</p>
     </div>
   );
 });
@@ -731,7 +735,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
               {ligne("debut", "Stock début de mois", syn.stockDebut, syn.stockDebut === null ? "Non disponible : pas de bilan du mois précédent" : syn.stockDebutPropose ? "Proposé : stock fin du mois précédent" : "Saisi")}
               {ligne("rec", "+ Réceptions", syn.receptions, hist ? "Saisie manuelle (ancien module)" : `${rec.lignes.length} bon(s) de livraison du registre${rec.nbSansMesure ? ` — ⚠ ${rec.nbSansMesure} sans température/densité (compté en ambiant)` : ""}`)}
               {ligne("ven", "− Ventes", syn.ventes, hist ? "Saisie manuelle (ancien module)" : "Total des ventes journalières (mis à jour par la base)")}
-              {ligne("tr", "± Transferts (camions laitiers)", syn.transferts, hist ? "Saisie manuelle (ancien module)" : "Saisie par décade, à l'ambiant (équilibre des stocks) : retours − transferts", { signed: true })}
+              {ligne("tr", "± Transferts entre sites", syn.transferts, hist ? "Saisie manuelle (ancien module)" : "Saisie par décade, à l'ambiant (équilibre des stocks) : reçus − envoyés", { signed: true })}
               {ligne("theo", "= Stock théorique fin", c ? c.theorique : syn.stockDebut !== null ? syn.stockDebut + syn.receptions - syn.ventes + syn.transferts : null, "Début + réceptions − ventes ± transferts", { total: true })}
               {ligne("phys", "Stock physique fin (jaugeage)", syn.stockFin, syn.stockFin === null ? "Non saisi" : "Mesuré à la jauge, ramené à 15 °C", { bold: true })}
               {ligne("ecart", "Écart (physique − théorique)", c ? c.ecart : null, c ? (c.sens === "gain" ? "Gain" : c.sens === "perte" ? "Perte" : "Aucun écart") : "Stock début ou stock fin manquant", { total: true, signed: true, cls: c ? clsSigne(c.ecart) : "" })}
