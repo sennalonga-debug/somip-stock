@@ -11,7 +11,7 @@
 // =====================================================================
 import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { supabase } from "./supabaseClient.js";
-import { receptionsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, transfertsParDecade, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
+import { receptionsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, transfertsParDecade, messagesVentes, messagesTransferts, messagesGeneraux, trierMessages, compterMessages, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
 
 const MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -97,7 +97,13 @@ const STYLE = `
 .sap-ro { background: #e9ebed !important; color: #4b5057; padding: 4px 9px !important; }
 .sap-mark { width: 26px; text-align: center; padding: 0 !important; }
 .sap-row-dirty td.sap-d { border-left: 3px solid #0a6ed1; }
-@media print { .sap-toolbar { display: none; } }
+.sap-msgpanel { border-top: 1px solid #d9dde0; background: #fcfcfd; max-height: 175px; overflow: auto; padding: 6px 12px 8px; font-size: 12.5px; }
+.sap-msghead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-weight: 600; }
+.sap-msgitem { list-style: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
+.sap-msgitem:hover, .sap-msgitem:focus { background: #eaf2fb; outline: none; }
+.sap-banner-ok { padding: 7px 14px; background: #e1f3e8; color: #0b5d2d; border-bottom: 1px solid #b9dfc7; font-size: 12.5px; }
+.sap-msg-link { cursor: pointer; text-decoration: underline dotted; }
+@media print { .sap-toolbar { display: none; } .sap-msgpanel { display: none; } }
 `;
 
 
@@ -207,7 +213,7 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
       return { statut: "erreur", texte: erreurLisible(e) };
     } finally { setSaving(false); }
   };
-  useImperativeHandle(ref, () => ({ save, verifier }));
+  useImperativeHandle(ref, () => ({ save, verifier, pret: () => !loading, messages: (aujourdhui) => messagesVentes(jours.map((j) => ({ jour: j, calc: calc[j] })), aujourdhui) }));
 
   if (loading) return <p className="sap-muted" data-testid="grille-chargement">Chargement des ventes du mois…</p>;
   return (
@@ -340,7 +346,7 @@ const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editabl
       return { statut: "erreur", texte: erreurLisible(e) };
     } finally { setSaving(false); }
   };
-  useImperativeHandle(ref, () => ({ save, verifier }));
+  useImperativeHandle(ref, () => ({ save, verifier, pret: () => !loading, messages: () => messagesTransferts(decades.map((d) => ({ n: d.n, calc: calc[d.n] }))) }));
 
   if (loading) return <p className="sap-muted" data-testid="tr-chargement">Chargement des transferts du mois…</p>;
   const fmtInfo = (x) => {
@@ -403,10 +409,11 @@ const VIDE = { ambiant: "", temp: "", densite: "" };
 function evalBloc(f) {
   if (tousVides(f)) return { vide: true };
   const a = lireNombre(f.ambiant), t = lireNombre(f.temp), d = lireNombre(f.densite);
-  if ([a, t, d].some((x) => Number.isNaN(x))) return { ok: false, erreur: "Valeur non numérique" };
-  if (a === null || t === null || d === null) return { ok: false, erreur: "Volume, température et densité sont obligatoires" };
+  const premier = (cond) => CHAMPS_STOCK.find((k, i) => cond([a, t, d][i])); // premier champ fautif, pour y amener le curseur
+  if ([a, t, d].some((x) => Number.isNaN(x))) return { ok: false, erreur: "Valeur non numérique", champ: premier((x) => Number.isNaN(x)) };
+  if (a === null || t === null || d === null) return { ok: false, erreur: "Volume, température et densité sont obligatoires", champ: premier((x) => x === null) };
   const cv = convertir15({ ambiant: a, temp: t, densite: d });
-  if (!cv.ok) return { ok: false, erreur: cv.erreur };
+  if (!cv.ok) return { ok: false, erreur: cv.erreur, champ: /Densité/.test(cv.erreur) ? "densite" : /Température/.test(cv.erreur) ? "temp" : "ambiant" };
   return { ok: true, a, t, d, conv: cv, avertissement: t < TEMP_MIN_PLAUSIBLE || t > TEMP_MAX_PLAUSIBLE ? `Température hors plage plausible (${TEMP_MIN_PLAUSIBLE} à ${TEMP_MAX_PLAUSIBLE} °C)` : undefined };
 }
 const memeBloc = (x, y) => {
@@ -455,18 +462,23 @@ const StocksPanel = forwardRef(function StocksPanel({ bilan, prec, editable, can
     if (dirtyFin && finTarget === "erreur") return `Stock fin : ${finEval.erreur}`;
     return null;
   };
-  const save = async () => {
-    if (saving || !(dirtyDeb || dirtyFin)) return { statut: "rien" };
+  // figerDebut (validation) : un stock début encore « proposé » est enregistré dans le bilan, pour qu'il ne change plus.
+  const save = async ({ figerDebut = false } = {}) => {
+    const forceDeb = figerDebut && editableDeb && !savedDeb && debSource === "propose" && (propComplet ? debEval.ok : prevV15 !== null);
+    const targetDeb = forceDeb ? (propComplet ? { ambiant: debEval.a, temp: debEval.t, densite: debEval.d, v15: debEval.conv.volume15 } : { ambiant: null, temp: null, densite: null, v15: prevV15 }) : debTarget;
+    const ecrireDeb = dirtyDeb || forceDeb;
+    if (saving || !(ecrireDeb || dirtyFin)) return { statut: "rien" };
     const payload = { modified_by: userName || null };
-    if (dirtyDeb) { const t = debTarget; payload.stock_debut_ambiant = t ? t.ambiant : null; payload.stock_debut_temp = t ? t.temp : null; payload.stock_debut_densite = t ? t.densite : null; payload.stock_debut15 = t ? t.v15 : null; }
+    if (ecrireDeb) { const t = targetDeb; payload.stock_debut_ambiant = t ? t.ambiant : null; payload.stock_debut_temp = t ? t.temp : null; payload.stock_debut_densite = t ? t.densite : null; payload.stock_debut15 = t ? t.v15 : null; }
     if (dirtyFin) { const t = finTarget; payload.stock_fin_ambiant = t ? t.ambiant : null; payload.stock_fin_temp = t ? t.temp : null; payload.stock_fin_densite = t ? t.densite : null; payload.stock_fin15 = t ? t.v15 : 0; }
     setSaving(true);
     try {
       const r = await supabase.from("bilan_matieres").update(payload).eq("id", bilan.id).select(COLS_STOCKS).single();
       if (r.error) throw r.error;
       if (onSaved) onSaved(r.data);
-      if (dirtyDeb && debTarget === null) { setDeb(propComplet ? enTexte(prop) : VIDE); setDebSource("propose"); setDebReport(null); }
-      const parts = [dirtyDeb ? "stock début" : null, dirtyFin ? "stock fin" : null].filter(Boolean).join(" et ");
+      if (ecrireDeb && targetDeb === null) { setDeb(propComplet ? enTexte(prop) : VIDE); setDebSource("propose"); setDebReport(null); }
+      if (forceDeb) { setDebSource(propComplet ? "saisi" : "report"); if (!propComplet) setDebReport(prevV15); }
+      const parts = [ecrireDeb ? "stock début" : null, dirtyFin ? "stock fin" : null].filter(Boolean).join(" et ");
       if (flash) flash("Bilan enregistré.");
       if (appendAudit) appendAudit("Stocks du bilan matières enregistrés", `${siteName} — ${bilan.period_key} : ${parts}`);
       return { statut: "ok", texte: parts };
@@ -474,13 +486,26 @@ const StocksPanel = forwardRef(function StocksPanel({ bilan, prec, editable, can
       return { statut: "erreur", texte: erreurLisible(e) };
     } finally { setSaving(false); }
   };
-  useImperativeHandle(ref, () => ({ save, verifier }));
+
 
   const debV15 = !debEval.vide && debEval.ok ? debEval.conv.volume15 : debSource === "report" ? debReport : debSource === "propose" ? prevV15 : null;
   const debRemarque = debSource === "saisi" ? (savedDeb && !dirtyDeb ? "Saisi (enregistré)" : debEval.vide ? "Vide : retour à la proposition du mois précédent" : "Saisi — à enregistrer")
     : debSource === "report" ? `Report du stock fin à 15 °C du mois précédent (sans détail ambiant)${dirtyDeb ? " — à enregistrer" : ""}`
     : prevV15 !== null ? `Proposé : stock fin du mois précédent (${fmtL(prevV15)} L à 15 °C)` : "Non disponible : pas de stock fin au mois précédent — saisie manuelle par le Superviseur";
   const finRemarque = savedFin && !dirtyFin ? "Jaugeage enregistré" : finEval.vide ? "Non saisi" : dirtyFin ? "À enregistrer" : "";
+  // Messages de vérification : erreurs de saisie, stocks obligatoires pour valider, températures hors plage.
+  const messages = () => {
+    const out = [];
+    const bloc = (nom, ev, v15, cle, manquant) => {
+      if (!ev.vide && ev.ok === false) out.push({ niveau: "erreur", texte: `${nom} : ${ev.erreur}`, cible: { onglet: "stocks", champ: `stk-${cle}-${ev.champ || "ambiant"}` } });
+      else if (v15 === null || v15 === undefined) out.push({ niveau: "erreur", texte: manquant, cible: { onglet: "stocks", champ: `stk-${cle}-ambiant` } });
+      else if (ev.ok && ev.avertissement) out.push({ niveau: "avert", texte: `${nom} : ${ev.avertissement}`, cible: { onglet: "stocks", champ: `stk-${cle}-temp` } });
+    };
+    bloc("Stock début", debEval, debV15, "deb", "Stock début de mois non disponible (obligatoire pour valider)");
+    bloc("Stock fin", finEval, !finEval.vide && finEval.ok ? finEval.conv.volume15 : null, "fin", "Stock fin de mois non saisi (obligatoire pour valider)");
+    return out;
+  };
+  useImperativeHandle(ref, () => ({ save, verifier, pret: () => true, messages }));
 
   const ligne = (cle, titre, f, ev, enabled, proposeStyle, v15, remarque) => {
     const err = ev.ok === false, warn = ev.ok && ev.avertissement;
@@ -543,6 +568,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const [joursSaisis, setJoursSaisis] = useState(0);
   const gridRef = useRef(null);
   const [paramVal, setParamVal] = useState("");
+  const [verif, setVerif] = useState(null); // résultat de « Vérifier » : { messages }
+  const [occupe, setOccupe] = useState(false);
   const [bilan, setBilan] = useState(null);
   const [prec, setPrec] = useState(null);
   const siteId = sel.siteId || selectableSites[0]?.id || "";
@@ -596,7 +623,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   };
   const retour = () => {
     if (nbModifiees > 0 && typeof window !== "undefined" && !window.confirm("Des modifications ne sont pas enregistrées. Quitter quand même ?")) return;
-    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0);
+    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVerif(null); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0);
   };
   // Paramètre « densité de vente » (Superviseur) : chargé à l'ouverture de l'écran de sélection.
   useEffect(() => {
@@ -605,19 +632,100 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     supabase.from("bilan_parametres").select("valeur").eq("cle", "densite_vente").maybeSingle().then((r) => { if (!off && !r.error) setParamVal(r.data ? String(r.data.valeur) : String(DENSITE_VENTE_DEFAUT)); });
     return () => { off = true; };
   }, [canManage, screen]);
-  // Enregistre ventes ET stocks d'un coup : contrôle des deux, puis écriture des seules modifications.
-  const enregistrer = async () => {
+  const aujourdhuiStr = () => { const d = new Date(); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+  // Les onglets ne se chargent qu'à leur première ouverture : Vérifier et Valider les ouvrent tous (quelques petites requêtes).
+  const ouvrirTout = async () => {
+    setVentesOuvert(true); setStocksOuvert(true); setTransfertsOuvert(true);
+    for (let i = 0; i < 120; i++) {
+      if ([gridRef.current, transfertsRef.current, stocksRef.current].every((r) => r && r.pret())) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  };
+  // Tous les messages de vérification : ventes, transferts, stocks, puis contrôles généraux (erreurs d'abord).
+  const collecter = () => {
+    const out = [];
+    if (gridRef.current) out.push(...gridRef.current.messages(aujourdhuiStr()));
+    if (transfertsRef.current) out.push(...transfertsRef.current.messages());
+    if (stocksRef.current) out.push(...stocksRef.current.messages());
+    out.push(...messagesGeneraux({ periodKey: bilan.period_key, aujourdhui: aujourdhuiStr(), nbReceptionsSansMesure: rec ? rec.nbSansMesure : 0 }));
+    return trierMessages(out);
+  };
+  // Clic sur un message : on ouvre l'onglet concerné et on place le curseur sur la cellule.
+  const allerA = (cible) => {
+    if (!cible) return;
+    setTab(cible.onglet);
+    if (cible.champ) setTimeout(() => { const el = document.querySelector(`[data-testid="${cible.champ}"]`); if (el) { el.focus(); if (el.scrollIntoView) el.scrollIntoView({ block: "nearest" }); } }, 80);
+  };
+  // Enregistre ventes, transferts et stocks d'un coup : contrôle des trois, puis écriture des seules modifications.
+  const sauver = async ({ figerDebut = false } = {}) => {
     const comps = [["ventes", gridRef.current], ["transferts", transfertsRef.current], ["stocks", stocksRef.current]].filter(([, r]) => r);
-    for (const [, r] of comps) { const e = r.verifier(); if (e) { setMsg({ type: "err", text: e }); return; } }
-    setMsg(null);
+    for (const [, r] of comps) { const e = r.verifier(); if (e) return { statut: "erreur", texte: e, bloque: true }; }
     const parts = [];
     for (const [nom, r] of comps) {
-      const res = await r.save();
-      if (res.statut === "erreur") { setMsg({ type: "err", text: res.texte }); return; }
+      const res = await r.save({ figerDebut });
+      if (res.statut === "erreur") return { statut: "erreur", texte: res.texte };
       if (res.statut === "ok") parts.push([nom, res.texte]);
     }
-    if (!parts.length) setMsg({ type: "warn", text: "Aucune modification à enregistrer." });
-    else setMsg({ type: "ok", text: parts.length === 1 ? `Bilan enregistré (${parts[0][1]}).` : `Bilan enregistré (${parts.map(([n, t]) => `${n} : ${t}`).join(" ; ")}).` });
+    return { statut: parts.length ? "ok" : "rien", parts };
+  };
+  const enregistrer = async () => {
+    setMsg(null);
+    const r = await sauver();
+    if (r.statut === "erreur") { setMsg({ type: "err", text: r.texte, cible: r.bloque ? (collecter().find((m) => m.niveau === "erreur") || {}).cible : undefined }); return; }
+    if (r.statut === "rien") setMsg({ type: "warn", text: "Aucune modification à enregistrer." });
+    else setMsg({ type: "ok", text: r.parts.length === 1 ? `Bilan enregistré (${r.parts[0][1]}).` : `Bilan enregistré (${r.parts.map(([n, t]) => `${n} : ${t}`).join(" ; ")}).` });
+  };
+  const verifierBilan = async () => {
+    if (occupe || !bilan || bilan.statut === "historique") return;
+    setOccupe(true); setMsg(null);
+    try {
+      if (!(await ouvrirTout())) { setMsg({ type: "err", text: "Chargement des onglets impossible : réessaie." }); return; }
+      const msgs = collecter(); const n = compterMessages(msgs);
+      setVerif({ messages: msgs });
+      const premiere = msgs[0] ? msgs[0].cible : undefined;
+      setMsg(n.erreurs ? { type: "err", text: `Vérification : ${n.erreurs} erreur(s), ${n.avertissements} avertissement(s).`, cible: premiere }
+        : n.avertissements ? { type: "warn", text: `Vérification : aucune erreur, ${n.avertissements} avertissement(s).`, cible: premiere }
+        : { type: "ok", text: "Vérification terminée : aucune anomalie." });
+    } finally { setOccupe(false); }
+  };
+  // Valider (Superviseur) : vérification complète, enregistrement, puis verrouillage. Les avertissements demandent confirmation.
+  const valider = async () => {
+    if (occupe || !bilan || bilan.statut !== "brouillon" || !canManage) return;
+    setOccupe(true); setMsg(null);
+    try {
+      if (!(await ouvrirTout())) { setMsg({ type: "err", text: "Chargement des onglets impossible : réessaie." }); return; }
+      const msgs = collecter(); const n = compterMessages(msgs);
+      setVerif({ messages: msgs });
+      if (n.erreurs) { setMsg({ type: "err", text: `Validation impossible : ${n.erreurs} erreur(s) à corriger.`, cible: msgs[0].cible }); return; }
+      if (n.avertissements && !window.confirm(`${n.avertissements} avertissement(s) restent ouverts. Valider quand même et verrouiller le bilan ?`)) { setMsg({ type: "warn", text: "Validation annulée.", cible: msgs[0].cible }); return; }
+      const r = await sauver({ figerDebut: true });
+      if (r.statut === "erreur") { setMsg({ type: "err", text: r.texte }); return; }
+      const u = await supabase.from("bilan_matieres").update({ statut: "valide", valide_par: userName || null, modified_by: userName || null }).eq("id", bilan.id).select("statut, valide_par, valide_le, modified_at, modified_by").single();
+      if (u.error) throw u.error;
+      setBilan((b) => ({ ...b, ...u.data })); setVerif(null);
+      if (appendAudit) appendAudit("Bilan matières validé", `${site?.name || bilan.site_id} — ${bilan.period_key}`);
+      if (flash) flash("Bilan validé et verrouillé.");
+      setMsg({ type: "ok", text: "Bilan validé et verrouillé." });
+    } catch (e) {
+      setMsg({ type: "err", text: erreurLisible(e) });
+    } finally { setOccupe(false); }
+  };
+  // Rouvrir (Superviseur) : le bilan validé repasse en Brouillon (la base efface « validé par / le »).
+  const rouvrir = async () => {
+    if (occupe || !bilan || bilan.statut !== "valide" || !canManage) return;
+    if (!window.confirm("Rouvrir ce bilan ? Il repassera en Brouillon et redeviendra modifiable.")) return;
+    setOccupe(true); setMsg(null);
+    try {
+      const u = await supabase.from("bilan_matieres").update({ statut: "brouillon", modified_by: userName || null }).eq("id", bilan.id).select("statut, valide_par, valide_le, modified_at, modified_by").single();
+      if (u.error) throw u.error;
+      setBilan((b) => ({ ...b, ...u.data }));
+      if (appendAudit) appendAudit("Bilan matières rouvert", `${site?.name || bilan.site_id} — ${bilan.period_key}`);
+      if (flash) flash("Bilan rouvert.");
+      setMsg({ type: "ok", text: "Bilan rouvert : il est de nouveau en Brouillon." });
+    } catch (e) {
+      setMsg({ type: "err", text: erreurLisible(e) });
+    } finally { setOccupe(false); }
   };
   const enregistrerParam = async () => {
     const v = Number(String(paramVal).replace(",", "."));
@@ -704,6 +812,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     </tr>
   );
   const c = syn.calc;
+  const cnt = verif ? compterMessages(verif.messages) : null;
   return (
     <div className="sap-root" data-testid="sap-bilan">
       <style>{STYLE}</style>
@@ -711,7 +820,11 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       <div className="sap-toolbar">
         <button className="sap-btn" onClick={retour} title="Retour à la sélection">◀ Retour</button>
         <button className="sap-btn" onClick={enregistrer} disabled={!(editable && (ventesOuvert || stocksOuvert || transfertsOuvert))} title={editable ? (ventesOuvert || stocksOuvert || transfertsOuvert ? "Enregistrer les modifications" : "Ouvre un onglet de saisie (ventes, transferts, stocks)") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
-        {["Vérifier", "Valider", "Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
+        <button className="sap-btn" onClick={verifierBilan} disabled={hist || occupe} title={hist ? "Bilan historique : rien à vérifier" : "Contrôler la cohérence sans enregistrer"}>Vérifier</button>
+        {bilan.statut === "valide" && canManage
+          ? <button className="sap-btn" onClick={rouvrir} disabled={occupe} title="Rouvrir le bilan (Superviseur)">Rouvrir</button>
+          : <button className="sap-btn" onClick={valider} disabled={!(canManage && bilan.statut === "brouillon") || occupe} title={canManage ? (bilan.statut === "brouillon" ? "Vérification complète puis verrouillage du bilan" : "Bilan non modifiable") : "Réservé au Superviseur"}>Valider</button>}
+        {["Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
       </div>
       <div className="sap-header" data-testid="sap-entete">
         <div className="sap-hrow"><b>Site</b><span>{site?.name || bilan.site_id}</span></div>
@@ -720,8 +833,10 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         <div className="sap-hrow"><b>Créé par</b><span>{bilan.created_by || "—"} <span className="sap-muted">le {fmtDateHeure(bilan.created_at)}</span></span></div>
         <div className="sap-hrow"><b>Modifié par</b><span>{bilan.modified_by || bilan.created_by || "—"}</span></div>
         <div className="sap-hrow"><b>Dernière modification</b><span>{fmtDateHeure(bilan.modified_at || bilan.created_at)}</span></div>
+        {bilan.statut === "valide" && <div className="sap-hrow"><b>Validé par</b><span data-testid="sap-valide-par">{bilan.valide_par || "—"} <span className="sap-muted">le {fmtDateHeure(bilan.valide_le)}</span></span></div>}
       </div>
       {hist && <div className="sap-banner" data-testid="sap-historique">Bilan historique (saisi avec l'ancien module) : affiché en lecture seule, avec les valeurs enregistrées.</div>}
+      {bilan.statut === "valide" && <div className="sap-banner-ok" data-testid="sap-valide">Bilan validé et verrouillé : seul le Superviseur peut le rouvrir{canManage ? " (bouton « Rouvrir »)" : ""}.</div>}
       <div className="sap-tabs" role="tablist">
         {[["synthese", "Synthèse"], ["ventes", "Ventes journalières"], ["transferts", "Transferts"], ["receptions", "Réceptions"], ["stocks", "Stocks début / fin"]].map(([id, label]) => (
           <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); if (id === "stocks" && !hist) setStocksOuvert(true); if (id === "transferts" && !hist) setTransfertsOuvert(true); }}>{label}</button>
@@ -791,8 +906,23 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           <p className="sap-muted" data-testid="sap-stocks-hist">Bilan historique : stock fin enregistré directement à 15 °C ({fmtL(num(bilan.stock_fin15))} L), sans détail de volume ambiant, température ni densité.</p>
         )}
       </div>
+      {verif && (
+        <div className="sap-msgpanel" data-testid="sap-verif">
+          <div className="sap-msghead"><span>Résultat de la vérification — {cnt.erreurs} erreur(s) · {cnt.avertissements} avertissement(s)</span><button className="sap-btn" style={{ padding: "2px 8px" }} onClick={() => setVerif(null)}>Fermer</button></div>
+          {verif.messages.length === 0 ? <div className="sap-msg-ok" data-testid="verif-ok">✔ Aucune anomalie.</div> : (
+            <ul style={{ margin: 0, padding: 0 }}>
+              {verif.messages.map((m, k) => (
+                <li key={k} role="button" tabIndex={0} className={`sap-msgitem ${m.niveau === "erreur" ? "sap-msg-err" : "sap-msg-warn"}`} data-testid={`verif-${k}`}
+                  onClick={() => allerA(m.cible)} onKeyDown={(e) => { if (e.key === "Enter") allerA(m.cible); }} title={m.cible ? "Cliquer pour aller à la cellule concernée" : undefined}>
+                  {m.niveau === "erreur" ? "✖" : "⚠"} {m.texte}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <div className="sap-status">
-        <span className={msg ? `sap-msg sap-msg-${msg.type}` : "sap-muted"} role="status" data-testid="sap-msg">{msg ? `${{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]} ${msg.text}` : "Prêt."}</span>
+        <span className={msg ? `sap-msg sap-msg-${msg.type}${msg.cible ? " sap-msg-link" : ""}` : "sap-muted"} role="status" data-testid="sap-msg" onClick={() => msg && msg.cible && allerA(msg.cible)} title={msg && msg.cible ? "Cliquer pour aller à la cellule concernée" : undefined}>{msg ? `${{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]} ${msg.text}` : "Prêt."}</span>
         <span data-testid="sap-barre">Statut : {st.label.replace(" 🔒", "")} | {nbLignes} ligne(s) | Dernière modification : {fmtDateHeure(bilan.modified_at || bilan.created_at)}</span>
       </div>
     </div>
