@@ -11,7 +11,7 @@
 // =====================================================================
 import React, { useState, useMemo, useRef, useEffect, forwardRef, useImperativeHandle } from "react";
 import { supabase } from "./supabaseClient.js";
-import { receptionsDuMois, transfertsNetsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
+import { receptionsDuMois, calculerBilan, calculerVente, totauxVentes, joursDuMois, convertir15, lireNombre, decadesDuMois, calculerDecade, totauxDecades, camionsParDecade, TEMP_MIN_PLAUSIBLE, TEMP_MAX_PLAUSIBLE, DENSITE_VENTE_DEFAUT } from "./bilanCalc.js";
 
 const MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août", "Septembre", "Octobre", "Novembre", "Décembre"];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -35,7 +35,10 @@ function erreurLisible(e) {
   const t = `${e?.message || ""} ${e?.code || ""}`;
   // Uniquement les vraies erreurs « colonne ou table absente » : le mot « statut » seul apparaît aussi dans le message
   // légitime de verrouillage (« Bilan verrouillé (statut : valide) … ») qui ne doit pas être pris pour une base obsolète.
-  if (/does not exist|42703|42P01|PGRST205|schema cache/i.test(t)) return "La base n'est pas à jour : exécute le script supabase_bilan_sap_etape1.sql dans Supabase.";
+  if (/does not exist|42703|42P01|PGRST205|schema cache/i.test(t)) {
+    const script = /bilan_transferts/.test(t) ? "supabase_bilan_sap_transferts.sql" : "supabase_bilan_sap_etape1.sql";
+    return `La base n'est pas à jour : exécute le script ${script} dans Supabase.`;
+  }
   if (/row-level security|permission denied|42501/i.test(t)) return "Droits insuffisants pour cette opération (site non attribué à ton compte ?).";
   if (/Failed to fetch|NetworkError|network/i.test(t)) return "Connexion impossible : vérifie ta connexion internet puis réessaie.";
   return e?.message || "Erreur inconnue.";
@@ -252,6 +255,138 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
 
 
 // ---------------------------------------------------------------------
+// Onglet « Transferts » : saisie PAR DÉCADE, à l'AMBIANT, uniquement pour équilibrer les stocks.
+//   Décade 1 = du 01 au 10 · décade 2 = du 11 au 20 · décade 3 = du 21 à la fin du mois.
+//   « Transferts » (chargements des camions laitiers) sortent du stock ; « Retours » (camions -> cuve) y entrent.
+//   Aucune température ni conversion à 15 °C : seules les ventes sont converties (onglet Ventes journalières).
+//   Les deux champs sont facultatifs ; une décade vide est ignorée. Enregistrement : seules les décades modifiées.
+//   Pour information (jamais compté) : ce que l'application a déjà enregistré en chargements / retours de camions.
+// ---------------------------------------------------------------------
+const TransfertsDecades = forwardRef(function TransfertsDecades({ bilan, editable, userName, siteName, movements, setMsg, onDirty, onStats, onSaved, appendAudit, flash }, ref) {
+  const decades = useMemo(() => decadesDuMois(bilan.period_key), [bilan.period_key]);
+  const info = useMemo(() => camionsParDecade(movements, bilan.site_id, bilan.period_key), [movements, bilan.site_id, bilan.period_key]);
+  const [vals, setVals] = useState({});   // n -> { transferts, retours } (texte saisi)
+  const [saved, setSaved] = useState({}); // n -> { transferts, retours } (nombres enregistrés en base)
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const refs = useRef({});
+
+  useEffect(() => {
+    let off = false;
+    (async () => {
+      const r = await supabase.from("bilan_transferts").select("decade, transferts_ambiant, retours_ambiant").eq("bilan_id", bilan.id).order("decade");
+      if (off) return;
+      if (r.error) { setMsg({ type: "err", text: erreurLisible(r.error) }); setLoading(false); return; }
+      const v = {}, s = {};
+      (r.data || []).forEach((l) => {
+        v[l.decade] = { transferts: String(l.transferts_ambiant), retours: String(l.retours_ambiant) };
+        s[l.decade] = { transferts: Number(l.transferts_ambiant), retours: Number(l.retours_ambiant) };
+      });
+      setVals(v); setSaved(s); setLoading(false);
+    })();
+    return () => { off = true; };
+  }, [bilan.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const calc = useMemo(() => Object.fromEntries(decades.map((d) => [d.n, calculerDecade(vals[d.n] || {})])), [decades, vals]);
+  const tot = useMemo(() => totauxDecades(decades.map((d) => calc[d.n])), [decades, calc]);
+  const modifiee = (n) => {
+    const c = calc[n], s = saved[n];
+    if (!c.saisi) return !!s;
+    if (!c.ok) return true;
+    return !s || s.transferts !== c.transferts || s.retours !== c.retours;
+  };
+  const nbModifiees = decades.filter((d) => modifiee(d.n)).length;
+  useEffect(() => { if (onDirty) onDirty(nbModifiees); }, [nbModifiees]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (onStats) onStats(tot.nb); }, [tot.nb]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const champs = ["transferts", "retours"];
+  const setCell = (n, champ, valeur) => setVals((p) => ({ ...p, [n]: { ...(p[n] || {}), [champ]: valeur } }));
+  const aller = (i, col) => { const el = refs.current[`${i}-${col}`]; if (el) el.focus(); };
+  const onKeyDown = (e, i, col) => {
+    if (e.key === "Enter") { e.preventDefault(); if (col === 0) aller(i, 1); else aller(i + 1, 0); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); aller(i + 1, col); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); aller(i - 1, col); }
+  };
+
+  const verifier = () => {
+    if (!editable) return null;
+    const erreurs = decades.filter((d) => calc[d.n].saisi && !calc[d.n].ok);
+    return erreurs.length ? `Transferts : ${erreurs.length} décade(s) en erreur (${erreurs.map((d) => `décade ${d.n}`).join(", ")}) : enregistrement bloqué.` : null;
+  };
+  const save = async () => {
+    if (!editable || saving) return { statut: "rien" };
+    const aSauver = decades.filter((d) => calc[d.n].saisi && calc[d.n].ok && (!saved[d.n] || saved[d.n].transferts !== calc[d.n].transferts || saved[d.n].retours !== calc[d.n].retours)).map((d) => d.n);
+    const aSupprimer = decades.filter((d) => !calc[d.n].saisi && saved[d.n]).map((d) => d.n);
+    if (!aSauver.length && !aSupprimer.length) return { statut: "rien" };
+    setSaving(true);
+    try {
+      if (aSauver.length) {
+        const payload = aSauver.map((n) => ({ bilan_id: bilan.id, decade: n, transferts_ambiant: calc[n].transferts, retours_ambiant: calc[n].retours, updated_by: userName || null }));
+        const r = await supabase.from("bilan_transferts").upsert(payload, { onConflict: "bilan_id,decade" });
+        if (r.error) throw r.error;
+      }
+      if (aSupprimer.length) {
+        const r = await supabase.from("bilan_transferts").delete().eq("bilan_id", bilan.id).in("decade", aSupprimer);
+        if (r.error) throw r.error;
+      }
+      setSaved((p) => { const n = { ...p }; aSauver.forEach((k) => { n[k] = { transferts: calc[k].transferts, retours: calc[k].retours }; }); aSupprimer.forEach((k) => { delete n[k]; }); return n; });
+      // Total net : recalculé par la base ; on relit uniquement les champs du bilan concernés.
+      const h = await supabase.from("bilan_matieres").update({ modified_by: userName || null }).eq("id", bilan.id).select("transferts15, transferts_ambiant, modified_at, modified_by").single();
+      if (!h.error && h.data && onSaved) onSaved(h.data);
+      if (flash) flash("Bilan enregistré.");
+      if (appendAudit) appendAudit("Transferts du bilan matières enregistrés", `${siteName} — ${bilan.period_key} : ${aSauver.length} décade(s), ${aSupprimer.length} suppression(s)`);
+      return { statut: "ok", texte: `${aSauver.length} décade(s) enregistrée(s)${aSupprimer.length ? `, ${aSupprimer.length} supprimée(s)` : ""}` };
+    } catch (e) {
+      return { statut: "erreur", texte: erreurLisible(e) };
+    } finally { setSaving(false); }
+  };
+  useImperativeHandle(ref, () => ({ save, verifier }));
+
+  if (loading) return <p className="sap-muted" data-testid="tr-chargement">Chargement des transferts du mois…</p>;
+  const fmtInfo = (x) => (x.nbChargements || x.nbRetours ? `Chargements : ${fmtL(x.chargements)} L (${x.nbChargements}) · Retours : ${fmtL(x.retours)} L (${x.nbRetours})` : "—");
+  return (
+    <div>
+      {!editable && <p className="sap-muted" style={{ margin: "0 0 8px" }} data-testid="tr-lecture">Bilan verrouillé : les transferts sont en lecture seule.</p>}
+      <div className="sap-gridwrap" style={{ maxHeight: "none" }} data-testid="sap-transferts">
+        <table className="sap-table sap-grid">
+          <thead><tr><th>Décade</th><th className="sap-num">Transferts vers camions laitiers (L)</th><th className="sap-num">Retours camions → cuve (L)</th><th className="sap-num">Effet sur le stock (L)</th><th className="sap-mark"></th><th>Pour information : déjà enregistré dans l'application (non compté)</th></tr></thead>
+          <tbody>
+            {decades.map((d, i) => {
+              const c = calc[d.n]; const err = c.saisi && !c.ok;
+              return (
+                <tr key={d.n} data-decade={d.n} className={modifiee(d.n) ? "sap-row-dirty" : ""}>
+                  <td className="sap-d">Décade {d.n} <span className="sap-muted">du {fmtJour(d.debut).slice(0, 5)} au {fmtJour(d.fin).slice(0, 5)}</span></td>
+                  {champs.map((champ, col) => (
+                    <td key={champ}>
+                      <input ref={(el) => { refs.current[`${i}-${col}`] = el; }} className={`sap-cell ${err ? "sap-cell-err" : ""}`} value={vals[d.n]?.[champ] ?? ""} disabled={!editable} inputMode="decimal"
+                        aria-label={`${champ === "transferts" ? "Transferts" : "Retours"} décade ${d.n}`} data-testid={`tr-${d.n}-${champ}`} title={err ? c.erreur : undefined}
+                        onChange={(e) => setCell(d.n, champ, e.target.value)} onKeyDown={(e) => onKeyDown(e, i, col)} onFocus={(e) => e.target.select()} />
+                    </td>
+                  ))}
+                  <td className="sap-num sap-ro" data-testid={`tr-${d.n}-net`}>{c.saisi && c.ok ? fmtSigned(c.net) : ""}</td>
+                  <td className="sap-mark" title={err ? c.erreur : ""} data-testid={`tr-${d.n}-mark`}>{err ? <span className="sap-msg-err">✖</span> : ""}</td>
+                  <td className="sap-d sap-muted" style={{ whiteSpace: "normal" }} data-testid={`tr-${d.n}-info`}>{fmtInfo(info[i])}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr className="sap-total">
+              <td className="sap-d">Total du mois</td>
+              <td className="sap-num" data-testid="tr-total-transferts">{fmtL(tot.transferts)}</td>
+              <td className="sap-num" data-testid="tr-total-retours">{fmtL(tot.retours)}</td>
+              <td className="sap-num" data-testid="tr-total-net">{fmtSigned(tot.net)}</td><td></td>
+              <td className="sap-d sap-muted" style={{ whiteSpace: "normal" }} data-testid="tr-total-info">{fmtInfo({ chargements: info.reduce((a, x) => a + x.chargements, 0), nbChargements: info.reduce((a, x) => a + x.nbChargements, 0), retours: info.reduce((a, x) => a + x.retours, 0), nbRetours: info.reduce((a, x) => a + x.nbRetours, 0) })}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p className="sap-muted" style={{ fontSize: 11.5, margin: "8px 0 0" }}>Saisie à l'ambiant, sans température ni conversion à 15 °C : ces volumes servent uniquement à équilibrer les stocks (transferts = sorties du stock, retours = entrées). Les ventes restent saisies par jour, avec la température, dans l'onglet « Ventes journalières ». Les chiffres « pour information » ne sont jamais comptés.</p>
+    </div>
+  );
+});
+
+// ---------------------------------------------------------------------
 // Onglet « Stocks début / fin » : volume ambiant, température et densité observée, ramenés à 15 °C
 // (même fonction que « Correction 15 °C » : densité à 15 °C d'abord, puis coefficient).
 //   • Stock début : proposé = stock fin du mois précédent ; modifiable par le Superviseur seul.
@@ -395,8 +530,12 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const [nbModifVentes, setNbModifVentes] = useState(0);
   const [nbModifStocks, setNbModifStocks] = useState(0);
   const [stocksOuvert, setStocksOuvert] = useState(false);
+  const [transfertsOuvert, setTransfertsOuvert] = useState(false);
+  const [nbModifTransferts, setNbModifTransferts] = useState(0);
+  const [nbTransferts, setNbTransferts] = useState(0);
+  const transfertsRef = useRef(null);
   const stocksRef = useRef(null);
-  const nbModifiees = nbModifVentes + nbModifStocks;
+  const nbModifiees = nbModifVentes + nbModifStocks + nbModifTransferts;
   const [joursSaisis, setJoursSaisis] = useState(0);
   const gridRef = useRef(null);
   const [paramVal, setParamVal] = useState("");
@@ -409,7 +548,6 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const periodLabel = `${MOIS[(pM || 1) - 1]} ${pY}`;
 
   const rec = useMemo(() => (bilan ? receptionsDuMois(movements, bilan.site_id, bilan.period_key) : null), [movements, bilan]);
-  const tr = useMemo(() => (bilan ? transfertsNetsDuMois(movements, bilan.site_id, bilan.period_key) : null), [movements, bilan]);
 
   const executer = async () => {
     if (!siteId || loading) return;
@@ -440,7 +578,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           row = again.data;
         } else if (ins.error) throw ins.error; else { row = ins.data; cree = true; }
       }
-      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setJoursSaisis(0);
+      setBilan(row); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0); setNbTransferts(0); setJoursSaisis(0);
       if (cree) {
         if (appendAudit) appendAudit("Bilan matières créé", `${siteName} — ${MOIS[sel.month - 1]} ${sel.year}`);
         if (flash) flash("Bilan créé en brouillon.");
@@ -454,7 +592,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   };
   const retour = () => {
     if (nbModifiees > 0 && typeof window !== "undefined" && !window.confirm("Des modifications ne sont pas enregistrées. Quitter quand même ?")) return;
-    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0);
+    setScreen("select"); setBilan(null); setPrec(null); setMsg(null); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0);
   };
   // Paramètre « densité de vente » (Superviseur) : chargé à l'ouverture de l'écran de sélection.
   useEffect(() => {
@@ -465,7 +603,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   }, [canManage, screen]);
   // Enregistre ventes ET stocks d'un coup : contrôle des deux, puis écriture des seules modifications.
   const enregistrer = async () => {
-    const comps = [["ventes", gridRef.current], ["stocks", stocksRef.current]].filter(([, r]) => r);
+    const comps = [["ventes", gridRef.current], ["transferts", transfertsRef.current], ["stocks", stocksRef.current]].filter(([, r]) => r);
     for (const [, r] of comps) { const e = r.verifier(); if (e) { setMsg({ type: "err", text: e }); return; } }
     setMsg(null);
     const parts = [];
@@ -496,13 +634,13 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     const stockFin = hist ? num(bilan.stock_fin15) : (bilan.stock_fin_ambiant !== null && bilan.stock_fin_ambiant !== undefined ? num(bilan.stock_fin15) : null);
     const receptions = hist ? num(bilan.reception15) : rec.total15;
     const ventes = num(bilan.ventes15) || 0;
-    const transferts = hist ? num(bilan.transferts15) || 0 : tr.net15;
+    const transferts = num(bilan.transferts15) || 0; // saisis dans l'onglet Transferts (total recalculé par la base)
     const complet = stockDebut !== null && stockFin !== null;
     const calc = complet ? calculerBilan({ stockDebut15: stockDebut, receptions15: receptions, ventes15: ventes, transferts15: transferts, stockFin15: stockFin }) : null;
     syn = { stockDebut, stockDebutPropose: stockDebutSaisi === null && precFin !== null, stockFin, receptions, ventes, transferts, calc, complet };
   }
   const lignesSynthese = syn ? 8 : 0;
-  const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : tab === "stocks" ? 2 : 0;
+  const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : tab === "stocks" ? 2 : tab === "transferts" ? nbTransferts : 0;
   const editable = bilan?.statut === "brouillon" && canEdit;
   const st = bilan ? STATUTS[bilan.statut] || STATUTS.historique : null;
   const bientot = "Disponible aux étapes suivantes";
@@ -568,7 +706,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       <div className="sap-shell"><span>Bilan matières — {site?.name || bilan.site_id} — {periodLabel}</span><span className={`sap-badge ${st.cls}`} data-testid="sap-statut">{st.label}</span></div>
       <div className="sap-toolbar">
         <button className="sap-btn" onClick={retour} title="Retour à la sélection">◀ Retour</button>
-        <button className="sap-btn" onClick={enregistrer} disabled={!(editable && (ventesOuvert || stocksOuvert))} title={editable ? (ventesOuvert || stocksOuvert ? "Enregistrer les modifications" : "Ouvre l'onglet Ventes journalières ou Stocks début / fin") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
+        <button className="sap-btn" onClick={enregistrer} disabled={!(editable && (ventesOuvert || stocksOuvert || transfertsOuvert))} title={editable ? (ventesOuvert || stocksOuvert || transfertsOuvert ? "Enregistrer les modifications" : "Ouvre un onglet de saisie (ventes, transferts, stocks)") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
         {["Vérifier", "Valider", "Exporter Excel", "Exporter PDF", "Imprimer"].map((b) => <button key={b} className="sap-btn" disabled title={bientot}>{b}</button>)}
       </div>
       <div className="sap-header" data-testid="sap-entete">
@@ -581,8 +719,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       </div>
       {hist && <div className="sap-banner" data-testid="sap-historique">Bilan historique (saisi avec l'ancien module) : affiché en lecture seule, avec les valeurs enregistrées.</div>}
       <div className="sap-tabs" role="tablist">
-        {[["synthese", "Synthèse"], ["ventes", "Ventes journalières"], ["receptions", "Réceptions"], ["stocks", "Stocks début / fin"]].map(([id, label]) => (
-          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); if (id === "stocks" && !hist) setStocksOuvert(true); }}>{label}</button>
+        {[["synthese", "Synthèse"], ["ventes", "Ventes journalières"], ["transferts", "Transferts"], ["receptions", "Réceptions"], ["stocks", "Stocks début / fin"]].map(([id, label]) => (
+          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); if (id === "stocks" && !hist) setStocksOuvert(true); if (id === "transferts" && !hist) setTransfertsOuvert(true); }}>{label}</button>
         ))}
       </div>
       <div className="sap-body">
@@ -593,7 +731,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
               {ligne("debut", "Stock début de mois", syn.stockDebut, syn.stockDebut === null ? "Non disponible : pas de bilan du mois précédent" : syn.stockDebutPropose ? "Proposé : stock fin du mois précédent" : "Saisi")}
               {ligne("rec", "+ Réceptions", syn.receptions, hist ? "Saisie manuelle (ancien module)" : `${rec.lignes.length} bon(s) de livraison du registre${rec.nbSansMesure ? ` — ⚠ ${rec.nbSansMesure} sans température/densité (compté en ambiant)` : ""}`)}
               {ligne("ven", "− Ventes", syn.ventes, hist ? "Saisie manuelle (ancien module)" : "Total des ventes journalières (mis à jour par la base)")}
-              {ligne("tr", "± Transferts nets", syn.transferts, hist ? "Saisie manuelle (ancien module)" : `${tr.lignes.length} transfert(s) entre sites`, { signed: true })}
+              {ligne("tr", "± Transferts (camions laitiers)", syn.transferts, hist ? "Saisie manuelle (ancien module)" : "Saisie par décade, à l'ambiant (équilibre des stocks) : retours − transferts", { signed: true })}
               {ligne("theo", "= Stock théorique fin", c ? c.theorique : syn.stockDebut !== null ? syn.stockDebut + syn.receptions - syn.ventes + syn.transferts : null, "Début + réceptions − ventes ± transferts", { total: true })}
               {ligne("phys", "Stock physique fin (jaugeage)", syn.stockFin, syn.stockFin === null ? "Non saisi" : "Mesuré à la jauge, ramené à 15 °C", { bold: true })}
               {ligne("ecart", "Écart (physique − théorique)", c ? c.ecart : null, c ? (c.sens === "gain" ? "Gain" : c.sens === "perte" ? "Perte" : "Aucun écart") : "Stock début ou stock fin manquant", { total: true, signed: true, cls: c ? clsSigne(c.ecart) : "" })}
@@ -631,6 +769,13 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
               onSaved={(h) => setBilan((b) => ({ ...b, ...h }))} appendAudit={appendAudit} flash={flash} />
           </div>
         )}
+        {transfertsOuvert && !hist && (
+          <div style={{ display: tab === "transferts" ? "block" : "none" }}>
+            <TransfertsDecades ref={transfertsRef} bilan={bilan} editable={editable} userName={userName} siteName={site?.name || bilan.site_id} movements={movements} setMsg={setMsg}
+              onDirty={setNbModifTransferts} onStats={setNbTransferts} onSaved={(h) => setBilan((b) => ({ ...b, ...h }))} appendAudit={appendAudit} flash={flash} />
+          </div>
+        )}
+        {tab === "transferts" && hist && <p className="sap-muted" data-testid="sap-transferts-hist">Bilan historique : les transferts ont été saisis en un total (« {fmtSigned(num(bilan.transferts15) || 0)} L ») avec l'ancien module, sans détail par décade.</p>}
         {tab === "ventes" && hist && <p className="sap-muted" data-testid="sap-ventes-hist">Bilan historique : les ventes ont été saisies en un total mensuel avec l'ancien module (pas de détail journalier).</p>}
         {stocksOuvert && !hist && (
           <div style={{ display: tab === "stocks" ? "block" : "none" }}>
