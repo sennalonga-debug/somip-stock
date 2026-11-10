@@ -207,3 +207,104 @@ export function trierMessages(messages) {
   return [...messages.filter((m) => m.niveau === "erreur"), ...messages.filter((m) => m.niveau !== "erreur")];
 }
 export const compterMessages = (messages) => ({ erreurs: messages.filter((m) => m.niveau === "erreur").length, avertissements: messages.filter((m) => m.niveau !== "erreur").length });
+
+// ---------------------------------------------------------------------
+// Synthèse du bilan (compte de stock à 15 °C) — UNE seule définition, partagée par l'écran, les exports
+// Excel / PDF / impression et la présentation PowerPoint, pour qu'ils affichent toujours les mêmes chiffres.
+//   bilan = ligne de bilan_matieres ; prec = bilan du mois précédent (stock fin) ; rec = receptionsDuMois(...)
+// ---------------------------------------------------------------------
+const nombreOuNull = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
+export function calculerSynthese({ bilan, prec, rec }) {
+  const hist = bilan.statut === "historique";
+  const debutSaisi = nombreOuNull(bilan.stock_debut15);
+  const precFin = prec && (prec.statut === "historique" || (prec.stock_fin_ambiant !== null && prec.stock_fin_ambiant !== undefined)) ? nombreOuNull(prec.stock_fin15) : null;
+  const stockDebut = debutSaisi !== null ? debutSaisi : precFin;
+  const stockFin = hist ? nombreOuNull(bilan.stock_fin15) : (bilan.stock_fin_ambiant !== null && bilan.stock_fin_ambiant !== undefined ? nombreOuNull(bilan.stock_fin15) : null);
+  const receptions = hist ? nombreOuNull(bilan.reception15) : (rec ? rec.total15 : 0);
+  const ventes = nombreOuNull(bilan.ventes15) || 0;
+  const transferts = nombreOuNull(bilan.transferts15) || 0;
+  const complet = stockDebut !== null && stockFin !== null;
+  const calc = complet ? calculerBilan({ stockDebut15: stockDebut, receptions15: receptions, ventes15: ventes, transferts15: transferts, stockFin15: stockFin }) : null;
+  return { stockDebut, stockDebutPropose: debutSaisi === null && precFin !== null, stockFin, receptions, ventes, transferts, calc, complet };
+}
+
+// Ligne d'un site pour la présentation PowerPoint (même structure que l'ancien module).
+//   etat : « absent » (aucun bilan), « incomplet » (stock début ou fin manquant : écart non calculable) ou « ok ».
+export function lignePresentation({ site, bilan, prec, movements }) {
+  if (!bilan) return { etat: "absent" };
+  const rec = receptionsDuMois(movements, bilan.site_id, bilan.period_key);
+  const synthese = calculerSynthese({ bilan, prec, rec });
+  if (!synthese.complet) return { etat: "incomplet", statut: bilan.statut, synthese };
+  return {
+    etat: "ok", statut: bilan.statut, synthese,
+    ligne: { site: { id: site.id, name: site.name }, reception15: synthese.receptions, ventes15: synthese.ventes, transferts15: synthese.transferts, stockTheorique: synthese.calc.theorique, stockFin15: synthese.stockFin, ecart: synthese.calc.ecart, commentaire: bilan.commentaire || "", photoUrls: bilan.photo_urls || [] },
+  };
+}
+
+// ---------------------------------------------------------------------
+// Document d'export d'un bilan (Excel, PDF et impression) : un seul contenu, deux présentations.
+//   • sheets   : feuilles Excel, valeurs NUMÉRIQUES (pour pouvoir calculer dessus) ;
+//   • sections : tableaux du PDF / de l'impression, valeurs mises en forme (espaces, signes).
+// ---------------------------------------------------------------------
+const espaces = (s) => String(s).replace(/[\u202f\u00a0]/g, " ").replace(/\u2212/g, "-");  // les polices PDF standard ne lisent ni l'espace fine ni le vrai signe moins
+const fL = (n) => (Number.isFinite(n) ? espaces(Math.round(n).toLocaleString("fr-FR")) : "");
+const fLs = (n) => (Number.isFinite(n) ? `${n > 0 ? "+" : ""}${fL(n)}` : "");
+const fDec = (n, d) => (Number.isFinite(n) ? espaces(n.toLocaleString("fr-FR", { minimumFractionDigits: d, maximumFractionDigits: d })) : "");
+const fJ = (j) => (j ? `${j.slice(8, 10)}/${j.slice(5, 7)}/${j.slice(0, 4)}` : "");
+const fDH = (iso) => (iso ? espaces(new Date(iso).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })) : "");
+const slug = (s) => String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+
+export function construireDocumentBilan({ siteName, periodKey, periodLabel, statutLabel, entete = {}, synthese, observation = "", ventes = null, transferts = null, receptions = { lignes: [], total15: 0, totalAmbiant: 0 }, stocks = null }) {
+  const s = synthese, c = s.calc;
+  const nbJours = ventes ? ventes.lignes.length : 0;
+  const remDebut = s.stockDebut === null ? "Non disponible" : s.stockDebutPropose ? "Proposé : stock fin du mois précédent" : "Saisi";
+  const poste = [
+    ["Stock début de mois", s.stockDebut, remDebut],
+    ["+ Réceptions", s.receptions, `${receptions.lignes.length} bon(s) de livraison`],
+    ["− Ventes", s.ventes, "Total des ventes journalières"],
+    ["± Transferts entre sites", s.transferts, "Saisie par décade, à l'ambiant : reçus − envoyés"],
+    ["= Stock théorique fin", c ? c.theorique : (s.stockDebut !== null ? s.stockDebut + s.receptions - s.ventes + s.transferts : null), "Début + réceptions − ventes ± transferts"],
+    ["Stock physique fin (jaugeage)", s.stockFin, s.stockFin === null ? "Non saisi" : "Mesuré à la jauge, ramené à 15 °C"],
+    ["Écart (physique − théorique)", c ? c.ecart : null, c ? (c.sens === "gain" ? "Gain" : c.sens === "perte" ? "Perte" : "Aucun écart") : "Stock début ou stock fin manquant"],
+  ];
+  const pct = c && c.ecartPct !== null ? c.ecartPct : null;
+  const signed = new Set(["± Transferts entre sites", "Écart (physique − théorique)"]);
+  const sections = [{
+    heading: "Synthèse", columns: ["Poste", "Volume à 15 °C (L)", "Remarque"],
+    rows: [...poste.map(([p, v, r]) => [p, v === null ? "—" : signed.has(p) ? fLs(v) : fL(v), r]), ["Écart en % des ventes", pct === null ? "—" : `${pct > 0 ? "+" : ""}${fDec(pct, 2)} %`, pct === null ? (c ? "Aucune vente sur le mois" : "") : "Écart ÷ ventes du mois"]],
+  }];
+  if (observation && observation.trim()) sections.push({ heading: "Observation", columns: ["Observation du mois"], rows: [[observation.trim()]] });
+  const sheets = [];
+  const infos = [["Site", siteName], ["Période", periodLabel], ["Statut", statutLabel], ["Créé par", entete.creePar || ""], ["Créé le", fDH(entete.creeLe)], ["Modifié par", entete.modifiePar || ""], ["Dernière modification", fDH(entete.modifieLe)]];
+  if (entete.validePar) { infos.push(["Validé par", entete.validePar], ["Validé le", fDH(entete.valideLe)]); }
+  if (ventes && ventes.densite) infos.push(["Densité de vente (kg/m³)", ventes.densite]);
+  if (observation && observation.trim()) infos.push(["Observation", observation.trim()]);
+  sheets.push({ name: "Synthèse", rows: [...poste.map(([p, v, r]) => ({ Poste: p, "Volume à 15 °C (L)": v === null ? null : Math.round(v * 100) / 100, Remarque: r })), { Poste: "Écart en % des ventes", "Volume à 15 °C (L)": pct === null ? null : Math.round(pct * 10000) / 10000, Remarque: "Écart ÷ ventes du mois (en %)" }] });
+  sheets.push({ name: "Informations", rows: infos.map(([Champ, Valeur]) => ({ Champ, Valeur })) });
+
+  if (stocks) {
+    const ligne = (nom, b) => [nom, b.ambiant === null || b.ambiant === undefined ? "" : fL(b.ambiant), b.temp === null || b.temp === undefined ? "" : fDec(b.temp, 1), b.densite === null || b.densite === undefined ? "" : fDec(b.densite, 1), b.d15 === null || b.d15 === undefined ? "" : fDec(b.d15, 1), b.vcf === null || b.vcf === undefined ? "" : fDec(b.vcf, 4), b.v15 === null || b.v15 === undefined ? "" : fL(b.v15)];
+    sections.push({ heading: "Stocks début / fin", columns: ["Poste", "Volume ambiant (L)", "Température (°C)", "Densité observée", "Densité à 15 °C", "Coefficient", "Volume 15 °C (L)"], rows: [ligne("Stock début de mois", stocks.deb), ligne("Stock fin de mois (jaugeage)", stocks.fin)] });
+    const num2 = (x) => (x === null || x === undefined ? null : x);
+    sheets.push({ name: "Stocks début-fin", rows: [["Stock début de mois", stocks.deb], ["Stock fin de mois (jaugeage)", stocks.fin]].map(([Poste, b]) => ({ Poste, "Volume ambiant (L)": num2(b.ambiant), "Température (°C)": num2(b.temp), "Densité observée": num2(b.densite), "Densité à 15 °C": num2(b.d15), Coefficient: num2(b.vcf), "Volume 15 °C (L)": num2(b.v15) })) });
+  }
+  if (transferts) {
+    sections.push({ heading: "Transferts entre sites (volumes ambiants)", columns: ["Décade", "Envoyés à d'autres sites (L)", "Reçus d'autres sites (L)", "Effet sur le stock (L)"],
+      rows: transferts.decades.map((d) => [`Décade ${d.n} (du ${fJ(d.debut).slice(0, 5)} au ${fJ(d.fin).slice(0, 5)})`, d.saisi ? fL(d.envoyes) : "", d.saisi ? fL(d.recus) : "", d.saisi ? fLs(d.net) : ""]),
+      totalsRow: ["Total du mois", fL(transferts.tot.envoyes), fL(transferts.tot.recus), fLs(transferts.tot.net)] });
+    sheets.push({ name: "Transferts", rows: [...transferts.decades.map((d) => ({ "Décade": d.n, "Du": d.debut, "Au": d.fin, "Envoyés (L)": d.saisi ? d.envoyes : null, "Reçus (L)": d.saisi ? d.recus : null, "Effet sur le stock (L)": d.saisi ? d.net : null })), { "Décade": "Total", "Du": "", "Au": "", "Envoyés (L)": transferts.tot.envoyes, "Reçus (L)": transferts.tot.recus, "Effet sur le stock (L)": transferts.tot.net }] });
+  }
+  sections.push({ heading: "Réceptions (bons de livraison)", columns: ["Date", "N° bon", "Quantité ambiante (L)", "Température (°C)", "Densité", "Quantité 15 °C (L)"],
+    rows: receptions.lignes.map((l) => [fJ(l.date), l.ref || "", fL(l.quantity), l.temperatureC === undefined || l.temperatureC === null ? "" : fDec(Number(l.temperatureC), 1), l.densiteObservee === undefined || l.densiteObservee === null ? "" : fDec(Number(l.densiteObservee), 1), fL(l.volume15)]),
+    totalsRow: ["Total", "", fL(receptions.totalAmbiant), "", "", fL(receptions.total15)] });
+  sheets.push({ name: "Réceptions", rows: [...receptions.lignes.map((l) => ({ Date: l.date, "N° bon": l.ref || "", "Quantité ambiante (L)": l.quantity, "Température (°C)": l.temperatureC === undefined ? null : l.temperatureC, Densité: l.densiteObservee === undefined ? null : l.densiteObservee, "Quantité 15 °C (L)": l.volume15 })), { Date: "Total", "N° bon": "", "Quantité ambiante (L)": receptions.totalAmbiant, "Température (°C)": null, Densité: null, "Quantité 15 °C (L)": receptions.total15 }] });
+  if (ventes) {
+    sections.push({ heading: "Ventes journalières", columns: ["Date", "Volume vendu (L)", "Température (°C)", "Densité", "Densité à 15 °C", "Coefficient", "Volume 15 °C (L)"],
+      rows: ventes.lignes.map((l) => (l.saisi ? [fJ(l.jour), fL(l.volume), fDec(l.temp, 1), fL(ventes.densite), fDec(l.densite15, 1), fDec(l.vcf, 4), fL(l.volume15)] : [fJ(l.jour), "", "", fL(ventes.densite), "", "", ""])),
+      totalsRow: [`Total (${ventes.totaux.joursSaisis} / ${nbJours} jours)`, fL(ventes.totaux.ambiant), "", "", "", "", fL(ventes.totaux.volume15)] });
+    sheets.push({ name: "Ventes journalières", rows: [...ventes.lignes.map((l) => ({ Date: l.jour, "Volume vendu (L)": l.saisi ? l.volume : null, "Température (°C)": l.saisi ? l.temp : null, Densité: ventes.densite, "Densité à 15 °C": l.saisi ? Math.round(l.densite15 * 10) / 10 : null, Coefficient: l.saisi ? l.vcf : null, "Volume 15 °C (L)": l.saisi ? Math.round(l.volume15 * 100) / 100 : null })), { Date: `Total (${ventes.totaux.joursSaisis} / ${nbJours} jours)`, "Volume vendu (L)": ventes.totaux.ambiant, "Température (°C)": null, Densité: null, "Densité à 15 °C": null, Coefficient: null, "Volume 15 °C (L)": Math.round(ventes.totaux.volume15 * 100) / 100 }] });
+  }
+  // PDF : les polices standard ne contiennent ni le vrai signe moins (−) ni l'espace fine : tout le texte est normalisé.
+  const sectionsPdf = sections.map((x) => ({ heading: espaces(x.heading), columns: x.columns.map(espaces), rows: x.rows.map((r) => r.map(espaces)), totalsRow: x.totalsRow ? x.totalsRow.map(espaces) : undefined }));
+  return { filename: `Bilan_matieres_${slug(siteName)}_${periodKey}`, title: espaces(`Bilan matières — ${siteName}`), subtitle: espaces(`Statut : ${statutLabel}`), period: espaces(periodLabel), sections: sectionsPdf, sheets };
+}
