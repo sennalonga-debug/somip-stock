@@ -117,3 +117,49 @@ export function transfertsNetsDuMois(movements, siteId, periodKey) {
     .map((m) => ({ id: m.id, date: m.date, siteLie: m.relatedSiteId, sens: m.delta < 0 ? -1 : 1, volume15: volume15Mouvement(m), converti: m.volumeCorrige15 !== undefined && m.volumeCorrige15 !== null }));
   return { lignes, net15: lignes.reduce((a, l) => a + l.sens * l.volume15, 0), nbSansMesure: lignes.filter((l) => !l.converti).length };
 }
+
+// ---------------------------------------------------------------------
+// Transferts par DÉCADE (volumes AMBIANTS, uniquement pour équilibrer les stocks)
+//   Décade 1 = du 01 au 10, décade 2 = du 11 au 20, décade 3 = du 21 à la fin du mois.
+//   « Transferts » = volumes chargés dans les camions laitiers (sortent du stock) ;
+//   « Retours »    = volumes revenus des camions vers la cuve (entrent dans le stock).
+//   Aucune température ni conversion à 15 °C : seules les ventes sont converties.
+// ---------------------------------------------------------------------
+export function decadesDuMois(periodKey) {
+  const jours = joursDuMois(periodKey);
+  if (!jours.length) return [];
+  return [{ n: 1, debut: jours[0], fin: jours[9] }, { n: 2, debut: jours[10], fin: jours[19] }, { n: 3, debut: jours[20], fin: jours[jours.length - 1] }];
+}
+
+// Une décade saisie : { transferts, retours } (texte ou nombre). Les deux vides -> décade non saisie (ignorée).
+// Un seul des deux rempli : l'autre vaut 0. Négatif ou non numérique -> erreur.
+export function calculerDecade({ transferts, retours }) {
+  const t = lireNombre(transferts), r = lireNombre(retours);
+  if (t === null && r === null) return { saisi: false, ok: true };
+  if (Number.isNaN(t) || Number.isNaN(r)) return { saisi: true, ok: false, erreur: "Valeur non numérique" };
+  if ((t !== null && t < 0) || (r !== null && r < 0)) return { saisi: true, ok: false, erreur: "Volume négatif" };
+  const tt = t === null ? 0 : t, rr = r === null ? 0 : r;
+  return { saisi: true, ok: true, transferts: tt, retours: rr, net: rr - tt };
+}
+
+// Effet net sur le stock du mois (retours − transferts), à partir des décades calculées (calculerDecade).
+export function totauxDecades(decadesCalculees) {
+  let transferts = 0, retours = 0, nb = 0, erreurs = 0;
+  for (const d of decadesCalculees) {
+    if (!d || !d.saisi) continue;
+    if (!d.ok) { erreurs += 1; continue; }
+    nb += 1; transferts += d.transferts; retours += d.retours;
+  }
+  return { transferts, retours, net: retours - transferts, nb, erreurs };
+}
+
+// POUR INFORMATION (jamais compté) : chargements de camions laitiers (« sortie_camion ») et retours (« retour_camion »)
+// déjà enregistrés dans l'application pour ce site, par décade. Sert à comparer avec ce que l'on saisit.
+export function camionsParDecade(movements, siteId, periodKey) {
+  return decadesDuMois(periodKey).map((d) => {
+    const dans = (m) => m.siteId === siteId && estGasoil(m) && m.date >= d.debut && m.date <= d.fin;
+    const charg = movements.filter((m) => m.type === "sortie_camion" && dans(m));
+    const ret = movements.filter((m) => m.type === "retour_camion" && dans(m));
+    return { n: d.n, debut: d.debut, fin: d.fin, chargements: charg.reduce((a, m) => a + (m.quantity || 0), 0), nbChargements: charg.length, retours: ret.reduce((a, m) => a + (m.quantity || 0), 0), nbRetours: ret.length };
+  });
+}
