@@ -58,12 +58,12 @@ export function convertir15({ ambiant, temp, densite }) {
 export function calculerVente({ volume, temp }, densiteVente = DENSITE_VENTE_DEFAUT) {
   const v = lireNombre(volume), t = lireNombre(temp);
   if (v === null && t === null) return { saisi: false, ok: true };
-  if (Number.isNaN(v) || Number.isNaN(t)) return { saisi: true, ok: false, erreur: "Valeur non numérique" };
-  if (v !== null && v < 0) return { saisi: true, ok: false, erreur: "Volume négatif" };
-  if (v === null) return { saisi: true, ok: false, erreur: "Volume obligatoire" };
-  if (t === null) return { saisi: true, ok: false, erreur: "Température obligatoire" };
+  if (Number.isNaN(v) || Number.isNaN(t)) return { saisi: true, ok: false, erreur: "Valeur non numérique", champ: Number.isNaN(v) ? "volume" : "temp" };
+  if (v !== null && v < 0) return { saisi: true, ok: false, erreur: "Volume négatif", champ: "volume" };
+  if (v === null) return { saisi: true, ok: false, erreur: "Volume obligatoire", champ: "volume" };
+  if (t === null) return { saisi: true, ok: false, erreur: "Température obligatoire", champ: "temp" };
   const c = convertir15({ ambiant: v, temp: t, densite: densiteVente });
-  if (!c.ok) return { saisi: true, ok: false, erreur: c.erreur };
+  if (!c.ok) return { saisi: true, ok: false, erreur: c.erreur, champ: "volume" };
   const hors = t < TEMP_MIN_PLAUSIBLE || t > TEMP_MAX_PLAUSIBLE;
   return {
     saisi: true, ok: true, volume: v, temp: t, densiteObs: densiteVente, densite15: c.densite15, vcf: c.vcf, volume15: c.volume15, methode: c.methode,
@@ -136,8 +136,8 @@ export function decadesDuMois(periodKey) {
 export function calculerDecade({ envoyes, recus }) {
   const e = lireNombre(envoyes), r = lireNombre(recus);
   if (e === null && r === null) return { saisi: false, ok: true };
-  if (Number.isNaN(e) || Number.isNaN(r)) return { saisi: true, ok: false, erreur: "Valeur non numérique" };
-  if ((e !== null && e < 0) || (r !== null && r < 0)) return { saisi: true, ok: false, erreur: "Volume négatif" };
+  if (Number.isNaN(e) || Number.isNaN(r)) return { saisi: true, ok: false, erreur: "Valeur non numérique", champ: Number.isNaN(e) ? "envoyes" : "recus" };
+  if ((e !== null && e < 0) || (r !== null && r < 0)) return { saisi: true, ok: false, erreur: "Volume négatif", champ: e !== null && e < 0 ? "envoyes" : "recus" };
   const ee = e === null ? 0 : e, rr = r === null ? 0 : r;
   return { saisi: true, ok: true, envoyes: ee, recus: rr, net: rr - ee };
 }
@@ -166,3 +166,44 @@ export function transfertsParDecade(movements, siteId, periodKey) {
     return { n: d.n, debut: d.debut, fin: d.fin, envoyes: somme(env), nbEnvoyes: env.length, recus: somme(rec), nbRecus: rec.length, chargements: somme(ch), nbChargements: ch.length };
   });
 }
+
+// ---------------------------------------------------------------------
+// Vérification du bilan (bouton « Vérifier » et contrôle avant « Valider »)
+//   Un message = { niveau: "erreur" | "avert", texte, cible } ; cible = { onglet, champ } désigne la cellule à atteindre
+//   en cliquant sur le message (champ = identifiant de la cellule), ou null.
+//   Erreur (rouge) : valeur non numérique, volume négatif, ligne incomplète, stock obligatoire manquant.
+//   Avertissement (jaune) : température hors plage plausible, jour sans saisie, mois non terminé, réception sans mesure.
+// ---------------------------------------------------------------------
+const fjMsg = (j) => `${j.slice(8, 10)}/${j.slice(5, 7)}/${j.slice(0, 4)}`;
+
+// lignes = [{ jour, calc }] (calc = calculerVente). Les jours à venir (après `aujourdhui`) ne sont pas « sans saisie ».
+export function messagesVentes(lignes, aujourdhui) {
+  const out = [];
+  for (const { jour, calc } of lignes) {
+    if (calc.saisi && !calc.ok) out.push({ niveau: "erreur", texte: `Ventes ${fjMsg(jour)} : ${calc.erreur}`, cible: { onglet: "ventes", champ: `${calc.champ || "volume"}-${jour}` } });
+    else if (calc.saisi && calc.avertissement) out.push({ niveau: "avert", texte: `Ventes ${fjMsg(jour)} : ${calc.avertissement}`, cible: { onglet: "ventes", champ: `temp-${jour}` } });
+    else if (!calc.saisi && (!aujourdhui || jour <= aujourdhui)) out.push({ niveau: "avert", texte: `Ventes ${fjMsg(jour)} : jour sans saisie`, cible: { onglet: "ventes", champ: `volume-${jour}` } });
+  }
+  return out;
+}
+
+// decades = [{ n, calc }] (calc = calculerDecade)
+export function messagesTransferts(decades) {
+  return decades.filter((d) => d.calc.saisi && !d.calc.ok).map((d) => ({ niveau: "erreur", texte: `Transferts décade ${d.n} : ${d.calc.erreur}`, cible: { onglet: "transferts", champ: `tr-${d.n}-${d.calc.champ || "envoyes"}` } }));
+}
+
+export function messagesGeneraux({ periodKey, aujourdhui, nbReceptionsSansMesure }) {
+  const out = [];
+  const jours = joursDuMois(periodKey);
+  if (jours.length && aujourdhui && aujourdhui < jours[jours.length - 1]) {
+    out.push({ niveau: "avert", texte: `Le mois n'est terminé qu'au ${fjMsg(jours[jours.length - 1])} : le bilan est peut-être incomplet.`, cible: null });
+  }
+  if (nbReceptionsSansMesure > 0) out.push({ niveau: "avert", texte: `Réceptions : ${nbReceptionsSansMesure} bon(s) de livraison sans température/densité (comptés en volume ambiant).`, cible: { onglet: "receptions", champ: null } });
+  return out;
+}
+
+// Erreurs d'abord, puis avertissements ; l'ordre d'arrivée est conservé dans chaque groupe.
+export function trierMessages(messages) {
+  return [...messages.filter((m) => m.niveau === "erreur"), ...messages.filter((m) => m.niveau !== "erreur")];
+}
+export const compterMessages = (messages) => ({ erreurs: messages.filter((m) => m.niveau === "erreur").length, avertissements: messages.filter((m) => m.niveau !== "erreur").length });
