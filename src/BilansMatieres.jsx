@@ -31,6 +31,50 @@ const fmtJour = (d) => (d ? `${d.slice(8, 10)}/${d.slice(5, 7)}/${d.slice(0, 4)}
 const num = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
 const clsSigne = (n) => (n > 0 ? "sap-gain" : n < 0 ? "sap-loss" : "");
 
+// ---------------------------------------------------------------------
+// Aspect (style Fiori) : petites icônes en SVG et surbrillance des jours fériés. Aucun calcul métier ici.
+// ---------------------------------------------------------------------
+const ICONES = {
+  save: ["M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z", "M17 21v-8H7v8", "M7 3v5h8"],
+  check: ["M20 6 9 17l-5-5"],
+  shield: ["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z", "m9 12 2 2 4-4"],
+  back: ["m12 19-7-7 7-7", "M19 12H5"],
+  sheet: ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M8 13h8", "M8 17h8"],
+  pdf: ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M8 13h5", "M8 17h8"],
+  print: ["M6 9V2h12v7", "M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2", "M6 14h12v8H6z"],
+  search: ["M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z", "m21 21-4.35-4.35"],
+  undo: ["M3 12a9 9 0 1 0 3-6.7L3 8", "M3 3v5h5"],
+  play: ["m6 3 14 9-14 9z"],
+  slides: ["M2 3h20", "M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3", "m7 21 5-5 5 5"],
+  db: ["M12 8c4.97 0 9-1.34 9-3s-4.03-3-9-3-9 1.34-9 3 4.03 3 9 3z", "M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5", "M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3"],
+  down: ["M12 3v14", "m6 11 6 6 6-6", "M5 21h14"],
+  up: ["M12 21V7", "m6 13 6-6 6 6", "M5 3h14"],
+  swap: ["M7 16V4", "m3 8 4-4 4 4", "M17 8v12", "m21 16-4 4-4-4"],
+  chart: ["M18 20V10", "M12 20V4", "M6 20v-6"],
+  gain: ["M3 17l6-6 4 4 8-8", "M17 7h4v4"],
+  perte: ["M3 7l6 6 4-4 8 8", "M17 17h4v-4"],
+  egal: ["M5 9h14", "M5 15h14"],
+  list: ["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"],
+  edit: ["M12 20h9", "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"],
+};
+const Ico = ({ n, s = 16 }) => (
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    {(ICONES[n] || []).map((d, i) => <path key={i} d={d} />)}
+  </svg>
+);
+// Jours fériés du Gabon (surbrillance seulement) : dates fixes + lundi de Pâques, Ascension, lundi de Pentecôte.
+// Les fêtes musulmanes (dates lunaires) ne sont pas incluses.
+function joursFeries(annee) {
+  const f = new Set([`${annee}-01-01`, `${annee}-05-01`, `${annee}-08-15`, `${annee}-08-16`, `${annee}-08-17`, `${annee}-11-01`, `${annee}-12-25`]);
+  const a = annee % 19, b = Math.floor(annee / 100), cc = annee % 100, d = Math.floor(b / 4), e = b % 4, g0 = Math.floor((b + 8) / 25), g = Math.floor((b - g0 + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(cc / 4), k = cc % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const mois = Math.floor((h + l - 7 * m + 114) / 31), jour = ((h + l - 7 * m + 114) % 31) + 1;
+  const paques = new Date(annee, mois - 1, jour, 12);
+  const plus = (n) => { const x = new Date(paques); x.setDate(x.getDate() + n); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
+  f.add(plus(1)); f.add(plus(39)); f.add(plus(50));
+  return f;
+}
+
 // Message lisible pour une erreur Supabase (script SQL de l'étape 1 non exécuté, droits, réseau…).
 function erreurLisible(e) {
   const t = `${e?.message || ""} ${e?.code || ""}`;
@@ -46,70 +90,166 @@ function erreurLisible(e) {
 }
 
 const STYLE = `
-.sap-root { font-family: "72", "Segoe UI", Arial, sans-serif; font-size: 13px; color: #32363a; background: #fff; border: 1px solid #c9ced3; border-radius: 4px; overflow: hidden; }
-.sap-shell { background: #354a5f; color: #fff; padding: 8px 14px; font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
-.sap-toolbar { display: flex; gap: 4px; flex-wrap: wrap; padding: 6px 10px; background: #f2f4f5; border-bottom: 1px solid #d9dde0; }
-.sap-btn { background: #fff; border: 1px solid #b7bec5; border-radius: 3px; padding: 5px 11px; font-size: 12.5px; color: #0a6ed1; cursor: pointer; font-family: inherit; }
-.sap-btn:hover:not(:disabled) { background: #eaf2fb; }
-.sap-btn:disabled { color: #9aa3ab; cursor: not-allowed; background: #f7f8f9; }
-.sap-btn-main { background: #0a6ed1; border-color: #0a6ed1; color: #fff; font-weight: 600; }
-.sap-btn-main:hover:not(:disabled) { background: #085caf; }
-.sap-btn-main:disabled { background: #9ec5ec; border-color: #9ec5ec; color: #fff; }
-.sap-form { max-width: 520px; margin: 22px auto; padding: 0 16px; }
-.sap-row { display: grid; grid-template-columns: 130px 1fr; align-items: center; gap: 10px; margin-bottom: 10px; }
-.sap-label { color: #6a6d70; }
-.sap-input { border: 1px solid #89919a; border-radius: 3px; padding: 6px 8px; font-size: 13px; background: #fff; font-family: inherit; width: 100%; box-sizing: border-box; }
-.sap-header { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 4px 28px; padding: 10px 14px; background: #fafbfc; border-bottom: 1px solid #d9dde0; }
-.sap-hrow { display: flex; gap: 8px; }
-.sap-hrow b { color: #6a6d70; font-weight: 400; min-width: 128px; }
-.sap-badge { display: inline-block; padding: 1px 9px; border-radius: 10px; font-size: 12px; font-weight: 600; }
-.sap-st-draft { background: #fff3b8; color: #8a5a00; }
-.sap-st-ok { background: #e1f3e8; color: #107e3e; }
-.sap-st-hist { background: #e5e7ea; color: #5b6168; }
-.sap-banner { padding: 7px 14px; background: #fff3b8; color: #6b4a00; border-bottom: 1px solid #f0dc7a; font-size: 12.5px; }
-.sap-tabs { display: flex; gap: 2px; padding: 8px 10px 0; border-bottom: 2px solid #0a6ed1; background: #fff; flex-wrap: wrap; }
-.sap-tab { border: 1px solid #d9dde0; border-bottom: none; background: #f2f4f5; padding: 6px 14px; cursor: pointer; font-size: 12.5px; border-radius: 3px 3px 0 0; color: #32363a; font-family: inherit; }
-.sap-tab.on { background: #0a6ed1; color: #fff; border-color: #0a6ed1; font-weight: 600; }
-.sap-body { padding: 12px 14px 16px; min-height: 240px; overflow-x: auto; }
-.sap-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
-.sap-table th { background: #e5e8ea; border: 1px solid #cfd4d9; padding: 5px 9px; text-align: left; font-weight: 600; }
-.sap-table td { border: 1px solid #e0e4e7; padding: 4px 9px; }
-.sap-table tbody tr:nth-child(even) td { background: #f6f7f8; }
+.sap-root { --navy: #0B2F52; --navy-2: #16466F; --blue: #0070B8; --red: #D43F0A; --red-logo: #F06810; --ink: #1B2A3B; --muted: #5B6B7E; --line: #DDE4EC; --soft: #F4F7FA; --ok: #0F7B38; --err: #C0262D; --radius: 12px; --shadow: 0 1px 2px rgba(11, 47, 82, .06), 0 6px 18px rgba(11, 47, 82, .08);
+  font-family: Inter, "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Roboto, Arial, sans-serif; font-size: 14px; line-height: 1.45; color: var(--ink); background: var(--soft); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; box-shadow: var(--shadow); }
+.sap-root button, .sap-root input, .sap-root select, .sap-root textarea { font-family: inherit; }
+/* Bandeau de titre */
+.sap-shell { background: linear-gradient(135deg, var(--navy) 0%, var(--navy-2) 100%); color: #fff; padding: 20px 28px 18px; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 4px solid var(--red-logo); }
+.sap-shell-id { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.sap-kicker { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #A9C4DE; font-weight: 600; }
+.sap-title { margin: 0; font-size: clamp(21px, 3.4vw, 30px); font-weight: 700; letter-spacing: -.01em; line-height: 1.15; }
+.sap-title small { font-weight: 500; font-size: .6em; color: #CFE0F0; margin-left: 12px; letter-spacing: 0; }
+.sap-shell > span { font-size: 15px; font-weight: 600; }
+/* Barre d'outils et boutons */
+.sap-toolbar { display: flex; gap: 8px; flex-wrap: wrap; padding: 14px 28px; background: #fff; border-bottom: 1px solid var(--line); align-items: center; }
+.sap-btn { display: inline-flex; align-items: center; gap: 7px; background: #fff; border: 1px solid #C5D0DC; border-radius: 9px; padding: 8px 14px; font-size: 13px; font-weight: 600; color: var(--navy); cursor: pointer; line-height: 1.2; transition: background .15s, border-color .15s, box-shadow .15s, transform .05s; }
+.sap-btn svg { flex: none; }
+.sap-btn:hover:not(:disabled) { background: #EEF3F8; border-color: #9FB2C6; }
+.sap-btn:active:not(:disabled) { transform: translateY(1px); }
+.sap-btn:focus-visible { outline: 2px solid var(--red-logo); outline-offset: 2px; }
+.sap-btn:disabled { color: #9AA8B8; background: #F6F8FA; border-color: #E3E8EE; cursor: not-allowed; }
+.sap-btn-ghost { border-color: transparent; background: transparent; }
+.sap-btn-main { background: var(--red); border-color: var(--red); color: #fff; box-shadow: 0 2px 6px rgba(212, 63, 10, .28); }
+.sap-btn-main:hover:not(:disabled) { background: #B93508; border-color: #B93508; }
+.sap-btn-main:disabled { background: #EBC1B0; border-color: #EBC1B0; color: #fff; box-shadow: none; }
+.sap-btn-ok { background: var(--ok); border-color: var(--ok); color: #fff; box-shadow: 0 2px 6px rgba(15, 123, 56, .25); }
+.sap-btn-ok:hover:not(:disabled) { background: #0B6A2F; border-color: #0B6A2F; }
+.sap-btn-ok:disabled { background: #AAD3B9; border-color: #AAD3B9; color: #fff; box-shadow: none; }
+/* Formulaires (écran de sélection) */
+.sap-form { max-width: 600px; margin: 26px auto; padding: 24px 28px; background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); }
+.sap-row { display: grid; grid-template-columns: 160px 1fr; align-items: center; gap: 12px; margin-bottom: 14px; }
+.sap-label { color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.sap-input { border: 1px solid #C5D0DC; border-radius: 9px; padding: 9px 12px; font-size: 14px; background: #fff; width: 100%; box-sizing: border-box; color: var(--ink); }
+.sap-input:focus { outline: none; border-color: var(--red-logo); box-shadow: 0 0 0 3px rgba(240, 104, 16, .22); }
+.sap-input:disabled { background: #F1F4F8; color: #6C7B8D; }
+/* Informations du bilan */
+.sap-header { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 28px; padding: 14px 28px; background: var(--soft); border-bottom: 1px solid var(--line); }
+.sap-hrow { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.sap-hrow b { font-size: 12px; font-variant-caps: all-small-caps; letter-spacing: .07em; color: var(--muted); font-weight: 700; }
+/* Badges de statut */
+.sap-badge { display: inline-flex; align-items: center; gap: 7px; padding: 5px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 700; width: fit-content; }
+.sap-badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; opacity: .85; }
+.sap-st-draft { background: #FFE9D0; color: #8A3F00; }
+.sap-st-ok { background: #DCF3E3; color: #0B5A2A; }
+.sap-st-reopen { background: #DDEBFB; color: #0B4A86; }
+.sap-st-hist { background: #E7EBF0; color: #4A5868; }
+.sap-banner { padding: 10px 28px; background: #FFF4D6; color: #6B4A00; border-bottom: 1px solid #F0DC9A; font-size: 13px; }
+.sap-banner-ok { padding: 10px 28px; background: #E3F5E9; color: #0B5A2A; border-bottom: 1px solid #BFE3CB; font-size: 13px; }
+/* Progression des ventes saisies */
+.sap-progress { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 11px 28px 13px; background: #fff; border-bottom: 1px solid var(--line); }
+.sap-progress-txt { font-size: 12.5px; font-weight: 700; color: var(--navy); min-width: 150px; }
+.sap-progress-bar { flex: 1; min-width: 140px; height: 8px; border-radius: 99px; background: #E4EAF1; overflow: hidden; }
+.sap-progress-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--red-logo), var(--red)); transition: width .45s ease; }
+.sap-progress.done .sap-progress-fill { background: linear-gradient(90deg, #22A455, var(--ok)); }
+.sap-progress-pct { font-size: 12px; color: var(--muted); font-weight: 600; min-width: 36px; text-align: right; }
+/* Onglets */
+.sap-tabs { display: flex; gap: 2px; padding: 0 28px; background: #fff; border-bottom: 1px solid var(--line); overflow-x: auto; flex-wrap: nowrap; }
+.sap-tab { display: inline-flex; align-items: center; gap: 8px; border: none; border-bottom: 3px solid transparent; background: transparent; padding: 14px 14px 12px; margin-bottom: -1px; cursor: pointer; font-size: 13.5px; font-weight: 600; color: var(--muted); white-space: nowrap; transition: color .15s, background .15s; }
+.sap-tab:hover { color: var(--navy); background: #F4F7FA; }
+.sap-tab.on { color: var(--navy); border-bottom-color: var(--red-logo); }
+.sap-tab:focus-visible { outline: 2px solid var(--red-logo); outline-offset: -2px; }
+.sap-body { padding: 24px 28px 28px; background: var(--soft); min-height: 260px; overflow-x: auto; }
+/* Cartes d'indicateurs */
+.sap-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin-bottom: 24px; }
+.sap-kpi { position: relative; display: flex; gap: 14px; align-items: flex-start; background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 18px 16px 22px; box-shadow: var(--shadow); overflow: hidden; }
+.sap-kpi::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 5px; background: var(--kc, var(--blue)); }
+.sap-kpi-ic { flex: none; width: 44px; height: 44px; border-radius: 13px; display: grid; place-items: center; background: var(--kbg, #E1EEF9); color: var(--kc, var(--blue)); }
+.sap-kpi-label { font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.sap-kpi-val { font-size: 27px; font-weight: 700; color: var(--navy); font-variant-numeric: tabular-nums; line-height: 1.15; margin-top: 3px; }
+.sap-kpi-val small { font-size: 13px; font-weight: 600; color: var(--muted); margin-left: 3px; }
+.sap-kpi-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.sap-kpi-debut { --kc: #0B5E9E; --kbg: #E1EEF9; }
+.sap-kpi-rec { --kc: #0E7490; --kbg: #DDF1F6; }
+.sap-kpi-ven { --kc: #C2410C; --kbg: #FDE6D8; }
+.sap-kpi-neutre { --kc: #64748B; --kbg: #E8EDF2; }
+.sap-kpi-gain { --kc: var(--ok); --kbg: #DCF3E3; } .sap-kpi-gain .sap-kpi-val { color: var(--ok); }
+.sap-kpi-perte { --kc: var(--err); --kbg: #FBE1E2; } .sap-kpi-perte .sap-kpi-val { color: var(--err); }
+/* Cartes */
+.sap-card { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; margin-bottom: 24px; }
+.sap-card-h { display: flex; align-items: center; gap: 9px; padding: 14px 20px; font-weight: 700; color: var(--navy); border-bottom: 1px solid var(--line); background: #FBFCFE; }
+.sap-card-b { overflow-x: auto; }
+.sap-card-pad { padding: 18px 20px; }
+.sap-card-pad .sap-label { display: block; margin-bottom: 8px; font-size: 13.5px; font-weight: 700; color: var(--navy); }
+/* Tableaux */
+.sap-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; }
+.sap-table th { background: var(--navy); color: #fff; text-align: left; font-weight: 600; font-size: 12px; letter-spacing: .03em; padding: 11px 14px; white-space: nowrap; }
+.sap-table td { padding: 10px 14px; border-bottom: 1px solid #EAEFF4; }
+.sap-table tbody tr:nth-child(even) td { background: #F9FBFD; }
+.sap-table tbody tr:hover td { background: #EEF4FB; }
 .sap-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.sap-total td { font-weight: 700; background: #e5e8ea !important; border-top: 2px solid #8a929a; }
-.sap-gain { color: #107e3e; font-weight: 700; }
-.sap-loss { color: #bb0000; font-weight: 700; }
-.sap-muted { color: #6a6d70; }
-.sap-status { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 5px 12px; background: #f2f4f5; border-top: 1px solid #d9dde0; font-size: 12px; color: #4b5057; }
-.sap-msg { font-weight: 600; }
-.sap-msg-ok { color: #107e3e; } .sap-msg-warn { color: #8a5a00; } .sap-msg-err { color: #bb0000; }
-.sap-gridwrap { max-height: 62vh; overflow: auto; border: 1px solid #cfd4d9; }
+.sap-table th.sap-num { text-align: right; }
+.sap-total td { font-weight: 700; background: #DCE6F1 !important; color: var(--navy); border-top: 2px solid var(--navy); }
+.sap-compte th { background: #EAF0F6; color: var(--navy); }
+.sap-compte td:first-child { font-weight: 500; }
+.sap-compte .sap-final td { font-size: 16px; padding-top: 14px; padding-bottom: 14px; background: #D3E1F0 !important; border-top: 3px solid var(--navy); }
+.sap-compte .sap-final .sap-num { font-size: 20px; }
+.sap-gain { color: var(--ok); font-weight: 700; }
+.sap-loss { color: var(--err); font-weight: 700; }
+.sap-muted { color: var(--muted); }
+/* Grille de saisie */
+.sap-gridwrap { max-height: 64vh; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; box-shadow: var(--shadow); -webkit-overflow-scrolling: touch; }
 .sap-grid { margin: 0; }
-.sap-grid thead th { position: sticky; top: 0; z-index: 2; }
-.sap-grid tfoot td { position: sticky; bottom: 0; z-index: 2; }
-.sap-grid td { padding: 0; }
-.sap-grid td.sap-d { padding: 3px 9px; white-space: nowrap; }
-.sap-cell { width: 100%; box-sizing: border-box; border: 1px solid transparent; background: #fff; padding: 4px 8px; font-size: 12.5px; text-align: right; font-family: inherit; font-variant-numeric: tabular-nums; }
-.sap-cell:focus { outline: 2px solid #0a6ed1; outline-offset: -2px; background: #fff; }
-.sap-cell:disabled { background: #f1f2f3; color: #5b6168; }
-.sap-cell-err { border-color: #bb0000; background: #fdeaea; }
-.sap-cell-warn { background: #fff7d1; }
-.sap-cell-prop { font-style: italic; color: #6a6d70; }
-.sap-ro { background: #e9ebed !important; color: #4b5057; padding: 4px 9px !important; }
-.sap-mark { width: 26px; text-align: center; padding: 0 !important; }
-.sap-row-dirty td.sap-d { border-left: 3px solid #0a6ed1; }
-.sap-msgpanel { border-top: 1px solid #d9dde0; background: #fcfcfd; max-height: 175px; overflow: auto; padding: 6px 12px 8px; font-size: 12.5px; }
-.sap-msghead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-weight: 600; }
-.sap-msgitem { list-style: none; padding: 3px 6px; border-radius: 3px; cursor: pointer; }
-.sap-msgitem:hover, .sap-msgitem:focus { background: #eaf2fb; outline: none; }
-.sap-banner-ok { padding: 7px 14px; background: #e1f3e8; color: #0b5d2d; border-bottom: 1px solid #b9dfc7; font-size: 12.5px; }
+.sap-grid thead th { position: sticky; top: 0; z-index: 3; }
+.sap-grid tfoot td { position: sticky; bottom: 0; z-index: 3; }
+.sap-grid tbody tr { --rb: #fff; }
+.sap-grid tbody tr:nth-child(even) { --rb: #F8FAFC; }
+.sap-grid tbody tr.sap-off { --rb: #EAF3FC; }
+.sap-grid tbody tr:hover { --rb: #E2EDF9; }
+.sap-grid tbody td { background: var(--rb); padding: 3px 6px; }
+.sap-grid tbody tr:nth-child(even) td, .sap-grid tbody tr:hover td { background: var(--rb); }
+.sap-grid td.sap-d { padding: 6px 14px; white-space: nowrap; position: sticky; left: 0; z-index: 2; background: var(--rb); font-weight: 500; }
+.sap-grid thead th:first-child { position: sticky; left: 0; z-index: 4; }
+.sap-grid tfoot td:first-child { left: 0; z-index: 4; }
+.sap-grid tfoot td { background: #DCE6F1 !important; }
+.sap-grid tfoot td.sap-d { font-weight: 700; }
+.sap-cell { width: 100%; min-width: 88px; box-sizing: border-box; border: 1px solid #D3DCE6; border-radius: 7px; background: #fff; padding: 6px 10px; font-size: 13px; text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; margin: 2px 0; transition: border-color .12s, box-shadow .12s; }
+.sap-cell:hover:not(:disabled) { border-color: #9FB2C6; }
+.sap-cell:focus { outline: none; border-color: var(--red); box-shadow: 0 0 0 2px rgba(212, 63, 10, .38); background: #fff; }
+.sap-cell:disabled { background: #F1F4F8; color: #4A596B; border-color: #E3E8EE; }
+.sap-cell-err { border-color: var(--err); background: #FDECEC; }
+.sap-cell-warn { background: #FFF6DB; border-color: #E8C35A; }
+.sap-cell-prop { font-style: italic; color: var(--muted); }
+.sap-ro { background: #F1F4F8 !important; color: #3E4C5E; font-style: italic; font-weight: 400; padding: 6px 14px !important; }
+.sap-mark { width: 38px; text-align: center; padding: 0 !important; }
+.sap-mark[data-etat="vide"]::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #F59E0B; vertical-align: middle; }
+.sap-mark[data-etat="avenir"]::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: #CBD5E1; vertical-align: middle; }
+.sap-mark[data-etat="ok"]::before { content: "\\2713"; color: #16A34A; font-weight: 700; opacity: .8; }
+.sap-row-dirty td.sap-d { box-shadow: inset 4px 0 0 var(--blue); }
+.sap-today td.sap-d::after { content: ""; display: inline-block; width: 8px; height: 8px; margin-left: 8px; border-radius: 50%; background: var(--red-logo); box-shadow: 0 0 0 3px rgba(240, 104, 16, .22); vertical-align: middle; }
+/* Messages */
+.sap-status { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 28px; background: #fff; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); }
+.sap-msg { font-weight: 600; }
+.sap-msg.sap-msg-ok, .sap-msg.sap-msg-warn, .sap-msg.sap-msg-err { display: inline-block; padding: 5px 14px 5px 7px; border-radius: 999px; animation: sap-in .3s ease-out; }
+.sap-msg-ok { color: #0B5A2A; } .sap-msg-warn { color: #8A4200; } .sap-msg-err { color: #9F1D24; }
+.sap-msg.sap-msg-ok { background: #E3F5E9; } .sap-msg.sap-msg-warn { background: #FFF0D9; } .sap-msg.sap-msg-err { background: #FCE4E4; }
+.sap-msg-ic { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; margin-right: 8px; font-size: 11px; font-weight: 800; color: #fff; vertical-align: middle; }
+.sap-msg-ok .sap-msg-ic { background: #16A34A; } .sap-msg-warn .sap-msg-ic { background: #F59E0B; } .sap-msg-err .sap-msg-ic { background: #DC2626; }
 .sap-msg-link { cursor: pointer; text-decoration: underline dotted; }
+@keyframes sap-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.sap-msgpanel { border-top: 1px solid var(--line); background: #FDFEFF; max-height: 190px; overflow: auto; padding: 12px 28px 14px; font-size: 13px; }
+.sap-msghead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-weight: 700; color: var(--navy); }
+.sap-msgitem { list-style: none; padding: 6px 10px; margin-bottom: 4px; border-radius: 8px; cursor: pointer; border-left: 4px solid currentColor; background: #fff; }
+.sap-msgitem.sap-msg-err { background: #FEF3F3; } .sap-msgitem.sap-msg-warn { background: #FFF8EA; }
+.sap-msgitem:hover, .sap-msgitem:focus { filter: brightness(.97); outline: none; }
+@media (prefers-reduced-motion: reduce) { .sap-msg, .sap-progress-fill, .sap-btn { animation: none !important; transition: none !important; } }
+/* Écrans étroits (portable réduit, tablette, téléphone) */
+@media (max-width: 980px) { .sap-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 720px) {
+  .sap-shell { padding: 16px 16px 14px; } .sap-toolbar { padding: 10px 14px; gap: 6px; } .sap-btn { padding: 8px 11px; font-size: 12.5px; }
+  .sap-header { grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+  .sap-header, .sap-progress, .sap-tabs, .sap-body, .sap-status, .sap-banner, .sap-banner-ok, .sap-msgpanel { padding-left: 14px; padding-right: 14px; }
+  .sap-body { padding-top: 16px; padding-bottom: 20px; } .sap-form { margin: 14px 10px; padding: 18px 16px; } .sap-row { grid-template-columns: 1fr; gap: 6px; }
+  .sap-kpis { gap: 10px; } .sap-kpi { padding: 14px 12px 12px 18px; gap: 10px; } .sap-kpi-ic { width: 38px; height: 38px; } .sap-kpi-val { font-size: 21px; }
+  .sap-gridwrap { max-height: 70vh; } .sap-table th, .sap-table td { padding-left: 10px; padding-right: 10px; }
+}
+@media (max-width: 460px) { .sap-progress-pct { display: none; } .sap-kpis { grid-template-columns: 1fr; } .sap-title small { display: block; margin: 2px 0 0; } }
+/* Impression */
 .sap-printonly { display: none; }
 .sap-printonly h2 { margin: 0 0 2px; font-size: 18px; } .sap-printonly h3 { margin: 12px 0 4px; font-size: 13px; background: #1f3a5f; color: #fff; padding: 3px 8px; }
 .sap-printonly table { border-collapse: collapse; width: 100%; font-size: 10.5px; margin-bottom: 6px; }
 .sap-printonly th, .sap-printonly td { border: 1px solid #b9c0c7; padding: 2px 6px; text-align: right; } .sap-printonly th:first-child, .sap-printonly td:first-child { text-align: left; }
 .sap-printonly thead th { background: #eef1f4; } .sap-printonly tfoot td { font-weight: 700; background: #f6f8f9; }
-@media print { .sap-root > *:not(.sap-printonly):not(style) { display: none !important; } .sap-printonly { display: block !important; } .sap-root { border: none !important; } }
+@media print { .sap-root > *:not(.sap-printonly):not(style) { display: none !important; } .sap-printonly { display: block !important; } .sap-root { border: none !important; box-shadow: none !important; } }
 `;
 
 
@@ -135,6 +275,10 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
   const [saving, setSaving] = useState(false);
   const refs = useRef({});
   const multi = cols.length > 1;
+  // Affichage seulement : dimanches / jours fériés en bleu pâle, repère « aujourd'hui », état de chaque ligne (pastille / coche).
+  const aujourdhui = useMemo(() => { const dj = new Date(); return `${dj.getFullYear()}-${String(dj.getMonth() + 1).padStart(2, "0")}-${String(dj.getDate()).padStart(2, "0")}`; }, []);
+  const feries = useMemo(() => joursFeries(Number(String(bilan.period_key).slice(0, 4))), [bilan.period_key]);
+  const estOff = (j) => new Date(`${j}T12:00:00`).getDay() === 0 || feries.has(j);
   const nCol = cols.length + 1;                  // colonnes saisissables : un volume par ligne, puis la température (commune à la journée)
 
   useEffect(() => {
@@ -178,7 +322,7 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
   };
   const nbModifiees = jours.filter(modifiee).length;
   useEffect(() => { if (onDirty) onDirty(nbModifiees); }, [nbModifiees]); // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { if (onStats) onStats(totaux.joursSaisis); }, [totaux.joursSaisis]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!loading && onStats) onStats(totaux.joursSaisis); }, [loading, totaux.joursSaisis]); // eslint-disable-line react-hooks/exhaustive-deps
   // Détail par ligne pour la Synthèse (valeurs enregistrées) : transmis à l'ouverture de la grille et après chaque enregistrement.
   const emettreParLigne = () => { if (onParLigne && multi) onParLigne({ labels: cols.map(libLigne), ambiant: parLigne.ambiant, volume15: parLigne.volume15 }); };
   useEffect(() => { if (!loading) emettreParLigne(); }, [loading]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -281,8 +425,8 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
                 </td>
               );
               return (
-                <tr key={j} data-jour={j} className={modifiee(j) ? "sap-row-dirty" : ""}>
-                  <td className="sap-d">{fmtJour(j)} <span className="sap-muted">{jourSem}</span></td>
+                <tr key={j} data-jour={j} className={`${modifiee(j) ? "sap-row-dirty" : ""} ${estOff(j) ? "sap-off" : ""} ${j === aujourdhui ? "sap-today" : ""}`.trim()}>
+                  <td className="sap-d" title={j === aujourdhui ? "Aujourd'hui" : estOff(j) ? "Dimanche ou jour férié" : undefined}>{fmtJour(j)} <span className="sap-muted">{jourSem}</span></td>
                   {cols.map((lab, k) => cellule(k, "volume", vals[j]?.v?.[lab] ?? "", (x) => setVol(j, lab, x), k === 0 ? `volume-${j}` : `volume${k}-${j}`, multi ? `Volume ${libLigne(lab)}` : "Volume"))}
                   {cellule(nCol - 1, "temp", vals[j]?.temp ?? "", (x) => setTemp(j, x), `temp-${j}`, "Température")}
                   {multi && <td className="sap-num sap-ro" data-testid={`tot-${j}`}>{c.saisi && c.ok ? fmtL(c.volume) : ""}</td>}
@@ -290,7 +434,7 @@ const VentesGrille = forwardRef(function VentesGrille({ bilan, editable, userNam
                   <td className="sap-num sap-ro" data-testid={`d15-${j}`}>{c.saisi && c.ok && c.densite15 !== null && c.densite15 !== undefined ? c.densite15.toLocaleString("fr-FR", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : ""}</td>
                   <td className="sap-num sap-ro" data-testid={`vcf-${j}`}>{c.saisi && c.ok && c.vcf ? c.vcf.toFixed(4).replace(".", ",") : ""}</td>
                   <td className="sap-num sap-ro" data-testid={`v15-${j}`}>{c.saisi && c.ok ? fmtL(c.volume15) : ""}</td>
-                  <td className="sap-mark" title={err ? c.erreur : warn ? c.avertissement : ""} data-testid={`mark-${j}`}>{err ? <span className="sap-msg-err">✖</span> : warn ? <span className="sap-msg-warn">⚠</span> : ""}</td>
+                  <td className="sap-mark" data-etat={err ? "err" : warn ? "warn" : c.saisi && c.ok ? "ok" : j > aujourdhui ? "avenir" : "vide"} title={err ? c.erreur : warn ? c.avertissement : c.saisi ? "Journée saisie" : j > aujourdhui ? "" : "Journée non saisie"} data-testid={`mark-${j}`}>{err ? <span className="sap-msg-err">✖</span> : warn ? <span className="sap-msg-warn">⚠</span> : ""}</td>
                 </tr>
               );
             })}
@@ -662,9 +806,9 @@ function PresentationSites({ sites, movements, month, year, canManage, userName,
   return (
     <div className="sap-root" data-testid="sap-presentation">
       <style>{STYLE}</style>
-      <div className="sap-shell"><span>Présentation PowerPoint — {periodeLabel}</span><span style={{ fontWeight: 400, fontSize: 12 }}>Plusieurs sites dans un même fichier</span></div>
-      <div className="sap-toolbar"><button className="sap-btn" onClick={onRetour}>◀ Retour</button></div>
-      <div style={{ padding: "10px 14px" }}>
+      <div className="sap-shell"><div className="sap-shell-id"><span className="sap-kicker">BILMAT · Plusieurs sites dans un même fichier</span><h2 className="sap-title">Présentation PowerPoint — {periodeLabel}</h2></div></div>
+      <div className="sap-toolbar"><button className="sap-btn sap-btn-ghost" onClick={onRetour}><Ico n="back" />Retour</button></div>
+      <div style={{ padding: "22px 28px" }}>
         {etat.loading && <p className="sap-muted" data-testid="pres-chargement">Chargement des bilans de {periodeLabel}…</p>}
         {etat.erreur && <p className="sap-msg sap-msg-err" data-testid="pres-erreur">✖ {etat.erreur}</p>}
         {!etat.loading && !etat.erreur && (
@@ -730,6 +874,9 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const transfertsRef = useRef(null);
   const stocksRef = useRef(null);
   const [joursSaisis, setJoursSaisis] = useState(0);
+  const [joursDb, setJoursDb] = useState(0);                 // affichage : jours de ventes déjà enregistrés (barre de progression dès l'ouverture)
+  const [ventesCharge, setVentesCharge] = useState(false);   // affichage : la grille est chargée (son compte est alors le plus à jour)
+  const [rouvertSession, setRouvertSession] = useState(false); // affichage : bilan rouvert pendant cette session (badge bleu « Rouvert »)
   const gridRef = useRef(null);
   const [paramVal, setParamVal] = useState("");
   const [ventesParLigne, setVentesParLigne] = useState(null); // détail des ventes par ligne (sites à plusieurs lignes) : { labels, ambiant, volume15 }
@@ -780,20 +927,23 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           row = again.data;
         } else if (ins.error) throw ins.error; else { row = ins.data; cree = true; }
       }
-      // Sites à plusieurs lignes de vente : détail par ligne pour la Synthèse (facultatif : une erreur ici ne bloque pas l'ouverture)
-      let parLigne = null;
+      // Ventes déjà saisies : nombre de jours (barre de progression) et, pour les sites à plusieurs lignes, détail par ligne pour la
+      // Synthèse (facultatif : une erreur ici ne bloque pas l'ouverture)
+      let parLigne = null, nbJoursDb = 0;
       try {
         const lignesCfg = !cfg.error && cfg.data && Array.isArray(cfg.data.lignes) ? cfg.data.lignes.filter(Boolean) : [];
-        if (lignesCfg.length >= 2) {
-          const rv = await supabase.from("bilan_ventes").select("categorie, volume_ambiant, volume15").eq("bilan_id", row.id);
-          if (!rv.error) {
+        let rv = await supabase.from("bilan_ventes").select("jour, categorie, volume_ambiant, volume15").eq("bilan_id", row.id);
+        if (rv.error && (rv.error.code === "42703" || /categorie/.test(String(rv.error.message || "")))) rv = await supabase.from("bilan_ventes").select("jour, volume_ambiant, volume15").eq("bilan_id", row.id);
+        if (!rv.error) {
+          nbJoursDb = new Set((rv.data || []).map((l) => l.jour)).size;
+          if (lignesCfg.length >= 2) {
             const amb = lignesCfg.map(() => 0), v15 = lignesCfg.map(() => 0);
             (rv.data || []).forEach((l) => { const k = lignesCfg.indexOf(l.categorie || ""); if (k >= 0) { amb[k] += Number(l.volume_ambiant) || 0; v15[k] += Number(l.volume15) || 0; } });
             parLigne = { labels: lignesCfg, ambiant: amb, volume15: v15 };
           }
         }
       } catch (e) { parLigne = null; }
-      setVentesParLigne(parLigne);
+      setVentesParLigne(parLigne); setJoursDb(nbJoursDb); setVentesCharge(false); setRouvertSession(false);
       setBilan(row); setObs(row.commentaire || ""); setPrec(prev.error ? null : prev.data || null); setTab("synthese"); setScreen("bilan"); setVentesOuvert(false); setNbModifVentes(0); setStocksOuvert(false); setNbModifStocks(0); setTransfertsOuvert(false); setNbModifTransferts(0); setNbTransferts(0); setJoursSaisis(0);
       if (cree) {
         if (appendAudit) appendAudit("Bilan matières créé", `${siteName} — ${MOIS[sel.month - 1]} ${sel.year}`);
@@ -924,7 +1074,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       if (r.statut === "erreur") { setMsg({ type: "err", text: r.texte }); return; }
       const u = await supabase.from("bilan_matieres").update({ statut: "valide", valide_par: userName || null, modified_by: userName || null }).eq("id", bilan.id).select("statut, valide_par, valide_le, modified_at, modified_by").single();
       if (u.error) throw u.error;
-      setBilan((b) => ({ ...b, ...u.data })); setVerif(null);
+      setBilan((b) => ({ ...b, ...u.data })); setVerif(null); setRouvertSession(false);
       if (appendAudit) appendAudit("Bilan matières validé", `${site?.name || bilan.site_id} — ${bilan.period_key}`);
       if (flash) flash("Bilan validé et verrouillé.");
       setMsg({ type: "ok", text: "Bilan validé et verrouillé." });
@@ -940,7 +1090,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     try {
       const u = await supabase.from("bilan_matieres").update({ statut: "brouillon", modified_by: userName || null }).eq("id", bilan.id).select("statut, valide_par, valide_le, modified_at, modified_by").single();
       if (u.error) throw u.error;
-      setBilan((b) => ({ ...b, ...u.data }));
+      setBilan((b) => ({ ...b, ...u.data })); setRouvertSession(true);
       if (appendAudit) appendAudit("Bilan matières rouvert", `${site?.name || bilan.site_id} — ${bilan.period_key}`);
       if (flash) flash("Bilan rouvert.");
       setMsg({ type: "ok", text: "Bilan rouvert : il est de nouveau en Brouillon." });
@@ -988,6 +1138,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   const nbLignes = tab === "synthese" ? lignesSynthese : tab === "receptions" ? rec?.lignes.length || 0 : tab === "ventes" ? joursSaisis : tab === "stocks" ? 2 : tab === "transferts" ? nbTransferts : 0;
   const editable = bilan?.statut === "brouillon" && canEdit;
   const st = bilan ? STATUTS[bilan.statut] || STATUTS.historique : null;
+  // Badge « Rouvert » (bleu) : affichage seulement, pendant la session où le bilan a été rouvert (la base le remet en Brouillon).
+  const stAff = bilan && rouvertSession && bilan.statut === "brouillon" ? { label: "Rouvert", cls: "sap-st-reopen" } : st;
   const bientot = "Disponible aux étapes suivantes";
 
   // ---------------- Écran de sélection ----------------
@@ -999,10 +1151,10 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
     return (
       <div className="sap-root" data-testid="sap-select" onKeyDown={(e) => { if (e.key === "F8") { e.preventDefault(); executer(); } }}>
         <style>{STYLE}</style>
-        <div className="sap-shell"><span>Bilan matières — Sélection</span><span style={{ fontWeight: 400, fontSize: 12 }}>Transaction BILMAT</span></div>
+        <div className="sap-shell"><div className="sap-shell-id"><span className="sap-kicker">Transaction BILMAT</span><h2 className="sap-title">Bilan matières<small>Sélection</small></h2></div></div>
         <div className="sap-toolbar">
-          <button className="sap-btn sap-btn-main" onClick={executer} disabled={loading || !siteId} title="Exécuter (F8)">{loading ? "Chargement…" : "Exécuter (F8)"}</button>
-          {canManage && PresentationPanel && <button className="sap-btn" onClick={() => setScreen("presentation")} data-testid="sap-btn-presentation" title="Présentation PowerPoint de plusieurs sites, pour le mois choisi">Présentation PowerPoint (plusieurs sites)…</button>}
+          <button className="sap-btn sap-btn-main" onClick={executer} disabled={loading || !siteId} title="Exécuter (F8)"><Ico n="play" />{loading ? "Chargement…" : "Exécuter (F8)"}</button>
+          {canManage && PresentationPanel && <button className="sap-btn" onClick={() => setScreen("presentation")} data-testid="sap-btn-presentation" title="Présentation PowerPoint de plusieurs sites, pour le mois choisi"><Ico n="slides" />Présentation PowerPoint (plusieurs sites)…</button>}
         </div>
         <div className="sap-form">
           <div className="sap-row"><label className="sap-label" htmlFor="sap-site">Site *</label>
@@ -1022,7 +1174,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           </p>
         </div>
         {canManage && (
-          <div className="sap-form" style={{ marginTop: 4 }} data-testid="sap-param">
+          <div className="sap-form" data-testid="sap-param">
+            <div className="sap-kicker" style={{ color: "var(--muted)", marginBottom: 14 }}>Paramètres du module (Superviseur)</div>
             <div className="sap-row"><label className="sap-label" htmlFor="sap-densite">Densité de vente</label>
               <div style={{ display: "flex", gap: 6 }}>
                 <input id="sap-densite" className="sap-input" inputMode="decimal" value={paramVal} onChange={(e) => setParamVal(e.target.value)} />
@@ -1038,8 +1191,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
           </div>
         )}
         <div className="sap-status">
-          <span className={msg ? `sap-msg sap-msg-${msg.type}` : "sap-muted"} role="status" data-testid="sap-msg">
-            {msg ? `${{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]} ${msg.text}` : "Prêt."}
+          <span className={msg ? `sap-msg sap-msg-${msg.type}` : "sap-muted"} role="status" data-testid="sap-msg" key={msg ? `${msg.type}-${msg.text}` : "pret"}>
+            {msg ? <><span className="sap-msg-ic" aria-hidden="true">{{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]}</span> {msg.text}</> : "Prêt."}
           </span>
           <span>{selectableSites.length} site(s) disponible(s)</span>
         </div>
@@ -1049,7 +1202,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
 
   // ---------------- Écran du bilan ----------------
   const ligne = (key, label, val, remarque, opts = {}) => (
-    <tr key={key} className={opts.total ? "sap-total" : ""}>
+    <tr key={key} className={`${opts.total ? "sap-total" : ""} ${opts.final ? "sap-final" : ""}`.trim()}>
       <td style={{ fontWeight: opts.bold ? 600 : 400 }}>{label}</td>
       <td className={`sap-num ${opts.cls || ""}`} data-testid={`syn-${key}`}>{opts.pct ? (Number.isFinite(val) ? `${val > 0 ? "+" : ""}${val.toFixed(2).replace(".", ",")} %` : "—") : opts.signed ? fmtSigned(val) : fmtL(val)}</td>
       <td className="sap-muted">{remarque}</td>
@@ -1060,22 +1213,35 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
   return (
     <div className="sap-root" data-testid="sap-bilan">
       <style>{STYLE}</style>
-      <div className="sap-shell"><span>Bilan matières — {site?.name || bilan.site_id} — {periodLabel}</span><span className={`sap-badge ${st.cls}`} data-testid="sap-statut">{st.label}</span></div>
-      <div className="sap-toolbar">
-        <button className="sap-btn" onClick={retour} title="Retour à la sélection">◀ Retour</button>
-        <button className="sap-btn" onClick={enregistrer} disabled={!(editable && (ventesOuvert || stocksOuvert || transfertsOuvert))} title={editable ? (ventesOuvert || stocksOuvert || transfertsOuvert ? "Enregistrer les modifications" : "Ouvre un onglet de saisie (ventes, transferts, stocks)") : "Bilan non modifiable"}>Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
-        <button className="sap-btn" onClick={verifierBilan} disabled={hist || occupe} title={hist ? "Bilan historique : rien à vérifier" : "Contrôler la cohérence sans enregistrer"}>Vérifier</button>
-        {bilan.statut === "valide" && canManage
-          ? <button className="sap-btn" onClick={rouvrir} disabled={occupe} title="Rouvrir le bilan (Superviseur)">Rouvrir</button>
-          : <button className="sap-btn" onClick={valider} disabled={!(canManage && bilan.statut === "brouillon") || occupe} title={canManage ? (bilan.statut === "brouillon" ? "Vérification complète puis verrouillage du bilan" : "Bilan non modifiable") : "Réservé au Superviseur"}>Valider</button>}
-        <button className="sap-btn" onClick={() => exporter("excel")} disabled={!exportToExcel || occupe} title={exportToExcel ? "Exporter la synthèse et le détail en Excel" : "Export indisponible"}>Exporter Excel</button>
-        <button className="sap-btn" onClick={() => exporter("pdf")} disabled={!exportToPdf || occupe} title={exportToPdf ? "Exporter la synthèse et le détail en PDF" : "Export indisponible"}>Exporter PDF</button>
-        <button className="sap-btn" onClick={() => exporter("print")} disabled={occupe} title="Imprimer la synthèse et le détail">Imprimer</button>
+      <div className="sap-shell" data-testid="sap-shell">
+        <div className="sap-shell-id"><span className="sap-kicker">BILMAT · Bilan matières</span><h2 className="sap-title" data-testid="sap-titre">{site?.name || bilan.site_id}{" "}<small>{periodLabel}</small></h2></div>
+        <span className={`sap-badge ${stAff.cls}`} data-testid="sap-statut">{stAff.label}</span>
       </div>
+      <div className="sap-toolbar">
+        <button className="sap-btn sap-btn-ghost" onClick={retour} title="Retour à la sélection"><Ico n="back" />Retour</button>
+        <button className="sap-btn sap-btn-main" onClick={enregistrer} disabled={!(editable && (ventesOuvert || stocksOuvert || transfertsOuvert))} title={editable ? (ventesOuvert || stocksOuvert || transfertsOuvert ? "Enregistrer les modifications" : "Ouvre un onglet de saisie (ventes, transferts, stocks)") : "Bilan non modifiable"}><Ico n="save" />Enregistrer{nbModifiees > 0 ? ` (${nbModifiees})` : ""}</button>
+        <button className="sap-btn" onClick={verifierBilan} disabled={hist || occupe} title={hist ? "Bilan historique : rien à vérifier" : "Contrôler la cohérence sans enregistrer"}><Ico n="search" />Vérifier</button>
+        {bilan.statut === "valide" && canManage
+          ? <button className="sap-btn" onClick={rouvrir} disabled={occupe} title="Rouvrir le bilan (Superviseur)"><Ico n="undo" />Rouvrir</button>
+          : <button className="sap-btn sap-btn-ok" onClick={valider} disabled={!(canManage && bilan.statut === "brouillon") || occupe} title={canManage ? (bilan.statut === "brouillon" ? "Vérification complète puis verrouillage du bilan" : "Bilan non modifiable") : "Réservé au Superviseur"}><Ico n="shield" />Valider</button>}
+        <button className="sap-btn" onClick={() => exporter("excel")} disabled={!exportToExcel || occupe} title={exportToExcel ? "Exporter la synthèse et le détail en Excel" : "Export indisponible"}><Ico n="sheet" />Exporter Excel</button>
+        <button className="sap-btn" onClick={() => exporter("pdf")} disabled={!exportToPdf || occupe} title={exportToPdf ? "Exporter la synthèse et le détail en PDF" : "Export indisponible"}><Ico n="pdf" />Exporter PDF</button>
+        <button className="sap-btn" onClick={() => exporter("print")} disabled={occupe} title="Imprimer la synthèse et le détail"><Ico n="print" />Imprimer</button>
+      </div>
+      {!hist && (() => {
+        const total = joursDuMois(bilan.period_key).length; const n = ventesCharge ? joursSaisis : joursDb; const pct = total ? Math.min(100, Math.round((n / total) * 100)) : 0;
+        return (
+          <div className={`sap-progress${total > 0 && n >= total ? " done" : ""}`} data-testid="sap-progress">
+            <span className="sap-progress-txt" data-testid="sap-progress-txt">{n} / {total} jours saisis</span>
+            <div className="sap-progress-bar" role="progressbar" aria-valuemin={0} aria-valuemax={total} aria-valuenow={n} aria-label="Jours de ventes saisis"><div className="sap-progress-fill" style={{ width: `${pct}%` }} /></div>
+            <span className="sap-progress-pct">{pct} %</span>
+          </div>
+        );
+      })()}
       <div className="sap-header" data-testid="sap-entete">
         <div className="sap-hrow"><b>Site</b><span>{site?.name || bilan.site_id}</span></div>
         <div className="sap-hrow"><b>Période</b><span>{periodLabel}</span></div>
-        <div className="sap-hrow"><b>Statut</b><span className={`sap-badge ${st.cls}`}>{st.label}</span></div>
+        <div className="sap-hrow"><b>Statut</b><span className={`sap-badge ${stAff.cls}`}>{stAff.label}</span></div>
         <div className="sap-hrow"><b>Créé par</b><span>{bilan.created_by || "—"} <span className="sap-muted">le {fmtDateHeure(bilan.created_at)}</span></span></div>
         <div className="sap-hrow"><b>Modifié par</b><span>{bilan.modified_by || bilan.created_by || "—"}</span></div>
         <div className="sap-hrow"><b>Dernière modification</b><span>{fmtDateHeure(bilan.modified_at || bilan.created_at)}</span></div>
@@ -1084,13 +1250,35 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
       {hist && <div className="sap-banner" data-testid="sap-historique">Bilan historique (saisi avec l'ancien module) : affiché en lecture seule, avec les valeurs enregistrées.</div>}
       {bilan.statut === "valide" && <div className="sap-banner-ok" data-testid="sap-valide">Bilan validé et verrouillé : seul le Superviseur peut le rouvrir{canManage ? " (bouton « Rouvrir »)" : ""}.</div>}
       <div className="sap-tabs" role="tablist">
-        {[["synthese", "Synthèse"], ["ventes", "Ventes journalières"], ["transferts", "Transferts"], ["receptions", "Réceptions"], ["stocks", "Stocks début / fin"]].map(([id, label]) => (
-          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); if (id === "stocks" && !hist) setStocksOuvert(true); if (id === "transferts" && !hist) setTransfertsOuvert(true); }}>{label}</button>
+        {[["synthese", "Synthèse", "chart"], ["ventes", "Ventes journalières", "up"], ["transferts", "Transferts", "swap"], ["receptions", "Réceptions", "down"], ["stocks", "Stocks début / fin", "db"]].map(([id, label, ic]) => (
+          <button key={id} role="tab" aria-selected={tab === id} className={`sap-tab ${tab === id ? "on" : ""}`} onClick={() => { setTab(id); if (id === "ventes" && !hist) setVentesOuvert(true); if (id === "stocks" && !hist) setStocksOuvert(true); if (id === "transferts" && !hist) setTransfertsOuvert(true); }}><Ico n={ic} s={15} />{label}</button>
         ))}
       </div>
       <div className="sap-body">
         {tab === "synthese" && (
-          <table className="sap-table" data-testid="sap-synthese">
+          <>
+            <div className="sap-kpis" data-testid="sap-kpis">
+              <div className="sap-kpi sap-kpi-debut"><span className="sap-kpi-ic"><Ico n="db" s={22} /></span><div>
+                <div className="sap-kpi-label">Stock début 15 °C</div>
+                <div className="sap-kpi-val" data-testid="kpi-debut">{fmtL(syn.stockDebut)}{" "}<small>L</small></div>
+                <div className="sap-kpi-sub">{syn.stockDebut === null ? "Non disponible" : syn.stockDebutPropose ? "Proposé : fin du mois précédent" : "Saisi"}</div></div></div>
+              <div className="sap-kpi sap-kpi-rec"><span className="sap-kpi-ic"><Ico n="down" s={22} /></span><div>
+                <div className="sap-kpi-label">Réceptions 15 °C</div>
+                <div className="sap-kpi-val" data-testid="kpi-rec">{fmtL(syn.receptions)}{" "}<small>L</small></div>
+                <div className="sap-kpi-sub">{hist ? "Saisie manuelle (ancien module)" : `${rec.lignes.length} bon(s) de livraison`}</div></div></div>
+              <div className="sap-kpi sap-kpi-ven"><span className="sap-kpi-ic"><Ico n="up" s={22} /></span><div>
+                <div className="sap-kpi-label">Ventes 15 °C</div>
+                <div className="sap-kpi-val" data-testid="kpi-ven">{fmtL(syn.ventes)}{" "}<small>L</small></div>
+                <div className="sap-kpi-sub">{hist ? "Saisie manuelle (ancien module)" : "Total des ventes journalières"}</div></div></div>
+              <div className={`sap-kpi ${c ? (c.ecart > 0 ? "sap-kpi-gain" : c.ecart < 0 ? "sap-kpi-perte" : "sap-kpi-neutre") : "sap-kpi-neutre"}`}><span className="sap-kpi-ic"><Ico n={c ? (c.ecart > 0 ? "gain" : c.ecart < 0 ? "perte" : "egal") : "egal"} s={22} /></span><div>
+                <div className="sap-kpi-label">Écart</div>
+                <div className="sap-kpi-val" data-testid="kpi-ecart">{c ? fmtSigned(c.ecart) : "—"}{" "}<small>L</small></div>
+                <div className="sap-kpi-sub" data-testid="kpi-ecart-pct">{c ? `${Number.isFinite(c.ecartPct) ? `${c.ecartPct > 0 ? "+" : ""}${c.ecartPct.toFixed(2).replace(".", ",")} % des ventes · ` : ""}${c.sens === "gain" ? "Gain" : c.sens === "perte" ? "Perte" : "Aucun écart"}` : "Stock début ou fin manquant"}</div></div></div>
+            </div>
+            <div className="sap-card">
+              <div className="sap-card-h"><Ico n="list" s={17} />Compte de stock</div>
+              <div className="sap-card-b">
+          <table className="sap-table sap-compte" data-testid="sap-synthese">
             <thead><tr><th>Poste</th><th className="sap-num">Volume à 15 °C (L)</th><th>Remarque</th></tr></thead>
             <tbody>
               {ligne("debut", "Stock début de mois", syn.stockDebut, syn.stockDebut === null ? "Non disponible : pas de bilan du mois précédent" : syn.stockDebutPropose ? "Proposé : stock fin du mois précédent" : "Saisi")}
@@ -1100,13 +1288,16 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
               {ligne("tr", "± Transferts entre sites", syn.transferts, hist ? "Saisie manuelle (ancien module)" : "Saisie par décade, à l'ambiant (équilibre des stocks) : reçus − envoyés", { signed: true })}
               {ligne("theo", "= Stock théorique fin", c ? c.theorique : syn.stockDebut !== null ? syn.stockDebut + syn.receptions - syn.ventes + syn.transferts : null, "Début + réceptions − ventes ± transferts", { total: true })}
               {ligne("phys", "Stock physique fin (jaugeage)", syn.stockFin, syn.stockFin === null ? "Non saisi" : "Mesuré à la jauge, ramené à 15 °C", { bold: true })}
-              {ligne("ecart", "Écart (physique − théorique)", c ? c.ecart : null, c ? (c.sens === "gain" ? "Gain" : c.sens === "perte" ? "Perte" : "Aucun écart") : "Stock début ou stock fin manquant", { total: true, signed: true, cls: c ? clsSigne(c.ecart) : "" })}
+              {ligne("ecart", "Écart (physique − théorique)", c ? c.ecart : null, c ? (c.sens === "gain" ? "Gain" : c.sens === "perte" ? "Perte" : "Aucun écart") : "Stock début ou stock fin manquant", { total: true, final: true, signed: true, cls: c ? clsSigne(c.ecart) : "" })}
               {ligne("pct", "Écart en % des ventes", c ? c.ecartPct : null, c && c.ecartPct === null ? "Aucune vente sur le mois" : "Écart ÷ ventes du mois", { pct: true, cls: c ? clsSigne(c.ecart) : "" })}
             </tbody>
           </table>
+              </div>
+            </div>
+          </>
         )}
         {tab === "synthese" && (
-          <div style={{ marginTop: 14 }} data-testid="sap-obs-bloc">
+          <div className="sap-card sap-card-pad" data-testid="sap-obs-bloc">
             <label className="sap-label" htmlFor="sap-obs" style={{ display: "block", marginBottom: 4 }}>Observation du mois</label>
             <textarea id="sap-obs" data-testid="sap-obs" className="sap-input" style={{ width: "100%", maxWidth: 640 }} rows={3} value={obs} disabled={!editable} placeholder={editable ? "Ex. : boni hors freinte, justificatif camion…" : ""} onChange={(e) => setObs(e.target.value)} />
             <p className="sap-muted" style={{ margin: "2px 0 0", fontSize: 11.5 }}>Reprise dans la présentation PowerPoint (diapositive « Observations »). Vide = « RAS. ».</p>
@@ -1114,7 +1305,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         )}
         {tab === "receptions" && (
           <div>
-            <table className="sap-table" data-testid="sap-receptions">
+            <div className="sap-card sap-card-b"><table className="sap-table" data-testid="sap-receptions">
               <thead><tr><th>Date</th><th>N° bon</th><th className="sap-num">Quantité ambiante (L)</th><th className="sap-num">Température (°C)</th><th className="sap-num">Densité</th><th className="sap-num">Quantité 15 °C (L)</th></tr></thead>
               <tbody>
                 {rec.lignes.length === 0 && <tr><td colSpan={6} className="sap-muted">Aucun bon de livraison de gasoil enregistré pour ce site sur ce mois.</td></tr>}
@@ -1128,7 +1319,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
                 ))}
                 {rec.lignes.length > 0 && <tr className="sap-total"><td colSpan={2}>Total</td><td className="sap-num">{fmtL(rec.totalAmbiant)}</td><td></td><td></td><td className="sap-num" data-testid="rec-total">{fmtL(rec.total15)}</td></tr>}
               </tbody>
-            </table>
+            </table></div>
             {hist && Math.abs((syn.receptions || 0) - rec.total15) > 1 && (
               <p className="sap-muted" style={{ fontSize: 12, marginTop: 10 }} data-testid="rec-ecart-hist">
                 Pour information : ce bilan historique reprend une saisie manuelle de {fmtL(syn.receptions)} L ; le registre indique {fmtL(rec.total15)} L.
@@ -1138,7 +1329,7 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         )}
         {ventesOuvert && !hist && (
           <div style={{ display: tab === "ventes" ? "block" : "none" }}>
-            <VentesGrille ref={gridRef} bilan={bilan} editable={editable} userName={userName} siteName={site?.name || bilan.site_id} setMsg={setMsg} onDirty={setNbModifVentes} onStats={setJoursSaisis} onParLigne={setVentesParLigne}
+            <VentesGrille ref={gridRef} bilan={bilan} editable={editable} userName={userName} siteName={site?.name || bilan.site_id} setMsg={setMsg} onDirty={setNbModifVentes} onStats={(n) => { setJoursSaisis(n); setVentesCharge(true); }} onParLigne={setVentesParLigne}
               onSaved={(h) => setBilan((b) => ({ ...b, ...h }))} appendAudit={appendAudit} flash={flash} />
           </div>
         )}
@@ -1176,8 +1367,8 @@ export default function BilansMatieresSap({ sites = [], movements = [], canManag
         </div>
       )}
       <div className="sap-status">
-        <span className={msg ? `sap-msg sap-msg-${msg.type}${msg.cible ? " sap-msg-link" : ""}` : "sap-muted"} role="status" data-testid="sap-msg" onClick={() => msg && msg.cible && allerA(msg.cible)} title={msg && msg.cible ? "Cliquer pour aller à la cellule concernée" : undefined}>{msg ? `${{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]} ${msg.text}` : "Prêt."}</span>
-        <span data-testid="sap-barre">Statut : {st.label.replace(" 🔒", "")} | {nbLignes} ligne(s) | Dernière modification : {fmtDateHeure(bilan.modified_at || bilan.created_at)}</span>
+        <span className={msg ? `sap-msg sap-msg-${msg.type}${msg.cible ? " sap-msg-link" : ""}` : "sap-muted"} role="status" data-testid="sap-msg" key={msg ? `${msg.type}-${msg.text}` : "pret"} onClick={() => msg && msg.cible && allerA(msg.cible)} title={msg && msg.cible ? "Cliquer pour aller à la cellule concernée" : undefined}>{msg ? <><span className="sap-msg-ic" aria-hidden="true">{{ ok: "✔", warn: "⚠", err: "✖" }[msg.type]}</span> {msg.text}</> : "Prêt."}</span>
+        <span data-testid="sap-barre">Statut : {stAff.label.replace(" 🔒", "")} | {nbLignes} ligne(s) | Dernière modification : {fmtDateHeure(bilan.modified_at || bilan.created_at)}</span>
       </div>
       {docImpression && <DocImpression doc={docImpression} />}
     </div>
