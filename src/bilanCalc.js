@@ -82,6 +82,43 @@ export function totauxVentes(lignesCalculees) {
   return { ambiant, volume15, joursSaisis, erreurs };
 }
 
+// ---- Ventes en plusieurs LIGNES (ex. Gare Traction : Comilog / GSEZ ; Setrag FCV : RUR / Hors RUR) ----
+// Une journée = UNE température commune + un volume par ligne. Un volume laissé vide vaut 0 tant qu'au moins un volume est saisi.
+// Même densité et même température pour toute la journée : le coefficient est commun, chaque ligne est ramenée à 15 °C au même coefficient.
+// Avec une seule ligne, le résultat est celui de calculerVente (plus les tableaux volumes / volumes15).
+const champVolume = (k) => (k === 0 ? "volume" : `volume${k}`);
+export function calculerJourVentes({ temp, volumes }, densiteVente = DENSITE_VENTE_DEFAUT) {
+  const vols = volumes && volumes.length ? volumes : [""];
+  if (vols.length === 1) {
+    const r = calculerVente({ volume: vols[0], temp }, densiteVente);
+    if (!r.saisi || !r.ok) return r;
+    return { ...r, volumes: [r.volume], volumes15: [r.volume15] };
+  }
+  const t = lireNombre(temp), vs = vols.map(lireNombre);
+  if (t === null && vs.every((v) => v === null)) return { saisi: false, ok: true };
+  const iNaN = vs.findIndex((v) => Number.isNaN(v));
+  if (Number.isNaN(t) || iNaN >= 0) return { saisi: true, ok: false, erreur: "Valeur non numérique", champ: iNaN >= 0 ? champVolume(iNaN) : "temp" };
+  const iNeg = vs.findIndex((v) => v !== null && v < 0);
+  if (iNeg >= 0) return { saisi: true, ok: false, erreur: "Volume négatif", champ: champVolume(iNeg) };
+  if (vs.every((v) => v === null)) return { saisi: true, ok: false, erreur: "Volume obligatoire (au moins une ligne)", champ: "volume" };
+  if (t === null) return { saisi: true, ok: false, erreur: "Température obligatoire", champ: "temp" };
+  const volumesNum = vs.map((v) => (v === null ? 0 : v));
+  const total = volumesNum.reduce((a, c) => a + c, 0);
+  const base = calculerVente({ volume: total, temp: t }, densiteVente);
+  if (!base.ok) return { saisi: true, ok: false, erreur: base.erreur, champ: "volume" };
+  return { ...base, volume: total, volumes: volumesNum, volumes15: volumesNum.map((v) => v * base.vcf) };
+}
+
+// Totaux par ligne (ambiant et 15 °C) sur les journées calculées par calculerJourVentes.
+export function totauxParLigne(joursCalcules, nbLignes) {
+  const ambiant = Array(nbLignes).fill(0), volume15 = Array(nbLignes).fill(0);
+  for (const l of joursCalcules) {
+    if (!l || !l.saisi || !l.ok || !l.volumes) continue;
+    l.volumes.forEach((v, k) => { ambiant[k] += v; volume15[k] += l.volumes15[k]; });
+  }
+  return { ambiant, volume15 };
+}
+
 // Le compte de stock du mois, tout à 15 °C.
 //   Stock théorique fin = Stock début + Réceptions − Ventes (+ Transferts nets, 0 s'il n'y en a pas)
 //   Écart               = Stock physique fin − Stock théorique fin   (> 0 : gain, < 0 : perte)
@@ -254,7 +291,7 @@ const fJ = (j) => (j ? `${j.slice(8, 10)}/${j.slice(5, 7)}/${j.slice(0, 4)}` : "
 const fDH = (iso) => (iso ? espaces(new Date(iso).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })) : "");
 const slug = (s) => String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 
-export function construireDocumentBilan({ siteName, periodKey, periodLabel, statutLabel, entete = {}, synthese, observation = "", ventes = null, transferts = null, receptions = { lignes: [], total15: 0, totalAmbiant: 0 }, stocks = null }) {
+export function construireDocumentBilan({ siteName, periodKey, periodLabel, statutLabel, entete = {}, synthese, observation = "", ventes = null, transferts = null, receptions = { lignes: [], total15: 0, totalAmbiant: 0 }, stocks = null, ventesParLigne = null }) {
   const s = synthese, c = s.calc;
   const nbJours = ventes ? ventes.lignes.length : 0;
   const remDebut = s.stockDebut === null ? "Non disponible" : s.stockDebutPropose ? "Proposé : stock fin du mois précédent" : "Saisi";
@@ -262,6 +299,7 @@ export function construireDocumentBilan({ siteName, periodKey, periodLabel, stat
     ["Stock début de mois", s.stockDebut, remDebut],
     ["+ Réceptions", s.receptions, `${receptions.lignes.length} bon(s) de livraison`],
     ["− Ventes", s.ventes, "Total des ventes journalières"],
+    ...(ventesParLigne && ventesParLigne.labels.length > 1 ? ventesParLigne.labels.map((lab, k) => [`   dont ${lab}`, ventesParLigne.volume15[k], "Ventes de la ligne"]) : []),
     ["± Transferts entre sites", s.transferts, "Saisie par décade, à l'ambiant : reçus − envoyés"],
     ["= Stock théorique fin", c ? c.theorique : (s.stockDebut !== null ? s.stockDebut + s.receptions - s.ventes + s.transferts : null), "Début + réceptions − ventes ± transferts"],
     ["Stock physique fin (jaugeage)", s.stockFin, s.stockFin === null ? "Non saisi" : "Mesuré à la jauge, ramené à 15 °C"],
@@ -298,7 +336,31 @@ export function construireDocumentBilan({ siteName, periodKey, periodLabel, stat
     rows: receptions.lignes.map((l) => [fJ(l.date), l.ref || "", fL(l.quantity), l.temperatureC === undefined || l.temperatureC === null ? "" : fDec(Number(l.temperatureC), 1), l.densiteObservee === undefined || l.densiteObservee === null ? "" : fDec(Number(l.densiteObservee), 1), fL(l.volume15)]),
     totalsRow: ["Total", "", fL(receptions.totalAmbiant), "", "", fL(receptions.total15)] });
   sheets.push({ name: "Réceptions", rows: [...receptions.lignes.map((l) => ({ Date: l.date, "N° bon": l.ref || "", "Quantité ambiante (L)": l.quantity, "Température (°C)": l.temperatureC === undefined ? null : l.temperatureC, Densité: l.densiteObservee === undefined ? null : l.densiteObservee, "Quantité 15 °C (L)": l.volume15 })), { Date: "Total", "N° bon": "", "Quantité ambiante (L)": receptions.totalAmbiant, "Température (°C)": null, Densité: null, "Quantité 15 °C (L)": receptions.total15 }] });
-  if (ventes) {
+  if (ventes && ventes.cols && ventes.cols.length > 1) {
+    // Plusieurs lignes de vente : une colonne par ligne, une seule température par jour, total du jour.
+    const cols = ventes.cols, pl = ventes.totaux.parLigne;
+    sections.push({ heading: "Ventes journalières", columns: ["Date", ...cols.map((c) => `${c} (L)`), "Température (°C)", "Total (L)", "Densité à 15 °C", "Coefficient", "Volume 15 °C (L)"],
+      rows: ventes.lignes.map((l) => (l.saisi ? [fJ(l.jour), ...l.volumes.map((v) => fL(v)), fDec(l.temp, 1), fL(l.volume), fDec(l.densite15, 1), fDec(l.vcf, 4), fL(l.volume15)] : [fJ(l.jour), ...cols.map(() => ""), "", "", "", "", ""])),
+      totalsRow: [`Total (${ventes.totaux.joursSaisis} / ${nbJours} jours)`, ...pl.ambiant.map((v) => fL(v)), "", fL(ventes.totaux.ambiant), "", "", fL(ventes.totaux.volume15)] });
+    const r2 = (x) => Math.round(x * 100) / 100;
+    sheets.push({ name: "Ventes journalières", rows: [
+      ...ventes.lignes.map((l) => {
+        const o = { Date: l.jour };
+        cols.forEach((c, k) => { o[`${c} (L)`] = l.saisi ? l.volumes[k] : null; });
+        o["Total vendu (L)"] = l.saisi ? l.volume : null; o["Température (°C)"] = l.saisi ? l.temp : null; o["Densité"] = ventes.densite;
+        o["Densité à 15 °C"] = l.saisi ? Math.round(l.densite15 * 10) / 10 : null; o["Coefficient"] = l.saisi ? l.vcf : null;
+        cols.forEach((c, k) => { o[`${c} à 15 °C (L)`] = l.saisi ? r2(l.volumes15[k]) : null; });
+        o["Volume 15 °C (L)"] = l.saisi ? r2(l.volume15) : null; return o;
+      }),
+      (() => {
+        const o = { Date: `Total (${ventes.totaux.joursSaisis} / ${nbJours} jours)` };
+        cols.forEach((c, k) => { o[`${c} (L)`] = pl.ambiant[k]; });
+        o["Total vendu (L)"] = ventes.totaux.ambiant; o["Température (°C)"] = null; o["Densité"] = null; o["Densité à 15 °C"] = null; o["Coefficient"] = null;
+        cols.forEach((c, k) => { o[`${c} à 15 °C (L)`] = r2(pl.volume15[k]); });
+        o["Volume 15 °C (L)"] = r2(ventes.totaux.volume15); return o;
+      })(),
+    ] });
+  } else if (ventes) {
     sections.push({ heading: "Ventes journalières", columns: ["Date", "Volume vendu (L)", "Température (°C)", "Densité", "Densité à 15 °C", "Coefficient", "Volume 15 °C (L)"],
       rows: ventes.lignes.map((l) => (l.saisi ? [fJ(l.jour), fL(l.volume), fDec(l.temp, 1), fL(ventes.densite), fDec(l.densite15, 1), fDec(l.vcf, 4), fL(l.volume15)] : [fJ(l.jour), "", "", fL(ventes.densite), "", "", ""])),
       totalsRow: [`Total (${ventes.totaux.joursSaisis} / ${nbJours} jours)`, fL(ventes.totaux.ambiant), "", "", "", "", fL(ventes.totaux.volume15)] });
