@@ -144,6 +144,16 @@ function isNetworkError(e) {
   const msg = String(e?.message || e?.details || e || "");
   return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET|Délai dépassé|\b402\b|payment required|quota.{0,20}(exceed|exhaust)/i.test(msg);
 }
+// Explique, en français et pour l'affichage dans le badge « Hors-connexion », POURQUOI l'appli est passée en mode cache.
+function explainOfflineCause(e) {
+  if (!navigator.onLine) return "le navigateur se déclare hors ligne (pas de réseau)";
+  const status = e?.status ?? e?.originalError?.status;
+  if (status === 402 || status === "402") return "quota Supabase dépassé (erreur 402) : la base refuse de répondre";
+  const msg = String(e?.message || e?.details || e || "");
+  if (/Délai dépassé/i.test(msg)) return "la base n'a pas répondu à temps";
+  if (/fetch|network|ERR_INTERNET/i.test(msg)) return "connexion à la base interrompue ou bloquée (réseau, pare-feu, VPN)";
+  return msg ? msg.slice(0, 140) : "cause inconnue";
+}
 // ---- Cache local des données essentielles, pour ouvrir l'appli et saisir même sans AUCUN
 // réseau au démarrage (pas seulement une coupure en cours de route). Un jeu de données par
 // compte (userId), pour ne pas mélanger sur un appareil partagé.
@@ -2792,6 +2802,8 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [isOfflineStart, setIsOfflineStart] = useState(false);
+  const [offlineReason, setOfflineReason] = useState("");        // cause du dernier passage en mode cache (affichée dans le badge)
+  const [showOfflineDetail, setShowOfflineDetail] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -2854,6 +2866,7 @@ export default function App() {
     // rester bloquée longtemps à tenter de joindre le serveur pour rafraîchir le jeton. On va
     // directement au secours local.
     if (!navigator.onLine) {
+      setOfflineReason("pas de réseau au démarrage (le navigateur se déclare hors ligne)");
       setSession(fallbackOrNull());
       setAuthLoading(false);
     } else {
@@ -2864,8 +2877,10 @@ export default function App() {
           writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
         } else if (data.session === undefined) {
           // Délai dépassé (ni succès ni échec net) : on retente le secours local au cas où.
+          setOfflineReason("ouverture de session sans réponse après 6 s (la base est lente ou injoignable)");
           setSession(fallbackOrNull());
         } else {
+          setOfflineReason("aucune session valide : jeton expiré ou refusé par le serveur");
           setSession(fallbackOrNull());
         }
         setAuthLoading(false);
@@ -2876,11 +2891,36 @@ export default function App() {
         setSession(s);
         writeLastUserPointer({ userId: s.user.id, email: s.user.email, accessToken: s.access_token });
       } else {
+        setOfflineReason(`session fermée par le serveur (événement « ${_event} ») : jeton invalide ou refusé`);
         setSession(fallbackOrNull());
       }
     });
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  // Récupération automatique : si on est passé en « session de secours » (jeton non renouvelé) alors que le
+  // réseau est là, on réessaie d'obtenir une vraie session toutes les 20 s et au retour sur la fenêtre — sans
+  // attendre un rechargement de la page. Dès qu'elle revient, l'appli recharge ses données et le badge disparaît.
+  useEffect(() => {
+    if (!SUPABASE_CONFIGURED || !session?.isOfflineFallback) return undefined;
+    let arret = false;
+    const reessayer = async () => {
+      if (arret || !navigator.onLine) return;
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!arret && data?.session) {
+          writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
+          setOfflineReason("");
+          setSession(data.session);
+        }
+      } catch (e) { /* on réessaiera au prochain passage */ }
+    };
+    const id = setInterval(reessayer, 20000);
+    const auRetour = () => { if (document.visibilityState === "visible") reessayer(); };
+    window.addEventListener("focus", reessayer);
+    document.addEventListener("visibilitychange", auRetour);
+    return () => { arret = true; clearInterval(id); window.removeEventListener("focus", reessayer); document.removeEventListener("visibilitychange", auRetour); };
+  }, [session]);
 
   useEffect(() => {
     if (!session) { setProfile(null); return; }
@@ -2892,6 +2932,7 @@ export default function App() {
         const cached = readAppCache(session.user.id);
         if (cached?.profile) {
           setProfile(cached.profile);
+          setOfflineReason((r) => r || "session de secours : le jeton de connexion n'a pas pu être renouvelé");
           setIsOfflineStart(true);
           return;
         }
@@ -2928,6 +2969,7 @@ export default function App() {
           const cached = readAppCache(session.user.id);
           if (cached?.profile) {
             setProfile(cached.profile);
+            setOfflineReason(`chargement du profil : ${explainOfflineCause(e)}`);
             setIsOfflineStart(true);
             return;
           }
@@ -2998,6 +3040,7 @@ export default function App() {
         }
         return;
       }
+      const tLoad0 = Date.now();
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
         // Chaque table est chargée indépendamment : si l'une d'elles échoue (ex. une colonne
@@ -3005,9 +3048,18 @@ export default function App() {
         // SANS empêcher les 13 autres de se charger normalement. Avant cette protection, une
         // seule table en échec bloquait l'application entière pour tout le monde — exactement ce
         // qui s'est produit avec la colonne "reception_ambiant" manquante sur bilan_matieres.
+        const durees = {};
         const loadTableSafe = async (promise, label) => {
-          try { return await promise; }
-          catch (e) { console.error(`Échec du chargement de "${label}" — cette table reviendra vide :`, e); return []; }
+          const t0 = Date.now();
+          try { const r = await promise; durees[label] = Date.now() - t0; return r; }
+          catch (e) {
+            durees[label] = Date.now() - t0;
+            // Une coupure, un délai ou un quota dépassé (402) n'est PAS un problème de structure (colonne manquante) : on ne le
+            // masque pas. Sinon l'appli démarrerait avec des tables VIDES et écraserait le cache local avec ce vide. On laisse
+            // remonter l'erreur : le chargement bascule alors proprement sur les données en cache, avec la cause dans le badge.
+            if (isNetworkError(e)) throw e;
+            console.error(`Échec du chargement de "${label}" — cette table reviendra vide :`, e); return [];
+          }
         };
         const load = (async () => {
           const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
@@ -3055,6 +3107,14 @@ export default function App() {
         setLoadError(null);
         setLoading(false);
         setIsOfflineStart(false);
+        setOfflineReason("");
+        // Mesure du chargement complet (diagnostic : affichée si le badge « Hors-connexion » apparaît plus tard)
+        try {
+          const plus = Object.entries(durees).sort((a, b) => b[1] - a[1])[0];
+          const diag = { at: new Date().toISOString(), totalMs: Date.now() - tLoad0, plusLent: plus ? plus[0] : null, plusLentMs: plus ? plus[1] : 0 };
+          localStorage.setItem("somip_startup_diag", JSON.stringify(diag));
+          console.info(`[SOMIP] chargement complet en ${(diag.totalMs / 1000).toFixed(1)} s (le plus lent : ${diag.plusLent} ${diag.plusLentMs} ms)`, durees);
+        } catch (e) { /* diagnostic facultatif */ }
         // Snapshot complet en cache local : permet de rouvrir l'appli et saisir même sans
         // AUCUN réseau au démarrage (pas seulement une coupure en cours de session).
         const cached = readAppCache(session.user.id) || {};
@@ -3064,6 +3124,7 @@ export default function App() {
         if (isNetworkError(e)) {
           const cached = readAppCache(session.user.id);
           if (cached && cached.sitesData) {
+            setOfflineReason(`chargement des données : ${explainOfflineCause(e)} (au bout de ${((Date.now() - tLoad0) / 1000).toFixed(1)} s)`);
             setSites(cached.sitesData);
             setMovements(cached.movementsData || []);
             setInventaires(cached.inventairesData || []);
@@ -4197,10 +4258,21 @@ export default function App() {
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <SyncIndicator status={syncStatus} lastSync={lastSync} />
                 {isOfflineStart && (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.danger, background: "#FDEBEB", padding: "2px 8px", borderRadius: 12 }}>
-                    <CloudOff size={11} /> Hors-connexion — données en cache
-                  </span>
+                  <button type="button" onClick={() => setShowOfflineDetail((v) => !v)} data-testid="badge-offline" title="Touche pour voir la cause"
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.danger, background: "#FDEBEB", padding: "2px 8px", borderRadius: 12, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+                    <CloudOff size={11} /> Hors-connexion — données en cache <span style={{ fontWeight: 400 }}>{showOfflineDetail ? "▲" : "▼ cause"}</span>
+                  </button>
                 )}
+                {isOfflineStart && showOfflineDetail && (() => {
+                  let diag = null; try { diag = JSON.parse(localStorage.getItem("somip_startup_diag") || "null"); } catch (e) { diag = null; }
+                  return (
+                    <div data-testid="offline-detail" style={{ flexBasis: "100%", fontSize: 11.5, lineHeight: 1.45, color: C.muted || "#555", background: "#FDF6F6", border: "1px solid #F2D4D4", borderRadius: 8, padding: "6px 10px" }}>
+                      <div><b>Cause :</b> {offlineReason || "non déterminée (état antérieur à ce diagnostic)"}.</div>
+                      {diag && <div><b>Dernier chargement complet réussi :</b> {(diag.totalMs / 1000).toFixed(1)} s{diag.plusLent ? ` (le plus lent : ${diag.plusLent}, ${diag.plusLentMs} ms)` : ""}, le {new Date(diag.at).toLocaleString("fr-FR")}.</div>}
+                      {session?.isOfflineFallback && <div>Nouvelle tentative automatique de connexion toutes les 20 secondes.</div>}
+                    </div>
+                  );
+                })()}
                 {offlineQueueCount > 0 && (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.warning, background: "#FFF6E5", padding: "2px 8px", borderRadius: 12 }}>
                     <CloudOff size={11} /> {offlineQueueCount} en attente
