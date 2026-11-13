@@ -354,6 +354,29 @@ function sumQty(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + m.quantity, 0);
 }
 function pad2(n) { return String(n).padStart(2, "0"); }
+// Gain/Perte cumulé du mois (gasoil, à l'ambiance) d'UN site fixe OU d'UN camion laitier, du 1er du mois de `viewDate` jusqu'à `viewDate`.
+// UNE SEULE fonction, utilisée par le Tableau de bord général (total réseau) ET par le Tableau de bord par site : les deux ne peuvent plus différer.
+// Jour par jour : écart = dernière jauge du jour − stock théorique (stock de départ ancré sur la dernière jauge connue + réceptions + retours camions − ventes − chargements camions).
+function gainPerteMois(site, movements, inventaires, viewDate) {
+  const month = viewDate.slice(0, 7);
+  let ecartCumule = 0, daysWithJauge = 0;
+  let cur = new Date(`${month}-01`);
+  const end = new Date(viewDate);
+  while (cur <= end) {
+    const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+    const stockDebut = stockBeforeDate(site, movements, d, inventaires);
+    const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+    const reception = sumQty(dayMovs, ["reception"]);
+    const ventes = sumQty(dayMovs, ["sortie"]); // camion : flux brut du compteur (retour cuve inclus, cf. théorique)
+    const chargementLaitiers = site.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
+    const retourCamions = site.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
+    const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+    if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return { ecartCumule, daysWithJauge };
+}
 function decadeBounds(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   let startDay, endDay, label;
@@ -4575,23 +4598,8 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
     const ventesMonth = sumQty(inMonth, ["sortie"]);
     const chargementsMonth = site.isMobile ? 0 : sumQty(inMonth, ["sortie_camion"]);
 
-    // Gain/Perte cumulé du mois : exactement le calcul du Tableau de bord général et des Rapports.
-    let ecartCumule = 0, daysWithJauge = 0;
-    let cur = new Date(monthStartD);
-    const end = new Date(todayD);
-    while (cur <= end) {
-      const day = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate(site, movements, day, inventaires);
-      const dayMovs = gas.filter((m) => m.date === day);
-      const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]);
-      const chargement = site.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = site.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargement;
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === day));
-      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
-      cur.setDate(cur.getDate() + 1);
-    }
+    // Gain/Perte cumulé du mois : la fonction UNIQUE gainPerteMois (la même que le Tableau de bord général).
+    const { ecartCumule, daysWithJauge } = gainPerteMois(site, movements, inventaires, todayD);
 
     // Courbe du stock en fin de journée sur 30 jours (stock au début du lendemain).
     const trend = [];
@@ -5247,6 +5255,74 @@ function StockDuJourView({ sites, movements, inventaires, stockOf, assignedSiteI
   );
 }
 
+// Tableau de diagnostic (Superviseur) : pour chaque site fixe et chaque camion laitier, ce que comptaient le Tableau de bord général
+// (avant correction) et le Tableau de bord par site, côte à côte, pour expliquer l'écart du total réseau. Lecture seule, rien n'est modifié.
+function DiagnosticGainPerte({ rows, ancienTotal, nouveauTotal, month, viewDate }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [copie, setCopie] = useState(false);
+  const sg = (v) => `${v >= 0 ? "+" : ""}${fmt(v)}`;
+  const lignes = [...rows].sort((a, b) => (a.site.isMobile === b.site.isMobile ? String(a.site.name).localeCompare(String(b.site.name)) : a.site.isMobile ? 1 : -1));
+  const actif = (r) => r.site.active !== false;
+  const general = (r) => (!r.site.isMobile ? r.ecartCumule : null);   // avant correction : camions non comptés, sites désactivés comptés
+  const parSite = (r) => (actif(r) ? r.ecartCumule : null);            // Tableau de bord par site : sites et camions actifs
+  const sommeParSite = lignes.reduce((a, r) => a + (parSite(r) ?? 0), 0);
+  const camionsActifs = lignes.filter((r) => r.site.isMobile && actif(r)).reduce((a, r) => a + r.ecartCumule, 0);
+  const fixesInactifs = lignes.filter((r) => !r.site.isMobile && !actif(r)).reduce((a, r) => a + r.ecartCumule, 0);
+  const camionsInactifs = lignes.filter((r) => r.site.isMobile && !actif(r)).reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartConstate = sommeParSite - ancienTotal;
+  const ecartExplique = camionsActifs - fixesInactifs;
+  const verifie = Math.abs(ecartConstate - ecartExplique) < 0.5;
+  const copier = async () => {
+    const tsv = ["Entité\tType\tStatut\tJours avec jauge\tTableau de bord général (avant correction)\tTableau de bord par site\tCompté dans le total corrigé"]
+      .concat(lignes.map((r) => [r.site.name, r.site.isMobile ? "Camion laitier" : "Site fixe", actif(r) ? "Actif" : "Désactivé", r.daysWithJauge, general(r) === null ? "non compté" : Math.round(general(r)), parSite(r) === null ? "non affiché" : Math.round(parSite(r)), actif(r) ? "oui" : "non"].join("\t")))
+      .concat([`TOTAL général avant correction\t\t\t\t${Math.round(ancienTotal)}`, `SOMME du Tableau de bord par site (sites + camions)\t\t\t\t\t${Math.round(sommeParSite)}`, `ÉCART\t\t\t\t${Math.round(ecartConstate)}`, `dont camions laitiers actifs non comptés par l'ancien total\t\t\t\t${Math.round(camionsActifs)}`, `dont sites désactivés comptés par l'ancien total (retirés)\t\t\t\t${Math.round(-fixesInactifs)}`, `TOTAL général corrigé\t\t\t\t${Math.round(nouveauTotal)}`]).join("\n");
+    try { await navigator.clipboard.writeText(tsv); setCopie(true); setTimeout(() => setCopie(false), 2500); } catch (e) { /* copie indisponible */ }
+  };
+  const th = { textAlign: "left", padding: "7px 10px", fontSize: 11.5, color: C.sub, borderBottom: "1px solid #dde3ea", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 12.5, borderBottom: "1px solid #eef1f4", whiteSpace: "nowrap" };
+  const num = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+  const nc = (t) => <span style={{ color: C.sub, fontStyle: "italic" }}>{t}</span>;
+  return (
+    <div className="somip-panel" data-testid="gp-diagnostic" style={{ padding: "12px 16px", marginBottom: 16 }}>
+      <button type="button" onClick={() => setOuvert((v) => !v)} data-testid="gp-diagnostic-bouton" style={{ background: "none", border: "none", cursor: "pointer", fontWeight: 700, color: C.ink, fontSize: 13.5, padding: 0 }}>
+        {ouvert ? "▾" : "▸"} Diagnostic gain/perte — pourquoi les totaux différaient (Superviseur, temporaire)
+      </button>
+      {ouvert && (
+        <div style={{ marginTop: 10 }}>
+          <p style={{ margin: "0 0 8px", fontSize: 12.5, color: C.sub }}>Période : du 01/{month.slice(5, 7)}/{month.slice(0, 4)} au {viewDate.slice(8, 10)}/{viewDate.slice(5, 7)}/{viewDate.slice(0, 4)} (gasoil, à l'ambiance). La formule jour par jour est la même partout : seule la liste des entités additionnées diffère.</p>
+          <div style={{ overflowX: "auto" }}>
+            <table data-testid="gp-table" style={{ borderCollapse: "collapse", width: "100%" }}>
+              <thead><tr><th style={th}>Site / camion</th><th style={th}>Type</th><th style={th}>Statut</th><th style={{ ...th, textAlign: "right" }}>Jours avec jauge</th><th style={{ ...th, textAlign: "right" }}>Tableau de bord général (avant correction)</th><th style={{ ...th, textAlign: "right" }}>Tableau de bord par site</th><th style={th}>Compté dans le total corrigé</th></tr></thead>
+              <tbody>
+                {lignes.map((r) => (
+                  <tr key={r.site.id} data-testid={`gp-ligne-${r.site.id}`}>
+                    <td style={td}>{r.site.name}</td><td style={td}>{r.site.isMobile ? "Camion laitier" : "Site fixe"}</td><td style={{ ...td, color: actif(r) ? C.success : C.danger }}>{actif(r) ? "Actif" : "Désactivé"}</td>
+                    <td style={num}>{r.daysWithJauge}</td>
+                    <td style={num} data-testid={`gp-general-${r.site.id}`}>{general(r) === null ? nc("non compté") : `${sg(general(r))} L`}</td>
+                    <td style={num} data-testid={`gp-parsite-${r.site.id}`}>{parSite(r) === null ? nc("non affiché") : `${sg(parSite(r))} L`}</td>
+                    <td style={td}>{actif(r) ? "oui" : "non"}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr><td style={{ ...td, fontWeight: 700 }} colSpan={4}>Total</td><td style={{ ...num, fontWeight: 700 }} data-testid="gp-total-ancien">{sg(ancienTotal)} L</td><td style={{ ...num, fontWeight: 700 }} data-testid="gp-total-parsite">{sg(sommeParSite)} L</td><td style={td}></td></tr>
+              </tfoot>
+            </table>
+          </div>
+          <div data-testid="gp-explication" style={{ marginTop: 10, fontSize: 12.5, lineHeight: 1.6 }}>
+            <div>Écart constaté (somme du Tableau de bord par site − total général d'avant) : <strong data-testid="gp-ecart">{sg(ecartConstate)} L</strong></div>
+            <div>• camions laitiers actifs, <em>non comptés</em> par l'ancien total général : <strong data-testid="gp-camions">{sg(camionsActifs)} L</strong></div>
+            <div>• sites désactivés, <em>comptés</em> par l'ancien total mais absents du Tableau de bord par site : <strong data-testid="gp-inactifs">{sg(-fixesInactifs)} L</strong></div>
+            <div style={{ color: verifie ? C.success : C.danger, fontWeight: 600 }} data-testid="gp-controle">{verifie ? "✔ Ces deux causes expliquent exactement l'écart." : "⚠ L'écart n'est pas entièrement expliqué par ces deux causes."}</div>
+            {camionsInactifs !== 0 && <div style={{ color: C.sub }}>Pour information : camions désactivés (comptés nulle part) {sg(camionsInactifs)} L.</div>}
+            <div style={{ marginTop: 4 }}>Total général <strong>corrigé</strong> : <strong data-testid="gp-total-nouveau">{sg(nouveauTotal)} L</strong> {Math.abs(nouveauTotal - sommeParSite) < 0.5 ? "= somme du Tableau de bord par site ✔" : "≠ somme du Tableau de bord par site ⚠"}</div>
+          </div>
+          <button type="button" className="somip-btn" onClick={copier} data-testid="gp-copier" style={{ marginTop: 10, padding: "6px 12px", cursor: "pointer" }}>{copie ? "Copié ✔" : "Copier le tableau"}</button>
+        </div>
+      )}
+    </div>
+  );
+}
 function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments, onOpenSite }) {
   // Filtre par date : par défaut, aujourd'hui (données en direct). En choisissant une date
   // passée, tout le tableau de bord se recalcule comme s'il était "arrêté" à la fin de cette
@@ -5282,32 +5358,17 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   [...inventaires].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((i) => { latestInventaireBySite[i.siteId] = i; });
   const horsObjectif = Object.values(latestInventaireBySite).filter((i) => i.conformite === "non_conforme").length;
 
-  // Gain/Perte cumulé du mois (de la date choisie), pour chaque site fixe ET chaque camion
-  // (calcul propre à chacun, indépendant — comme demandé, tout dans un même tableau).
-  const monthStartD = `${month}-01`;
-  const ecartRows = sites.map((s) => {
-    let cur = new Date(monthStartD);
-    const end = new Date(viewDate);
-    let ecartCumule = 0, daysWithJauge = 0;
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
-      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]); // camion : flux brut du compteur (retour cuve inclus, cf. théorique)
-      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
-      if (inv) {
-        const dayEcart = inv.stockPhysique - theorique;
-        ecartCumule += dayEcart; daysWithJauge++;
-      }
-      cur.setDate(cur.getDate() + 1);
-    }
-    return { site: s, ecartCumule, daysWithJauge };
-  }).sort((a, b) => a.ecartCumule - b.ecartCumule);
-  const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  // Gain/Perte cumulé du mois (de la date choisie) : la fonction UNIQUE gainPerteMois, pour chaque site fixe ET chaque camion laitier
+  // (la même que le Tableau de bord par site). Total réseau = sites fixes ACTIFS + camions laitiers ACTIFS : exactement les entités
+  // que le Tableau de bord par site permet d'ouvrir, donc total général = somme des sites et des camions.
+  const ecartRows = sites.map((s) => ({ site: s, ...gainPerteMois(s, movements, inventaires, viewDate) })).sort((a, b) => a.ecartCumule - b.ecartCumule);
+  const ecartActifs = ecartRows.filter((r) => r.site.active !== false);
+  const ecartSitesFixes = ecartActifs.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartCamions = ecartActifs.filter((r) => r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartReseauTotal = ecartSitesFixes + ecartCamions;
+  const aDesCamions = ecartActifs.some((r) => r.site.isMobile);
+  // Ancienne règle (avant correction : tous les sites fixes y compris désactivés, sans les camions), gardée pour le tableau de diagnostic.
+  const ecartReseauAncien = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
   // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
@@ -5387,6 +5448,12 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
         <StatCard label={`Gain/Perte réseau (${month})`} value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
       </div>
+      {aDesCamions && (
+        <div data-testid="gp-detail" style={{ fontSize: 12.5, color: C.sub, margin: "-6px 0 14px 2px" }}>
+          Gain/Perte réseau = sites fixes <strong style={{ color: C.ink }}>{ecartSitesFixes >= 0 ? "+" : ""}{fmt(ecartSitesFixes)} L</strong> + camions laitiers <strong style={{ color: C.ink }}>{ecartCamions >= 0 ? "+" : ""}{fmt(ecartCamions)} L</strong> (sites et camions actifs, comme dans le Tableau de bord par site).
+        </div>
+      )}
+      {canManage && <DiagnosticGainPerte rows={ecartRows} ancienTotal={ecartReseauAncien} nouveauTotal={ecartReseauTotal} month={month} viewDate={viewDate} />}
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
