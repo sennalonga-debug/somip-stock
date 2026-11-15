@@ -9,12 +9,14 @@ import {
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
 import ReunionsView from "./Reunions";
+import BilansMatieresSap from "./BilansMatieres";
 import autoTable from "jspdf-autotable";
 import pptxgen from "pptxgenjs";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell, ReferenceLine, Legend, AreaChart, Area,
 } from "recharts";
 import { supabase, SUPABASE_CONFIGURED } from "./supabaseClient.js";
+import { VCF_MIN_DENSITY, VCF_MAX_DENSITY, GESTOCK_VCF_DENS_MIN, GESTOCK_VCF_DENS_MAX, GESTOCK_VCF_TEMP_MIN, GESTOCK_VCF_TEMP_MAX, correctVolumeTo15 } from "./vcf15.js";
 
 /* ------------------------------------------------------------------ */
 /* Design tokens                                                       */
@@ -131,8 +133,26 @@ function writeOfflineQueue(q) {
 }
 function isNetworkError(e) {
   if (!navigator.onLine) return true;
-  const msg = String(e?.message || e || "");
-  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET|Délai dépassé/i.test(msg);
+  // Un blocage temporaire de Supabase (quota dépassé — HTTP 402) doit être traité comme une
+  // coupure : l'appareil est bien connecté, mais le serveur refuse de répondre pour l'instant.
+  // Même conséquence pratique qu'une vraie coupure réseau : conserver la saisie et réessayer
+  // plus tard, plutôt que de la perdre. Supabase transmet le code HTTP dans "status" — c'est le
+  // signal le plus fiable ; le texte du message sert de filet de sécurité si jamais ce champ
+  // manque pour une raison ou une autre.
+  const status = e?.status ?? e?.originalError?.status;
+  if (status === 402 || status === "402") return true;
+  const msg = String(e?.message || e?.details || e || "");
+  return /fetch|network|Failed to fetch|NetworkError|ERR_INTERNET|Délai dépassé|\b402\b|payment required|quota.{0,20}(exceed|exhaust)/i.test(msg);
+}
+// Explique, en français et pour l'affichage dans le badge « Hors-connexion », POURQUOI l'appli est passée en mode cache.
+function explainOfflineCause(e) {
+  if (!navigator.onLine) return "le navigateur se déclare hors ligne (pas de réseau)";
+  const status = e?.status ?? e?.originalError?.status;
+  if (status === 402 || status === "402") return "quota Supabase dépassé (erreur 402) : la base refuse de répondre";
+  const msg = String(e?.message || e?.details || e || "");
+  if (/Délai dépassé/i.test(msg)) return "la base n'a pas répondu à temps";
+  if (/fetch|network|ERR_INTERNET/i.test(msg)) return "connexion à la base interrompue ou bloquée (réseau, pare-feu, VPN)";
+  return msg ? msg.slice(0, 140) : "cause inconnue";
 }
 // ---- Cache local des données essentielles, pour ouvrir l'appli et saisir même sans AUCUN
 // réseau au démarrage (pas seulement une coupure en cours de route). Un jeu de données par
@@ -154,6 +174,9 @@ function readLastUserPointer() {
 }
 function writeLastUserPointer(p) {
   try { localStorage.setItem(LAST_USER_KEY, JSON.stringify(p)); } catch (e) { /* pas bloquant */ }
+}
+function clearLastUserPointer() {
+  try { localStorage.removeItem(LAST_USER_KEY); } catch (e) { /* pas bloquant */ }
 }
 const FRENCH_MONTHS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
 // Un inventaire "mensuel" saisi le 1er (ou les tout premiers jours) du mois représente la
@@ -226,51 +249,52 @@ const CONFORMITE_META = {
   a_verifier: { label: "Excédent à vérifier", color: C.warning },
 };
 
-/* ------------------------------------------------------------------ */
-/* Correction de volume à 15°C — ASTM D1250 / API MPMS Chapitre 11.1   */
-/* Table 53B (densité observée -> densité à 15°C) et Table 54B         */
-/* (volume -> volume à 15°C), "produits généralisés", plage 653–1075   */
-/* kg/m³. Formule officielle : VCF = e^(-ALPHA·ΔT·(1+0.8·ALPHA·ΔT))    */
-/* avec ALPHA = f(densité à 15°C), déterminé par zone de densité.      */
-/* ------------------------------------------------------------------ */
-const VCF_MIN_DENSITY = 653;
-const VCF_MAX_DENSITY = 1075;
-
-function vcfAlpha(den15) {
-  if (den15 < 770) return (346.42278 + 0.43884 * den15) / (den15 * den15);
-  if (den15 < 778) return -0.0033612 + 2680.32 / (den15 * den15); // zone de transition
-  if (den15 < 839) return 594.5418 / (den15 * den15);
-  return (186.9696 + 0.48618 * den15) / (den15 * den15);
-}
-function vcfFactor(den15, tempC) {
-  const dT = tempC - 15;
-  const alpha = vcfAlpha(den15);
-  return { vcf: Math.exp(-alpha * dT * (1 + 0.8 * alpha * dT)), alpha };
-}
-// La densité à 15°C est l'inconnue de sa propre formule (ALPHA en dépend) :
-// on résout par itération, convergence en quelques passes (écart de température modéré).
-function densityAt15FromObserved(densiteObservee, tempC) {
-  let d15 = densiteObservee;
-  for (let i = 0; i < 12; i++) {
-    const { vcf } = vcfFactor(d15, tempC);
-    d15 = densiteObservee / vcf;
-  }
-  return d15;
-}
-function correctVolumeTo15({ volumeAmbiant, tempC, densiteObservee }) {
-  const vOk = typeof volumeAmbiant === "number" && volumeAmbiant > 0;
-  const tOk = typeof tempC === "number" && !isNaN(tempC);
-  const dOk = typeof densiteObservee === "number" && densiteObservee >= VCF_MIN_DENSITY && densiteObservee <= VCF_MAX_DENSITY;
-  if (!vOk || !tOk || !dOk) return null;
-  const densite15 = densityAt15FromObserved(densiteObservee, tempC);
-  const { vcf, alpha } = vcfFactor(densite15, tempC);
-  return { densite15, alpha, vcf, volume15: volumeAmbiant * vcf };
-}
+// Conversion à 15 °C : voir vcf15.js (partagé avec le module Bilans matières).
 // Quantité "officielle" d'un mouvement pour la comptabilisation à 15°C :
 // le volume corrigé s'il a été renseigné (température + densité), sinon le
 // volume ambiant en repli (mouvement sans mesure de température/densité).
 function movementQty15(m) {
   return m.volumeCorrige15 !== undefined ? m.volumeCorrige15 : m.quantity;
+}
+// Colonnes à écrire quand on AJOUTE, CORRIGE ou EFFACE la température et la densité d'une réception.
+// Les deux valeurs présentes : on recalcule la correction à 15°C (densité à 15°C, VCF, volume corrigé).
+// Une seule des deux : on l'enregistre telle quelle — la valeur saisie n'est plus perdue —, mais sans
+// correction à 15°C, qui exige les deux. Aucune des deux : on efface tout (champs vidés volontairement).
+function tempDensiteUpdateRow(quantity, temperatureC, densiteObservee) {
+  const has = (v) => v !== "" && v !== null && v !== undefined && Number.isFinite(Number(v));
+  const hasTemp = has(temperatureC), hasDens = has(densiteObservee);
+  if (hasTemp && hasDens) {
+    const corr = correctVolumeTo15({ volumeAmbiant: quantity, tempC: Number(temperatureC), densiteObservee: Number(densiteObservee) });
+    return { temperature_c: Number(temperatureC), densite_observee: Number(densiteObservee), densite15: corr ? corr.densite15 : null, vcf: corr ? corr.vcf : null, volume_corrige15: corr ? corr.volume15 : null };
+  }
+  return { temperature_c: hasTemp ? Number(temperatureC) : null, densite_observee: hasDens ? Number(densiteObservee) : null, densite15: null, vcf: null, volume_corrige15: null };
+}
+
+// ---- Mesure prélevée SUR SITE à chaque réception (température + densité) ----
+// Plages de cohérence (avertissement seulement, jamais bloquant) : gasoil, densité en kg/m³.
+const MESURE_TEMP_MIN = 15, MESURE_TEMP_MAX = 45, MESURE_DENS_MIN = 800, MESURE_DENS_MAX = 860;
+const nombreSaisi = (v) => v !== "" && v !== null && v !== undefined && Number.isFinite(Number(v));
+function avertissementsMesureSite(temp, dens) {
+  const w = [];
+  if (nombreSaisi(temp) && (Number(temp) < MESURE_TEMP_MIN || Number(temp) > MESURE_TEMP_MAX)) w.push(`Température de ${Number(temp)} °C inhabituelle (attendu : entre ${MESURE_TEMP_MIN} et ${MESURE_TEMP_MAX} °C) — vérifie la valeur.`);
+  if (nombreSaisi(dens) && (Number(dens) < MESURE_DENS_MIN || Number(dens) > MESURE_DENS_MAX)) w.push(`Densité de ${Number(dens)} anormale pour du gasoil (attendu : ${MESURE_DENS_MIN} à ${MESURE_DENS_MAX} kg/m³, par exemple 845 et non 0,845) — vérifie la valeur.`);
+  return w;
+}
+// Champs d'un mouvement « réception » avec mesure site complète : la mesure site est enregistrée ET sert au calcul à 15°C
+// (température/densité/volume corrigé = ceux que lisent déjà le registre, le Bilan matières et les autres modules).
+function receptionMesureSiteFields(quantity, temp, dens) {
+  const corr = correctVolumeTo15({ volumeAmbiant: quantity, tempC: Number(temp), densiteObservee: Number(dens) });
+  return { temperatureSite: Number(temp), densiteSite: Number(dens), temperatureC: Number(temp), densiteObservee: Number(dens), ...(corr ? { densite15: corr.densite15, vcf: corr.vcf, volumeCorrige15: corr.volume15 } : {}) };
+}
+// Colonnes à écrire quand on AJOUTE, CORRIGE ou EFFACE la mesure site d'une réception déjà enregistrée.
+function mesureSiteUpdateRow(quantity, temp, dens) {
+  return { ...tempDensiteUpdateRow(quantity, temp, dens), temperature_site: nombreSaisi(temp) ? Number(temp) : null, densite_site: nombreSaisi(dens) ? Number(dens) : null };
+}
+const aMesureSite = (m) => nombreSaisi(m.temperatureSite) && nombreSaisi(m.densiteSite);
+// Réception de gasoil avec un N° de bon de livraison mais sans mesure site (anciennes saisies) : valable, simplement signalée.
+const receptionSansMesureSite = (m) => m.type === "reception" && (m.product || "gasoil") === "gasoil" && String(m.ref || "").trim() !== "" && !aMesureSite(m);
+function PastilleMesureManquante() {
+  return <span title="Température et densité prélevées sur site non saisies pour ce bon : la réception reste valable, à compléter." style={{ display: "inline-block", background: "#FDEBD3", color: "#B45309", borderRadius: 10, padding: "1px 8px", fontSize: 10.5, fontWeight: 700, whiteSpace: "nowrap" }}>mesure site manquante</span>;
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,6 +381,29 @@ function sumQty(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + m.quantity, 0);
 }
 function pad2(n) { return String(n).padStart(2, "0"); }
+// Gain/Perte cumulé du mois (gasoil, à l'ambiance) d'UN site fixe OU d'UN camion laitier, du 1er du mois de `viewDate` jusqu'à `viewDate`.
+// UNE SEULE fonction, utilisée par le Tableau de bord général (total réseau) ET par le Tableau de bord par site : les deux ne peuvent plus différer.
+// Jour par jour : écart = dernière jauge du jour − stock théorique (stock de départ ancré sur la dernière jauge connue + réceptions + retours camions − ventes − chargements camions).
+function gainPerteMois(site, movements, inventaires, viewDate, startDate) {
+  const month = viewDate.slice(0, 7);
+  let ecartCumule = 0, daysWithJauge = 0;
+  let cur = new Date(startDate || `${month}-01`);
+  const end = new Date(viewDate);
+  while (cur <= end) {
+    const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+    const stockDebut = stockBeforeDate(site, movements, d, inventaires);
+    const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+    const reception = sumQty(dayMovs, ["reception"]);
+    const ventes = sumQty(dayMovs, ["sortie"]); // camion : flux brut du compteur (retour cuve inclus, cf. théorique)
+    const chargementLaitiers = site.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
+    const retourCamions = site.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
+    const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
+    if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return { ecartCumule, daysWithJauge };
+}
 function decadeBounds(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   let startDay, endDay, label;
@@ -1078,12 +1125,8 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   // toujours propre même si le tableau des cuves est court ou long). Si une signature
   // numérique a déjà été apposée, son image remplace la case vide.
   const sigY = Math.max(y + 20, pageHeight - 150);
-  const sigW = (fullWidth - 32) / 3;
-  const sigSlots = [
-    { label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt },
-    { label: "Opérateur", url: inv.signatureOperateurUrl, by: inv.signatureOperateurBy, at: inv.signatureOperateurAt },
-    { label: "TotalEnergies Marketing", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt },
-  ];
+  const sigW = (fullWidth - 16) / 2;
+  const sigSlots = inventaireSignatureSlots(inv);
   for (let i = 0; i < sigSlots.length; i++) {
     const slot = sigSlots[i];
     const x = marginX + i * (sigW + 16);
@@ -1116,14 +1159,62 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   doc.save(`SOMIP_${titre.replace(/\s+/g, "_")}_${site?.code || inv.siteId}_${inv.date}.pdf`);
 }
 
-// Un seul PDF pour les 4 lubrifiants d'un même site, à une même date et un même type
-// (mensuel/inopiné) — plutôt que 4 documents séparés. "records" doit contenir un inventaire
+// Un seul PDF pour les lubrifiants d'un même site, à une même date et un même type
+// (mensuel/inopiné) — plutôt que des documents séparés. "records" doit contenir un inventaire
 // officiel par lubrifiant (même site, même date, même type), déjà filtré par l'appelant.
+//
+// Mise en page (modèle "Inventaire Lubrifiants fin septembre — Prehomo") : un bloc "DÉTAIL —
+// <huile>" par lubrifiant (contenant, hauteur, litres ambiants, kg, puis l'index du compteur),
+// sans tableau récapitulatif, et deux cases de signature seulement (SOMIP et TotalEnergies
+// Marketing), le tout sur UNE seule page. Si une cuve contient plusieurs produits, la ligne de
+// la cuve donne le total puis une ligne "dont …" par produit : les autres produits de la cuve
+// se lisent dans cuves[i].autresContenus = [{ nom, stockAmbiant, densite? }].
+const LUB_PDF_BLUE = [28, 23, 217]; // bleu du modèle de fiche lubrifiants
+const LUB_PDF_ORDER = ["sw10", "ac50", "ac30", "rubia_tir7400"]; // ordre d'affichage du modèle
+// Trois niveaux de compacité : on prend le premier qui fait tenir tout le contenu sur la page.
+const LUB_PDF_LEVELS = [
+  { bannerH: 22, g1: 8, rowH: 23, dontH: 18, noteH: 14, g2: 12, fs: 9, fsHead: 8.5, fsDont: 8.5, fsNote: 8.5 },
+  { bannerH: 19, g1: 6, rowH: 19, dontH: 15, noteH: 13, g2: 8, fs: 8.5, fsHead: 8, fsDont: 8, fsNote: 8 },
+  { bannerH: 16, g1: 4, rowH: 16, dontH: 13, noteH: 12, g2: 5, fs: 8, fsHead: 7.5, fsDont: 7.5, fsNote: 7.5 },
+];
+function buildLubPdfBlocks(records, productStocks) {
+  const rank = (id) => { const i = LUB_PDF_ORDER.indexOf(id); return i < 0 ? 99 : i; };
+  const blocks = [...records].map((r) => {
+    const dens = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
+    const ownLabel = lubLabel(r.siteId, r.produit, productStocks);
+    const cuves = r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }];
+    const rows = [];
+    for (const c of cuves) {
+      const others = (c.autresContenus || []).map((a) => ({ nom: a.nom || "—", litres: Number(a.stockAmbiant) || 0, d: Number(a.densite) > 0 ? Number(a.densite) : dens }));
+      const parts = [{ nom: ownLabel, litres: Number(c.stockAmbiant) || 0, d: dens }, ...others];
+      const kgOf = (p) => (p.d ? p.litres * p.d : null);
+      const totalL = parts.reduce((sum, p) => sum + p.litres, 0);
+      const totalKg = parts.every((p) => kgOf(p) !== null) ? parts.reduce((sum, p) => sum + kgOf(p), 0) : null;
+      rows.push({ kind: "main", cells: [c.cuve || "—", c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—", `${fmt(totalL)} L`, totalKg !== null ? `${fmt(totalKg)} kg` : "—"] });
+      if (others.length > 0) parts.forEach((p) => rows.push({ kind: "dont", cells: [`dont ${p.nom}`, "—", `${fmt(p.litres)} L`, kgOf(p) !== null ? `${fmt(kgOf(p))} kg` : "—"] }));
+    }
+    const idx = (r.indexCompteurs || []).filter((i) => i.indexFin !== null && i.indexFin !== undefined).map((i) => `${i.compteur} : ${fmt(i.indexFin)}`);
+    return { produit: r.produit, title: `DÉTAIL — ${String(ownLabel).toUpperCase()}`, rows, indexLine: idx.length ? `Index — ${idx.join("   ·   ")}` : null };
+  });
+  // Toutes les huiles du site figurent sur la fiche : une huile attendue mais sans enregistrement
+  // (ancien inventaire incomplet) est imprimée "Non renseigné" plutôt que de disparaître en silence.
+  const siteId = records[0]?.siteId;
+  const present = new Set(records.map((r) => r.produit));
+  siteLubricants(siteId, productStocks).filter((l) => !present.has(l.id)).forEach((l) => {
+    blocks.push({ produit: l.id, title: `DÉTAIL — ${String(lubLabel(siteId, l.id, productStocks)).toUpperCase()}`, rows: [{ kind: "main", cells: ["Non renseigné", "—", "—", "—"] }], indexLine: null });
+  });
+  return blocks.sort((a, b) => rank(a.produit) - rank(b.produit));
+}
+// Hauteur qu'occupe un bloc, pour un niveau de compacité donné.
+function lubPdfBlockHeight(blk, lv) {
+  const body = blk.rows.reduce((sum, row) => sum + (row.kind === "dont" ? lv.dontH : lv.rowH), 0);
+  return lv.bannerH + lv.g1 + lv.rowH + body + (blk.indexLine ? lv.noteH : 0) + lv.g2;
+}
 async function exportInventaireOfficielLubCombinedPdf(records, site, productStocks) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const [pR, pG, pB] = hexToRgb(C.blue), [aR, aG, aB] = hexToRgb(C.orange);
+  const [pR, pG, pB] = LUB_PDF_BLUE, [aR, aG, aB] = hexToRgb(C.orange);
   const marginX = 40;
   const fullWidth = pageWidth - marginX * 2;
   const ref = records[0];
@@ -1191,70 +1282,114 @@ async function exportInventaireOfficielLubCombinedPdf(records, site, productStoc
   doc.line(marginX, y - 14, pageWidth - marginX, y - 14);
   y += 6;
 
-  const drawBanner = (text) => {
-    doc.setFillColor(pR, pG, pB);
-    doc.roundedRect(marginX, y, fullWidth, 22, 3, 3, "F");
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(10.5);
-    doc.setTextColor(255, 255, 255);
-    doc.text(text, marginX + 10, y + 15);
-    y += 22 + 8;
-  };
-
-  // Un seul tableau pour les 4 huiles — une ligne par contenant, tous produits confondus —
-  // sur le même principe qu'une fiche gasoil (une seule table "cuve par cuve"), plutôt que 4
-  // tableaux séparés : ça tient sur une seule page même avec plusieurs contenants par huile.
-  drawBanner("DÉTAIL PAR HUILE — HAUTEUR, VOLUME ET INDEX");
-  const detailRows = [];
-  for (const r of records) {
-    const d = LUBRICANTS.find((l) => l.id === r.produit)?.densite;
-    const idxLabel = (r.indexCompteurs || []).map((idx) => (idx.indexFin !== null && idx.indexFin !== undefined ? fmt(idx.indexFin) : "—")).join(", ") || "—";
-    (r.cuves && r.cuves.length ? r.cuves : [{ cuve: "—", hauteur: null, stockAmbiant: r.stockAmbiant }]).forEach((c) => {
-      detailRows.push([
-        lubLabel(r.siteId, r.produit, productStocks),
-        c.cuve,
-        c.hauteur !== null && c.hauteur !== undefined ? fmt(c.hauteur) : "—",
-        `${fmt(c.stockAmbiant)} L`,
-        d ? `${fmt(c.stockAmbiant * d)} kg` : "—",
-        idxLabel,
-      ]);
-    });
-  }
-  autoTable(doc, {
-    startY: y,
-    head: [["Huile", "Contenant", "Hauteur (mm)", "Stock (L)", "Stock (kg)", "Index compteur"]],
-    body: detailRows,
-    theme: "grid",
-    headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 8.5, cellPadding: 6 },
-    bodyStyles: { fontSize: 9, cellPadding: 6, textColor: [40, 48, 56] },
-    alternateRowStyles: { fillColor: [249, 250, 251] },
-    styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
-    columnStyles: { 0: { halign: "left", fontStyle: "bold" }, 1: { halign: "left" } },
-    margin: { left: marginX, right: marginX },
-  });
-  y = doc.lastAutoTable.finalY + 18;
-
-  // Commentaires : regroupés en un seul bloc (au lieu d'un paragraphe par huile), pour rester
-  // compact et tenir sur la page.
+  // Commentaires : regroupés en un seul bloc (au lieu d'un paragraphe par huile), pour rester compact.
   const commentLines = records.filter((r) => r.commentaire).map((r) => `${lubLabel(r.siteId, r.produit, productStocks)} : ${r.commentaire}`);
+  let commentTextLines = [];
   if (commentLines.length > 0) {
     doc.setFont("helvetica", "italic");
     doc.setFontSize(9);
-    doc.setTextColor(90, 100, 110);
-    const lines = doc.splitTextToSize(`Commentaires — ${commentLines.join("   ·   ")}`, fullWidth);
-    doc.text(lines, marginX, y);
-    y += lines.length * 12 + 10;
+    commentTextLines = doc.splitTextToSize(`Commentaires — ${commentLines.join("   ·   ")}`, fullWidth);
+  }
+  const commentH = commentTextLines.length > 0 ? commentTextLines.length * 12 + 10 : 0;
+
+  // Choix du niveau de compacité : le premier qui fait tenir tous les blocs + les commentaires au-dessus
+  // des cases de signature (réservées en bas de page). Si aucun ne suffit, on passe à une 2e page plutôt
+  // que de laisser du contenu sortir de la feuille.
+  const blocks = buildLubPdfBlocks(records, productStocks);
+  const sigTop = pageHeight - 150;
+  const fits = (lv) => y + blocks.reduce((sum, b) => sum + lubPdfBlockHeight(b, lv), 0) + commentH <= sigTop - 12;
+  const lv = LUB_PDF_LEVELS.find(fits) || LUB_PDF_LEVELS[LUB_PDF_LEVELS.length - 1];
+
+  // Largeurs fixes des 4 colonnes (438 pt au total), identiques pour tous les blocs.
+  const colW = [134, 100, 128, 76];
+  const pad = 6;
+  const lineRgb = [226, 230, 234];
+  const fitText = (text, maxW) => {
+    let t = String(text);
+    if (doc.getTextWidth(t) <= maxW) return t;
+    while (t.length > 1 && doc.getTextWidth(`${t}…`) > maxW) t = t.slice(0, -1);
+    return `${t}…`;
+  };
+  const drawCell = (x, cy, w, h, fill, textFn) => {
+    doc.setFillColor(fill[0], fill[1], fill[2]);
+    doc.setDrawColor(lineRgb[0], lineRgb[1], lineRgb[2]);
+    doc.setLineWidth(0.5);
+    doc.rect(x, cy, w, h, "FD");
+    textFn();
+  };
+  const drawBanner = (text) => {
+    doc.setFillColor(pR, pG, pB);
+    doc.roundedRect(marginX, y, fullWidth, lv.bannerH, 3, 3, "F");
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10.5);
+    doc.setTextColor(255, 255, 255);
+    doc.text(text, marginX + 10, y + lv.bannerH / 2 + 3.7);
+    y += lv.bannerH + lv.g1;
+  };
+
+  for (const blk of blocks) {
+    if (y + lubPdfBlockHeight(blk, lv) > pageHeight - 40) { doc.addPage(); y = 50; }
+    drawBanner(blk.title);
+    // En-tête du tableau
+    let x = marginX;
+    ["Contenant", "Hauteur (mm)", "Stock (L, ambiant)", "Stock (kg)"].forEach((h, i) => {
+      drawCell(x, y, colW[i], lv.rowH, LUB_PDF_BLUE, () => {
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(lv.fsHead);
+        doc.setTextColor(255, 255, 255);
+        doc.text(fitText(h, colW[i] - pad * 2), x + colW[i] - pad, y + lv.rowH / 2 + lv.fsHead * 0.34, { align: "right" });
+      });
+      x += colW[i];
+    });
+    y += lv.rowH;
+    // Lignes : la cuve (en gras) puis, si elle contient plusieurs produits, une ligne "dont …" par produit
+    for (const row of blk.rows) {
+      const h = row.kind === "dont" ? lv.dontH : lv.rowH;
+      const dont = row.kind === "dont";
+      x = marginX;
+      row.cells.forEach((txt, i) => {
+        drawCell(x, y, colW[i], h, dont ? [250, 250, 250] : [249, 250, 251], () => {
+          const fs = dont ? lv.fsDont : lv.fs;
+          // Ligne "dont …" : seul le libellé est en italique, les nombres restent droits (comme le modèle).
+          doc.setFont("helvetica", dont && i === 0 ? "italic" : (i === 0 && !dont ? "bold" : "normal"));
+          doc.setFontSize(fs);
+          doc.setTextColor(i === 0 && !dont ? 20 : 40, i === 0 && !dont ? 30 : 48, i === 0 && !dont ? 40 : 56);
+          const by = y + h / 2 + fs * 0.34;
+          if (i === 0) doc.text(fitText(txt, colW[0] - pad * 2 - (dont ? 8 : 0)), x + pad + (dont ? 8 : 0), by);
+          else doc.text(fitText(txt, colW[i] - pad * 2), x + colW[i] - pad, by, { align: "right" });
+        });
+        x += colW[i];
+      });
+      y += h;
+    }
+    if (blk.indexLine) {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(lv.fsNote);
+      doc.setTextColor(90, 100, 110);
+      doc.text(fitText(blk.indexLine, fullWidth), marginX, y + lv.fsNote + 3);
+      y += lv.noteH;
+    }
+    y += lv.g2;
   }
 
-  // Signatures partagées : une seule case par rôle pour les 4 lubrifiants — on prend la
-  // première signature trouvée parmi les 4 inventaires pour chaque rôle, s'il y en a une.
+  if (commentTextLines.length > 0) {
+    doc.setFont("helvetica", "italic");
+    doc.setFontSize(9);
+    doc.setTextColor(90, 100, 110);
+    doc.text(commentTextLines, marginX, y + 2);
+    y += commentH;
+  }
+
+  // Signatures partagées : une seule case par rôle pour tous les lubrifiants — on prend la
+  // première signature trouvée parmi les inventaires pour chaque rôle, s'il y en a une.
+  // Deux cases seulement : SOMIP et TotalEnergies Marketing (le nom de l'opérateur figure déjà
+  // en haut de la fiche).
   const pick = (field) => records.map((r) => r[field]).find(Boolean) || null;
   if (y > pageHeight - 150) { doc.addPage(); y = 50; }
-  const sigY = Math.max(y + 20, pageHeight - 150);
-  const sigW = (fullWidth - 32) / 3;
+  const sigY = Math.max(y + 8, pageHeight - 150);
+  const sigW = (fullWidth - 16) / 2;
   const sigSlots = [
     { label: "SOMIP", url: pick("signatureSomipUrl"), by: pick("signatureSomipBy"), at: pick("signatureSomipAt") },
-    { label: "Opérateur", url: pick("signatureOperateurUrl"), by: pick("signatureOperateurBy"), at: pick("signatureOperateurAt") },
     { label: "TotalEnergies Marketing", url: pick("signatureTotalUrl"), by: pick("signatureTotalBy"), at: pick("signatureTotalAt") },
   ];
   for (let i = 0; i < sigSlots.length; i++) {
@@ -1426,157 +1561,337 @@ function PhotoPicker({ files, setFiles, existingUrls, onRemoveExisting }) {
   );
 }
 
-// Export PowerPoint du Bilan Matières : titre, tableau, diagramme natif (modifiable dans
-// PowerPoint), et une diapositive photos pour chaque période qui en possède.
-async function exportBilanToPptx(history, periodType, siteName) {
-  const pptx = new pptxgen();
-  pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
-  pptx.layout = "SOMIP";
-  const BLUE = C.blue.replace("#", ""), ORANGE = C.orange.replace("#", ""), INK = "1A2733", SUB = "5A6470";
-  const PERIOD_LABEL = { mensuel: "Synthèse mensuelle", trimestriel: "Synthèse trimestrielle", decadaire: "Synthèse décadaire" };
+/* ------------------------------------------------------------------ */
+/* Présentation PowerPoint du Bilan matière — format SOMIP             */
+/* (chiffres calculés depuis les Bilans saisis + textes rédigés)       */
+/* ------------------------------------------------------------------ */
+const DECK = { NAVY: "0E3D60", BLUE: "0071BD", ORANGE: "F16B16", GREEN: "1E8A6E", PANEL: "EEF3F8", PANEL2: "F7FAFC", PEACH: "FCE9DC", GREY: "6B7580", INK: "1A2733", GRID: "EAEEF2", BORDER: "E2E8EE", PALE: "D6E4F0", MUTED: "9FB4C8", SOFT: "E4EDF5" };
+const DECK_PIE_COLORS = ["0071BD", "F16B16", "1E8A6E", "6FA8D8", "F4A15A", "8FC1AC", "0E3D60", "C9D6E3"];
+const AUTONOMIE_ALERTE_JOURS = 2;
+const NATURE_SUGGESTIONS = ["Instrumentale", "Camions laitiers", "Camions laitiers / instrumentale", "Incident matériel", "À investiguer", "Aucune cause identifiée"];
 
-  // Diapositive de titre.
-  const s1 = pptx.addSlide();
-  s1.background = { color: "FFFFFF" };
-  s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
-  s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
-  if (CURRENT_LOGO_URL) {
-    try { s1.addImage({ path: CURRENT_LOGO_URL, x: 0.5, y: 0.5, w: 1, h: 1, sizing: { type: "contain", w: 1, h: 1 } }); } catch (e) { /* logo indisponible : on continue sans */ }
+// Libellés de période réutilisés dans les titres et sous-titres de la présentation.
+function bilanPeriodLabels(periodType, periodKey) {
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const elide = (name) => (/^[aeiouhâéèêîôû]/i.test(name) ? "d'" : "de ");
+  const monthParts = (ym) => { const [y, m] = String(ym).split("-").map(Number); return { name: FRENCH_MONTHS[(m || 1) - 1] || "", year: y }; };
+  if (periodType === "trimestriel") {
+    const [y, q] = String(periodKey).split("-Q");
+    const tag = `T${q} ${y}`;
+    return { upper: tag, short: tag, lower: tag, phrase: `trimestre ${tag}`, cumul: `cumul du trimestre ${tag}`, volumes: `du trimestre ${tag}` };
   }
-  s1.addText(`SOMIP — Bilan Matières${siteName ? ` — ${siteName}` : ""}`, { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 26, bold: true, color: BLUE });
-  s1.addText(PERIOD_LABEL[periodType] || "Synthèse", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
+  if (periodType === "decadaire") {
+    const [ym, d] = String(periodKey).split("-D");
+    const { name, year } = monthParts(ym);
+    const phrase = `${d === "1" ? "1ère" : `${d}e`} décade ${elide(name)}${name} ${year}`;
+    return { upper: phrase.toUpperCase(), short: cap(phrase), lower: phrase, phrase, cumul: `cumul de la ${phrase}`, volumes: `de la ${phrase}` };
+  }
+  const { name, year } = monthParts(periodKey);
+  const phrase = `mois ${elide(name)}${name} ${year}`;
+  return { upper: `${name.toUpperCase()} ${year}`, short: `${cap(name)} ${year}`, lower: `${name} ${year}`, phrase, cumul: `cumul du ${phrase}`, volumes: `du ${phrase}` };
+}
 
-  // Diapositive tableau.
-  const s2 = pptx.addSlide();
-  s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-  s2.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-  s2.addText("Historique des périodes", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-  const header = ["Période", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"].map((t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: BLUE }, fontSize: 9 } }));
-  const rows = [header, ...history.map((b) => [
-    String(b.periodKey), `${fmt(b.stockDebut)} L`, `+${fmt(b.reception15)} L`, `${fmt(b.ventes15)} L`,
-    `${b.transferts15 >= 0 ? "+" : ""}${fmt(b.transferts15)} L`, `${fmt(b.stockTheorique)} L`, `${fmt(b.stockFin15)} L`,
-    { text: `${b.ecart >= 0 ? "+" : ""}${fmt(b.ecart)} L`, options: { color: b.ecart < 0 ? "D64545" : b.ecart > 0 ? "2E9B5C" : INK, bold: true } },
-  ].map((c) => (typeof c === "string" ? { text: c, options: { fontSize: 9, color: INK } } : c)))];
-  s2.addTable(rows, { x: 0.4, y: 0.8, w: 9.2, autoPage: true, border: { type: "solid", color: "E2E6E9", pt: 0.5 }, fontFace: "Arial" });
+const isRasText = (s) => /^\s*(r\.?a\.?s\.?|rien à signaler)\s*[.!]?\s*$/i.test(s || "");
+const deckNumOrNull = (v) => (v === "" || v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+const deckSigned = (n) => `${n > 0 ? "+" : ""}${fmt(n)}`;
+const deckTaux = (t) => (t === null ? "N/D" : `${t > 0 ? "+" : ""}${t.toFixed(1)}`);
+// Coupe un texte trop long avec « … » (titres, sous-titres, pastilles) pour qu'il ne déborde jamais de sa zone.
+const deckClip = (s, n) => (String(s).length > n ? `${String(s).slice(0, n - 1).trimEnd()}…` : String(s));
+const DECK_MAX_LIGNES = 12, DECK_MAX_RECOS = 8;
 
-  // Diapositive diagramme (natif PowerPoint, modifiable).
-  if (history.length > 0) {
-    const s3 = pptx.addSlide();
-    s3.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-    s3.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-    s3.addText("Évolution des volumes", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-    const labels = history.map((b) => String(b.periodKey));
-    const chartData = [
-      { name: "Réception", labels, values: history.map((b) => b.reception15) },
-      { name: "Ventes", labels, values: history.map((b) => b.ventes15) },
-      { name: "Stock fin", labels, values: history.map((b) => b.stockFin15) },
-    ];
-    s3.addChart(pptx.ChartType.bar, chartData, {
-      x: 0.4, y: 0.9, w: 9.2, h: 4.3, barDir: "col",
-      chartColors: [BLUE, ORANGE, "2E9B5C"], showLegend: true, legendPos: "b",
-      showValue: false, catAxisLabelFontSize: 9, valAxisLabelFontSize: 9,
+// Modèle de la présentation : tout ce qui s'affiche, calculé une fois pour toutes (testable sans PowerPoint).
+// rows = lignes « Tous les sites » du module Bilans matières ; texts = textes rédigés enregistrés pour la période.
+function buildBilanDeckModel({ rows, periodType, periodKey, texts, seuil = 3, preparePar = "" }) {
+  const t = texts || {};
+  const autonomies = t.autonomies || {};
+  const natures = t.natures || {};
+  const labels = bilanPeriodLabels(periodType, periodKey);
+  const totalVentes = rows.reduce((a, r) => a + (r.ventes15 || 0), 0);
+  const sites = rows.map((r) => {
+    const ventes = r.ventes15 || 0;
+    const observationBrute = (r.commentaire || "").trim() || "RAS.";
+    const observation = deckClip(observationBrute, 600); // tableau des observations
+    const observationSynthese = deckClip(observationBrute, 330); // synthèse : le texte complet reste dans le tableau des observations
+    const natureSaisie = String(natures[r.site.id] || "").trim();
+    return {
+      id: r.site.id, name: r.site.name, theo: r.stockTheorique, phys: r.stockFin15, ecart: r.ecart,
+      taux: ventes > 0 ? (r.ecart / ventes) * 1000 : null,
+      autonomie: deckNumOrNull(autonomies[r.site.id]),
+      entrees: r.reception15 || 0, sorties: ventes, part: totalVentes > 0 ? (ventes / totalVentes) * 100 : 0,
+      observation, observationSynthese, nature: deckClip(natureSaisie || (isRasText(observation) ? "Aucune cause identifiée" : "À qualifier"), 50), natureSaisie: !!natureSaisie,
+      photos: r.photoUrls || [],
+    };
+  });
+  const sum = (k) => sites.reduce((a, s) => a + s[k], 0);
+  const alertes = sites.filter((s) => s.autonomie !== null && s.autonomie <= AUTONOMIE_ALERTE_JOURS).map((s) => ({ name: s.name, jours: s.autonomie }));
+  const sansAutonomie = sites.filter((s) => s.autonomie === null).map((s) => s.name);
+  const top2 = [...sites].sort((a, b) => b.part - a.part).slice(0, 2);
+  const justificatifs = (t.justificatifs || []).map((j) => {
+    const site = sites.find((s) => s.id === j.siteId);
+    if (!site) return null;
+    const lignes = (j.lignes || []).filter((l) => (l.libelle || "").trim() !== "" || deckNumOrNull(l.montant) !== null).map((l) => ({ libelle: (l.libelle || "").trim(), montant: deckNumOrNull(l.montant) || 0 })).slice(0, DECK_MAX_LIGNES);
+    const total = lignes.reduce((a, l) => a + l.montant, 0);
+    return {
+      siteName: site.name, title: deckClip(`Justificatif — ${site.name} : ${(j.sujet || "").trim() || "détail de l'écart"}`, 76), accroche: deckClip((j.accroche || "").trim(), 200),
+      brut: site.ecart, lignes, total, solde: site.ecart - total,
+      totalLibelle: deckClip((j.totalLibelle || "").trim() || "Total des imputations", 70), soldeLibelle: deckClip((j.soldeLibelle || "").trim() || "Solde résiduel", 70), texte: deckClip((j.texte || "").trim(), 900),
+    };
+  }).filter((j) => j && j.lignes.length > 0);
+  const photoSlides = sites.filter((s) => s.photos.length > 0).map((s) => ({ title: `Justificatif — ${s.name} : photos justificatives`, subtitle: isRasText(s.observation) ? "" : deckClip(s.observation, 200), urls: s.photos.slice(0, 6) }));
+  const conclusion = deckClip(String(t.conclusion || "").trim().replace(/^conclusion\s*:\s*/i, ""), 700);
+  return {
+    labels, seuil, preparePar: String(preparePar || t.preparePar || "").trim(), sites, nSites: sites.length,
+    // « Écart global » = stock physique cumulé − stock théorique cumulé : toujours cohérent avec les deux autres indicateurs.
+    kpis: { theo: sum("theo"), phys: sum("phys"), ecart: sum("phys") - sum("theo"), ventes: sum("sorties"), critiques: alertes.length, total: sites.length },
+    alertes, sansAutonomie, top2: top2.length === 2 ? { names: top2.map((s) => s.name), pct: Math.round(top2[0].part + top2[1].part) } : null,
+    justificatifs, photoSlides, conclusion, recommandations: (t.recommandations || []).map((r) => deckClip(String(r).trim(), 400)).filter((r) => r !== "").slice(0, DECK_MAX_RECOS),
+  };
+}
+
+// Brouillon de conclusion, uniquement factuel (chiffres de la période) : le Superviseur le complète avec les causes.
+function draftBilanConclusion(model) {
+  const { labels, kpis, sites, seuil, alertes } = model;
+  const tauxGlobal = kpis.ventes > 0 ? (kpis.ecart / kpis.ventes) * 1000 : null;
+  const parts = [`pour le ${labels.phrase}, l'écart global ressort à ${kpis.ecart > 0 ? "+" : ""}${fmt(kpis.ecart)} L${tauxGlobal !== null ? ` (${deckTaux(tauxGlobal)}‰ des ventes)` : ""} sur ${kpis.total} site(s).`];
+  const hors = sites.filter((s) => s.taux !== null && Math.abs(s.taux) > seuil);
+  parts.push(hors.length === 0 ? `Tous les sites restent dans le seuil de freinte de ${seuil}‰.` : `${hors.length} site(s) dépassent le seuil de freinte de ${seuil}‰ : ${hors.map((s) => `${s.name} (${deckTaux(s.taux)}‰)`).join(", ")}.`);
+  if (alertes.length > 0) parts.push(`Autonomie critique (≤ ${AUTONOMIE_ALERTE_JOURS} j) : ${alertes.map((a) => `${a.name} (${a.jours} j)`).join(", ")}.`);
+  return parts.join(" ");
+}
+
+// Nombre de lignes qu'occupera un texte dans une zone de `widthIn` pouces, au corps `fontPt` (estimation prudente, Calibri).
+function estimateTextLines(text, widthIn, fontPt) {
+  const perLine = Math.max(8, Math.floor((widthIn * 72) / (fontPt * 0.52)));
+  return String(text || "").split("\n").reduce((n, para) => n + Math.max(1, Math.ceil(para.length / perLine)), 0);
+}
+// Corps du titre selon sa longueur, pour qu'il tienne sur une ligne.
+const deckTitleSize = (text) => (text.length <= 46 ? 30 : text.length <= 56 ? 26 : text.length <= 68 ? 22 : 19);
+
+// Hauteurs des lignes de la synthèse : on réduit le corps du texte jusqu'à ce que tout tienne dans la page.
+function layoutSyntheseRows(sites, concl, availableH) {
+  const textW = 6.4;
+  const conclLines = (fontPt) => (concl ? estimateTextLines(`Conclusion : ${concl}`, 11.7, fontPt) : 0);
+  for (const fontPt of [9, 8.5, 8, 7.5, 7, 6.5]) {
+    const lineH = (fontPt * 1.25) / 72;
+    const heights = sites.map((s) => Math.max(0.4, estimateTextLines(s.observationSynthese, textW, fontPt) * lineH + 0.14));
+    const conclFont = Math.min(9.5, fontPt + 0.5);
+    const conclH = concl ? Math.max(0.7, conclLines(conclFont) * ((conclFont * 1.25) / 72) + 0.3) : 0;
+    const total = heights.reduce((a, h) => a + h + 0.06, 0) + (concl ? conclH + 0.14 : 0);
+    if (total <= availableH || fontPt === 6.5) return { fontPt, heights, conclFont, conclH, total };
+  }
+  return null;
+}
+
+async function exportBilanPresentationPptx(model) {
+  const pptx = new pptxgen();
+  pptx.layout = "LAYOUT_WIDE"; // 13,33 × 7,5 pouces
+  pptx.title = `Bilan matière — ${model.labels.short}`;
+  pptx.author = model.preparePar || "SOMIP";
+  pptx.company = "SOMIP";
+  const { labels, sites } = model;
+  const D = DECK;
+  const sign = (n) => (n < 0 ? D.ORANGE : n > 0 ? D.GREEN : D.INK);
+  let page = 1;
+  const logoRuns = [{ text: "SO", options: { color: D.BLUE } }, { text: "M", options: { color: D.ORANGE } }, { text: "IP", options: { color: D.BLUE } }];
+
+  const contentSlide = (title, subtitle) => {
+    const s = pptx.addSlide();
+    s.background = { color: "FFFFFF" };
+    page += 1;
+    s.addText(title, { x: 0.5, y: 0.35, w: 11.0, h: 0.6, fontFace: "Cambria", fontSize: deckTitleSize(title), bold: true, color: D.NAVY, margin: 0, valign: "middle", isTextBox: true });
+    if (subtitle) s.addText(subtitle, { x: 0.5, y: 0.95, w: 12.33, h: 0.35, fontFace: "Calibri", fontSize: subtitle.length > 150 ? 11 : 13, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+    s.addText(logoRuns, { x: 11.63, y: 0.35, w: 1.2, h: 0.4, fontFace: "Cambria", fontSize: 16, bold: true, align: "right", margin: 0, isTextBox: true });
+    s.addText(`SOMIP — Zone Sud-Est Gabon  |  Bilan matière ${labels.short}`, { x: 0.5, y: 7.08, w: 9, h: 0.3, fontFace: "Calibri", fontSize: 9, color: D.GREY, margin: 0, isTextBox: true });
+    s.addText(String(page), { x: 12.33, y: 7.08, w: 0.5, h: 0.3, fontFace: "Calibri", fontSize: 9, color: D.GREY, align: "right", margin: 0, isTextBox: true });
+    return s;
+  };
+  const chartBase = { catAxisLabelFontFace: "Calibri", valAxisLabelFontFace: "Calibri", catAxisLabelFontSize: 10, valAxisLabelFontSize: 10, catAxisLabelColor: D.GREY, valAxisLabelColor: D.GREY, valGridLine: { color: D.GRID, size: 0.75 }, catGridLine: { style: "none" }, dataLabelFontFace: "Calibri", dataLabelFontSize: 10, dataLabelColor: D.INK };
+  const names = sites.map((s) => s.name);
+
+  /* 1 — Titre */
+  const s1 = pptx.addSlide();
+  s1.background = { color: D.NAVY };
+  s1.addShape(pptx.ShapeType.ellipse, { x: 10.6, y: -1.8, w: 5.5, h: 5.5, fill: { color: D.BLUE, transparency: 55 }, line: { type: "none" } });
+  s1.addShape(pptx.ShapeType.ellipse, { x: 11.6, y: 4.8, w: 4.2, h: 4.2, fill: { color: "3A3A3A", transparency: 55 }, line: { type: "none" } });
+  s1.addShape(pptx.ShapeType.rect, { x: 0.6, y: 0.55, w: 2.1, h: 0.85, fill: { color: "FFFFFF" }, line: { type: "none" } });
+  s1.addText(logoRuns, { x: 0.6, y: 0.58, w: 2.1, h: 0.5, fontFace: "Cambria", fontSize: 24, bold: true, align: "center", margin: 0, isTextBox: true });
+  s1.addText("la technologie des fluides", { x: 0.6, y: 1.05, w: 2.1, h: 0.3, fontFace: "Calibri", fontSize: 7, color: D.GREY, align: "center", margin: 0, isTextBox: true });
+  s1.addText(`BILAN MATIÈRE — ${labels.upper}`, { x: 0.6, y: 2.9, w: 11.5, h: 0.9, fontFace: "Cambria", fontSize: labels.upper.length > 24 ? 32 : 38, bold: true, color: "FFFFFF", margin: 0, valign: "middle", isTextBox: true });
+  s1.addText("Suivi des stocks carburants — Sites externalisés Zone Sud-Est Gabon", { x: 0.6, y: 3.65, w: 9.5, h: 0.45, fontFace: "Calibri", fontSize: 16, color: D.PALE, margin: 0, isTextBox: true });
+  s1.addShape(pptx.ShapeType.line, { x: 0.62, y: 4.25, w: 0.8, h: 0, line: { color: D.ORANGE, width: 3 } });
+  s1.addText([{ text: `${sites.length} sites : `, options: { color: D.ORANGE, bold: true } }, { text: names.join(" · "), options: { color: D.PALE } }], { x: 0.6, y: 4.5, w: 11.5, h: 0.6, fontFace: "Calibri", fontSize: 12, margin: 0, valign: "top", isTextBox: true });
+  s1.addText(`Client TotalEnergies / Comilog${model.preparePar ? `  •  Préparé par ${model.preparePar}` : ""}`, { x: 0.6, y: 6.85, w: 11.5, h: 0.35, fontFace: "Calibri", fontSize: 11, color: D.MUTED, margin: 0, isTextBox: true });
+
+  /* 2 — Vue d'ensemble */
+  const s2 = contentSlide("Vue d'ensemble", `Situation consolidée à 15°C — ${labels.cumul} (${sites.length} sites)`);
+  const kpiCards = [
+    { v: `${fmt(model.kpis.theo)} L`, l: "Stock théorique cumulé", c: D.BLUE }, { v: `${fmt(model.kpis.phys)} L`, l: "Stock physique cumulé", c: D.BLUE },
+    { v: `${fmt(model.kpis.ecart)} L`, l: "Écart global", c: D.ORANGE }, { v: `${model.kpis.critiques} / ${model.kpis.total}`, l: `Sites en autonomie critique (≤${AUTONOMIE_ALERTE_JOURS} j)`, c: D.ORANGE },
+  ];
+  kpiCards.forEach((k, i) => {
+    const x = 0.5 + i * 3.1;
+    s2.addShape(pptx.ShapeType.rect, { x, y: 1.5, w: 2.85, h: 1.15, fill: { color: D.PANEL }, line: { type: "none" } });
+    s2.addText(k.v, { x: x + 0.15, y: 1.62, w: 2.55, h: 0.55, fontFace: "Cambria", fontSize: 26, bold: true, color: k.c, margin: 0, valign: "middle", isTextBox: true });
+    s2.addText(k.l, { x: x + 0.15, y: 2.18, w: 2.55, h: 0.4, fontFace: "Calibri", fontSize: 11, color: D.GREY, margin: 0, valign: "top", isTextBox: true });
+  });
+  // Le tableau occupe la place restante (jusqu'à y = 6,95) : lignes et corps resserrés si les sites sont nombreux.
+  const rowH = Math.min(0.42, (6.95 - 2.95) / (sites.length + 1));
+  const tFont = rowH >= 0.38 ? 11 : rowH >= 0.32 ? 10 : rowH >= 0.27 ? 9 : 8;
+  const th = (t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: D.BLUE }, align: "center", valign: "middle", fontSize: tFont } });
+  const td = (t, o = {}) => ({ text: t, options: { align: "center", valign: "middle", fontSize: tFont, color: D.INK, ...o } });
+  s2.addTable([
+    [th("Site"), th("Stock théo. 15°C (L)"), th("Stock phys. 15°C (L)"), th("Écart (L)"), th("Taux (‰)"), th("Autonomie")],
+    ...sites.map((s) => [
+      td(s.name, { align: "left", bold: true }), td(fmt(s.theo)), td(fmt(s.phys)),
+      td(deckSigned(s.ecart), { bold: true, color: sign(s.ecart) }), td(deckTaux(s.taux), { color: s.taux === null ? D.GREY : sign(s.taux) }),
+      td(s.autonomie === null ? "N/D" : `${fmt(s.autonomie)} j`, { color: s.autonomie === null ? D.GREY : D.INK }),
+    ]),
+  ], { x: 0.5, y: 2.95, w: 12.33, colW: [3.2, 2.28, 2.28, 1.79, 1.39, 1.39], rowH, fontFace: "Calibri", border: { type: "solid", pt: 0.75, color: D.BORDER },
+    // Marges en points : la bibliothèque les lit en pouces si la première vaut moins de 1 — d'où 2 et non 0.
+    margin: [2, 8, 2, 8] });
+
+  /* 3 — Écarts */
+  const s3 = contentSlide(`Écarts ${labels.short && model.labels.phrase.startsWith("mois") ? "mensuels " : ""}par site (15°C)`, "Stock physique − stock théorique, situation à 15°C (ASTM D1250 / API MPMS 11.1) — litres");
+  s3.addChart(pptx.ChartType.bar, [{ name: "Écart (L)", labels: names, values: sites.map((s) => Math.round(s.ecart)) }], {
+    ...chartBase, x: 0.5, y: 1.5, w: 12.33, h: 5.3, barDir: "col", barGapWidthPct: 150, chartColors: sites.map((s) => (s.ecart < 0 ? D.ORANGE : D.GREEN)),
+    showValue: true, dataLabelPosition: "outEnd", dataLabelFormatCode: "#,##0", valAxisLabelFormatCode: "#,##0", catAxisLabelPos: "low", showLegend: false,
+  });
+
+  /* 4 — Taux */
+  const s4 = contentSlide("Taux d'écart par site (15°C)", `En ‰ tel que reporté sur les fiches de stock mensuelles — seuil de freinte = ${model.seuil}‰`);
+  s4.addChart(pptx.ChartType.bar, [{ name: "Taux (‰)", labels: names, values: sites.map((s) => (s.taux === null ? 0 : Math.round(s.taux * 10) / 10)) }], {
+    ...chartBase, x: 0.5, y: 1.5, w: 12.33, h: 5.1, barDir: "col", barGapWidthPct: 150, chartColors: sites.map((s) => ((s.taux || 0) < 0 ? D.ORANGE : D.GREEN)),
+    showValue: true, dataLabelPosition: "outEnd", dataLabelFormatCode: "0.0", valAxisLabelFormatCode: "0", catAxisLabelPos: "low", showLegend: false,
+  });
+  s4.addText(`Seuil de freinte contractuel = ${model.seuil}‰ (en valeur absolue)`, { x: 0.5, y: 6.7, w: 12.33, h: 0.3, fontFace: "Calibri", fontSize: 9, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+
+  /* 5 — Autonomie */
+  const s5 = contentSlide("Autonomie des sites", "Nombre de jours de vente avant rupture, sur la base des stocks à 15°C");
+  const reversed = [...sites].reverse();
+  s5.addChart(pptx.ChartType.bar, [{ name: "Autonomie (j)", labels: reversed.map((s) => s.name), values: reversed.map((s) => (s.autonomie === null ? 0 : s.autonomie)) }], {
+    ...chartBase, x: 0.4, y: 1.5, w: 8.1, h: 5.3, barDir: "bar", barGapWidthPct: 150, chartColors: [D.BLUE], showValue: true, dataLabelPosition: "outEnd", dataLabelFormatCode: "0", valAxisLabelFormatCode: "0", showLegend: false,
+  });
+  s5.addShape(pptx.ShapeType.rect, { x: 8.85, y: 1.5, w: 3.98, h: 5.3, fill: { color: D.PEACH }, line: { color: D.ORANGE, width: 1 } });
+  s5.addText("SITES EN ALERTE", { x: 9.1, y: 1.75, w: 3.48, h: 0.4, fontFace: "Cambria", fontSize: 14, bold: true, color: D.NAVY, margin: 0, isTextBox: true });
+  s5.addText(`(autonomie ≤ ${AUTONOMIE_ALERTE_JOURS} jours)`, { x: 9.1, y: 2.12, w: 3.48, h: 0.3, fontFace: "Calibri", fontSize: 11, bold: true, color: D.NAVY, margin: 0, isTextBox: true });
+  if (model.alertes.length === 0) {
+    s5.addText("Aucun site en alerte ce mois-ci.", { x: 9.1, y: 2.65, w: 3.48, h: 0.4, fontFace: "Calibri", fontSize: 12, bold: true, color: D.GREEN, margin: 0, isTextBox: true });
+  } else {
+    if (model.alertes.length > 8) s5.addText(`… et ${model.alertes.length - 8} autre(s) site(s)`, { x: 9.1, y: 2.65 + 8 * 0.4, w: 3.48, h: 0.3, fontFace: "Calibri", fontSize: 11, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+    model.alertes.slice(0, 8).forEach((a, i) => s5.addText([{ text: `${a.name}  `, options: { color: D.INK } }, { text: `${fmt(a.jours)} j`, options: { color: D.ORANGE } }], { x: 9.1, y: 2.65 + i * 0.4, w: 3.48, h: 0.32, fontFace: "Calibri", fontSize: 12, bold: true, margin: 0, isTextBox: true }));
+  }
+  s5.addText("Ces sites nécessitent un suivi rapproché des livraisons pour éviter toute rupture d'approvisionnement.", { x: 9.1, y: 5.7, w: 3.48, h: 0.9, fontFace: "Calibri", fontSize: 10, italic: true, color: D.GREY, margin: 0, valign: "top", isTextBox: true });
+  if (model.sansAutonomie.length > 0) s5.addText(`${model.sansAutonomie.length <= 3 ? model.sansAutonomie.join(", ") : `${model.sansAutonomie.length} sites`} : autonomie non renseignée ce mois-ci (affichée à 0 sur le graphique).`, { x: 0.4, y: 6.85, w: 8.1, h: 0.3, fontFace: "Calibri", fontSize: 9, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+
+  /* 6 — Entrées vs sorties */
+  const s6 = contentSlide("Entrées vs sorties par site (15°C)", `Volumes cumulés ${labels.volumes}, situation à 15°C — litres`);
+  s6.addChart(pptx.ChartType.bar, [{ name: "Entrées (L)", labels: names, values: sites.map((s) => Math.round(s.entrees)) }, { name: "Sorties (L)", labels: names, values: sites.map((s) => Math.round(s.sorties)) }], {
+    ...chartBase, x: 0.5, y: 1.5, w: 12.33, h: 5.3, barDir: "col", barGapWidthPct: 40, chartColors: [D.BLUE, D.ORANGE], showValue: false, showLegend: true, legendPos: "b", legendFontSize: 11, legendFontFace: "Calibri", legendColor: D.INK, valAxisLabelFormatCode: "0",
+  });
+
+  /* 7 — Répartition */
+  const s7 = contentSlide("Répartition des volumes distribués (15°C)", "Part de chaque site dans le total des sorties du mois — litres à 15°C");
+  s7.addChart(pptx.ChartType.pie, [{ name: "Part", labels: names, values: sites.map((s) => Math.round(s.part * 10) / 10) }], {
+    x: 1.6, y: 1.4, w: 10.1, h: 5.3, chartColors: sites.map((_, i) => DECK_PIE_COLORS[i % DECK_PIE_COLORS.length]), showPercent: true, showValue: false, showLegend: true, legendPos: "r", legendFontSize: 11, legendFontFace: "Calibri", legendColor: D.INK,
+    dataLabelFormatCode: "0%", dataLabelColor: "FFFFFF", dataLabelFontSize: 10, dataLabelFontFace: "Calibri", dataBorder: { pt: 1, color: "FFFFFF" },
+  });
+  if (model.top2) s7.addText(`${model.top2.names[0]} et ${model.top2.names[1]} concentrent à eux seuls environ ${model.top2.pct}% des volumes distribués sur la zone.`, { x: 0.5, y: 6.75, w: 12.33, h: 0.3, fontFace: "Calibri", fontSize: 11, italic: true, color: D.GREY, margin: 0, isTextBox: true });
+
+  /* 8 — Justificatifs (chiffrés, puis photos) */
+  for (const j of model.justificatifs) {
+    const sl = contentSlide(j.title, j.accroche);
+    const n = j.lignes.length;
+    const showTotal = n > 1; // avec une seule ligne, le total serait identique : on ne l'affiche pas
+    const nRows = n + (showTotal ? 1 : 0) + 1; // lignes + (total) + solde
+    const cy = 1.55, cx = 2.07, cw = 9.2, bottom = 6.9;
+    const textNeed = (f) => (j.texte ? Math.max(0.8, estimateTextLines(j.texte, 11.5, f) * ((f * 1.3) / 72) + 0.3) + 0.3 : 0);
+    // Carte et encadré orange doivent tenir ensemble : on resserre d'abord les lignes, puis le corps du texte.
+    const combos = [[0.4, 10], [0.34, 10], [0.3, 10], [0.4, 9], [0.3, 9], [0.27, 9], [0.24, 9], [0.24, 8.5]];
+    const [step, fontPt] = combos.find(([st, f]) => cy + 1.6 + st * nRows + textNeed(f) <= bottom) || combos[combos.length - 1];
+    const cardH = 1.6 + step * nRows;
+    const rowFont = step >= 0.34 ? 11 : step >= 0.27 ? 10 : 9;
+    sl.addShape(pptx.ShapeType.rect, { x: cx, y: cy, w: cw, h: cardH, fill: { color: D.PANEL }, line: { type: "none" } });
+    sl.addText(j.siteName.toUpperCase(), { x: cx + 0.3, y: cy + 0.2, w: cw - 0.6, h: 0.35, fontFace: "Cambria", fontSize: 13, bold: true, color: D.NAVY, margin: 0, isTextBox: true });
+    const line = (y, label, amount, color) => {
+      sl.addText(label, { x: cx + 0.3, y, w: cw - 2.6, h: Math.min(0.34, step - 0.02), fontFace: "Calibri", fontSize: rowFont, color: D.INK, margin: 0, valign: "middle", isTextBox: true });
+      sl.addText(`${deckSigned(amount)} L`, { x: cx + cw - 2.3, y, w: 2.0, h: Math.min(0.34, step - 0.02), fontFace: "Calibri", fontSize: rowFont, bold: true, color, align: "right", margin: 0, valign: "middle", isTextBox: true });
+    };
+    let y = cy + 0.65;
+    line(y, "Écart brut constaté (mois, 15°C)", j.brut, D.INK);
+    y += 0.45; sl.addShape(pptx.ShapeType.line, { x: cx + 0.3, y, w: cw - 0.6, h: 0, line: { color: "D5DDE5", width: 0.75 } });
+    y += 0.15; j.lignes.forEach((l) => { line(y, l.libelle, l.montant, sign(l.montant)); y += step; });
+    y += 0.05; sl.addShape(pptx.ShapeType.line, { x: cx + 0.3, y, w: cw - 0.6, h: 0, line: { color: "D5DDE5", width: 0.75 } });
+    y += 0.15;
+    if (showTotal) { line(y, j.totalLibelle, j.total, sign(j.total)); y += step; }
+    line(y, j.soldeLibelle, j.solde, sign(j.solde));
+    if (j.texte) {
+      const by = cy + cardH + 0.3, boxH = Math.min(bottom - by, textNeed(fontPt) - 0.3);
+      sl.addShape(pptx.ShapeType.rect, { x: 0.5, y: by, w: 12.33, h: boxH, fill: { color: D.PEACH }, line: { type: "none" } });
+      sl.addText(j.texte, { x: 0.8, y: by, w: 11.73, h: boxH, fontFace: "Calibri", fontSize: fontPt, italic: true, color: D.INK, margin: 0, valign: "middle", isTextBox: true });
+    }
+  }
+  for (const p of model.photoSlides) {
+    const sl = contentSlide(p.title, p.subtitle);
+    const cols = p.urls.length <= 2 ? p.urls.length : 3, rowsN = Math.ceil(p.urls.length / cols);
+    const gap = 0.2, h = Math.min(4.2, (5.3 - gap * (rowsN - 1)) / rowsN);
+    const w = Math.min((12.33 - gap * (cols - 1)) / cols, h * 1.6); // pas plus large qu'une photo ordinaire : évite un recadrage excessif
+    const x0 = 0.5 + (12.33 - (w * cols + gap * (cols - 1))) / 2;
+    p.urls.forEach((u, i) => {
+      const cx = x0 + (i % cols) * (w + gap), cy = 1.5 + Math.floor(i / cols) * (h + gap);
+      try { sl.addImage({ path: u, x: cx, y: cy, w, h, sizing: { type: "cover", w, h } }); } catch (e) { /* photo indisponible : on continue sans */ }
     });
   }
 
-  // Diapositives photos, pour chaque période qui en possède.
-  for (const b of history) {
-    if (!b.photoUrls || b.photoUrls.length === 0) continue;
-    const s = pptx.addSlide();
-    s.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-    s.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-    s.addText(`Photos justificatives — ${b.periodKey}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 16, bold: true, color: INK });
-    if (b.commentaire) s.addText(b.commentaire, { x: 0.4, y: 0.65, w: 9.2, h: 0.35, fontSize: 10, color: SUB, italic: true });
-    const positions = [{ x: 0.4, y: 1.1 }, { x: 3.55, y: 1.1 }, { x: 6.7, y: 1.1 }, { x: 0.4, y: 3.4 }, { x: 3.55, y: 3.4 }, { x: 6.7, y: 3.4 }];
-    for (let i = 0; i < Math.min(b.photoUrls.length, 6); i++) {
-      try {
-        s.addImage({ path: b.photoUrls[i], x: positions[i].x, y: positions[i].y, w: 3, h: 2.1, sizing: { type: "cover", w: 3, h: 2.1 } });
-      } catch (e) { /* une image indisponible ne doit pas bloquer tout l'export */ }
-    }
-  }
+  /* 9 — Observations par site */
+  const obsFont = [10, 9.5, 9, 8.5, 8, 7.5, 7].find((f) => sites.reduce((a, s) => a + Math.max(0.34, estimateTextLines(s.observation, 9.0, f) * ((f * 1.25) / 72) + 0.14), 0.34) <= 5.35) || 7;
+  const so = contentSlide("Observations complémentaires par site", `Justificatifs relevés dans le bilan matière de chaque site — ${labels.lower}`);
+  const oth = (t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: D.BLUE }, fontSize: 10, valign: "middle" } });
+  so.addTable([[oth("Site"), oth("Observation")], ...sites.map((s) => [
+    { text: s.name, options: { bold: true, color: D.INK, fontSize: obsFont + 0.5, valign: "middle" } },
+    { text: s.observation, options: { color: D.INK, fontSize: obsFont, valign: "middle" } },
+  ])], { x: 0.5, y: 1.5, w: 12.33, colW: [3.3, 9.03], fontFace: "Calibri", border: { type: "solid", pt: 0.75, color: D.BORDER }, margin: [3, 8, 3, 8], rowH: 0.34 });
 
-  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_${siteName ? siteName.replace(/\s+/g, "") + "_" : ""}${periodType}_${new Date().toISOString().slice(0, 10)}.pptx` });
-}
-
-// Export combiné "Tous les sites" pour une période donnée : un seul document (PDF ou
-// PowerPoint) rassemblant la ligne de chaque site, plutôt que par site séparément.
-async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
-  const pptx = new pptxgen();
-  pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
-  pptx.layout = "SOMIP";
-  const BLUE = C.blue.replace("#", ""), ORANGE = C.orange.replace("#", ""), INK = "1A2733", SUB = "5A6470";
-
-  const s1 = pptx.addSlide();
-  s1.background = { color: "FFFFFF" };
-  s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
-  s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
-  if (CURRENT_LOGO_URL) {
-    try { s1.addImage({ path: CURRENT_LOGO_URL, x: 0.5, y: 0.5, w: 1, h: 1, sizing: { type: "contain", w: 1, h: 1 } }); } catch (e) { /* logo indisponible : on continue sans */ }
-  }
-  s1.addText("SOMIP — Bilan Matières — Tous les sites", { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 24, bold: true, color: BLUE });
-  s1.addText(`${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`, { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
-
-  const s2 = pptx.addSlide();
-  s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-  s2.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-  s2.addText(`Détail par site — ${periodKey}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-  const header = ["Site", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"].map((t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: BLUE }, fontSize: 9 } }));
-  const dataRows = rows.map((r) => [
-    { text: r.site?.name || "?", options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.stockDebut)} L`, options: { fontSize: 9, color: INK } },
-    { text: `+${fmt(r.reception15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.ventes15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${r.transferts15 >= 0 ? "+" : ""}${fmt(r.transferts15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.stockTheorique)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.stockFin15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L`, options: { fontSize: 9, bold: true, color: r.ecart < 0 ? "D64545" : r.ecart > 0 ? "2E9B5C" : INK } },
-  ]);
-  const totalStockDebut = rows.reduce((a, r) => a + r.stockDebut, 0), totalReception = rows.reduce((a, r) => a + r.reception15, 0);
-  const totalVentes = rows.reduce((a, r) => a + r.ventes15, 0), totalTransferts = rows.reduce((a, r) => a + r.transferts15, 0);
-  const totalTheorique = rows.reduce((a, r) => a + r.stockTheorique, 0), totalStockFin = rows.reduce((a, r) => a + r.stockFin15, 0);
-  const totalEcart = rows.reduce((a, r) => a + r.ecart, 0);
-  const totalRow = [
-    { text: "TOTAL", options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalStockDebut)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `+${fmt(totalReception)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalVentes)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${totalTransferts >= 0 ? "+" : ""}${fmt(totalTransferts)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalTheorique)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalStockFin)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${totalEcart >= 0 ? "+" : ""}${fmt(totalEcart)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-  ];
-  const tableRows = [header, ...dataRows, totalRow];
-  s2.addTable(tableRows, { x: 0.3, y: 0.8, w: 9.4, autoPage: true, border: { type: "solid", color: "E2E6E9", pt: 0.5 }, fontFace: "Arial" });
-
-  const s3 = pptx.addSlide();
-  s3.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-  s3.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-  s3.addText("Comparaison par site", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-  const labels = rows.map((r) => r.site?.name || "?");
-  const chartData = [
-    { name: "Réception", labels, values: rows.map((r) => r.reception15) },
-    { name: "Ventes", labels, values: rows.map((r) => r.ventes15) },
-    { name: "Stock fin", labels, values: rows.map((r) => r.stockFin15) },
-  ];
-  s3.addChart(pptx.ChartType.bar, chartData, {
-    x: 0.4, y: 0.9, w: 9.2, h: 4.3, barDir: "col",
-    chartColors: [BLUE, ORANGE, "2E9B5C"], showLegend: true, legendPos: "b",
-    showValue: false, catAxisLabelFontSize: 9, valAxisLabelFontSize: 9,
+  /* 10 — Synthèse : nature des écarts */
+  const lay = layoutSyntheseRows(sites, model.conclusion, 6.95 - 1.42);
+  const ss = contentSlide("Synthèse — Nature des écarts constatés", "Causes techniques, logistiques ou en cours d'investigation, par site");
+  let yy = 1.42;
+  sites.forEach((s, i) => {
+    const h = lay.heights[i];
+    ss.addShape(pptx.ShapeType.rect, { x: 0.5, y: yy, w: 12.33, h, fill: { color: i % 2 === 0 ? D.PANEL2 : D.PANEL }, line: { type: "none" } });
+    ss.addText(s.name, { x: 0.7, y: yy, w: 2.9, h, fontFace: "Calibri", fontSize: 11, bold: true, color: D.NAVY, margin: 0, valign: "middle", isTextBox: true });
+    ss.addText(s.observationSynthese, { x: 3.7, y: yy, w: 6.6, h, fontFace: "Calibri", fontSize: lay.fontPt, color: D.INK, margin: 0, valign: "middle", isTextBox: true });
+    const pillY = yy + (h - 0.36) / 2;
+    ss.addShape(pptx.ShapeType.roundRect, { x: 10.45, y: pillY, w: 2.2, h: 0.36, rectRadius: 0.18, fill: { color: D.PEACH }, line: { type: "none" } });
+    ss.addText(s.nature, { x: 10.45, y: pillY, w: 2.2, h: 0.36, fontFace: "Calibri", fontSize: s.nature.length > 30 ? 7 : 8, bold: true, color: /^(Aucune cause|À qualifier)/.test(s.nature) ? D.GREY : D.ORANGE, align: "center", margin: 0, valign: "middle", isTextBox: true });
+    yy += h + 0.06;
   });
-
-  for (const r of rows) {
-    if (!r.photoUrls || r.photoUrls.length === 0) continue;
-    const s = pptx.addSlide();
-    s.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-    s.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-    s.addText(`Photos justificatives — ${r.site?.name || "?"}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 16, bold: true, color: INK });
-    if (r.commentaire) s.addText(r.commentaire, { x: 0.4, y: 0.65, w: 9.2, h: 0.35, fontSize: 10, color: SUB, italic: true });
-    const positions = [{ x: 0.4, y: 1.1 }, { x: 3.55, y: 1.1 }, { x: 6.7, y: 1.1 }, { x: 0.4, y: 3.4 }, { x: 3.55, y: 3.4 }, { x: 6.7, y: 3.4 }];
-    for (let i = 0; i < Math.min(r.photoUrls.length, 6); i++) {
-      try { s.addImage({ path: r.photoUrls[i], x: positions[i].x, y: positions[i].y, w: 3, h: 2.1, sizing: { type: "cover", w: 3, h: 2.1 } }); } catch (e) { /* ignore */ }
-    }
+  if (model.conclusion) {
+    yy += 0.08;
+    ss.addShape(pptx.ShapeType.roundRect, { x: 0.5, y: yy, w: 12.33, h: lay.conclH, rectRadius: 0.08, fill: { color: "FFFFFF" }, line: { color: D.BLUE, width: 1 } });
+    ss.addText([{ text: "Conclusion : ", options: { bold: true } }, { text: model.conclusion, options: { bold: false } }], { x: 0.72, y: yy, w: 11.9, h: lay.conclH, fontFace: "Calibri", fontSize: lay.conclFont, color: D.NAVY, margin: 0, valign: "middle", isTextBox: true });
   }
 
-  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_TousSites_${periodType}_${periodKey}.pptx` });
+  /* 11 — Recommandations */
+  if (model.recommandations.length > 0) {
+    const sr = pptx.addSlide();
+    sr.background = { color: D.NAVY };
+    sr.addShape(pptx.ShapeType.ellipse, { x: -1.6, y: 4.6, w: 5.2, h: 5.2, fill: { color: D.BLUE, transparency: 55 }, line: { type: "none" } });
+    sr.addText("Recommandations & prochaines étapes", { x: 0.6, y: 0.6, w: 11.5, h: 0.7, fontFace: "Cambria", fontSize: 32, bold: true, color: "FFFFFF", margin: 0, valign: "middle", isTextBox: true });
+    sr.addShape(pptx.ShapeType.line, { x: 0.62, y: 1.35, w: 0.8, h: 0, line: { color: D.ORANGE, width: 3 } });
+    const recos = model.recommandations.slice(0, 8), step = Math.min(1.0, 5.0 / recos.length);
+    const rFont = [13, 12, 11, 10].find((f) => recos.every((r) => estimateTextLines(r, 11.3, f) * ((f * 1.25) / 72) <= step - 0.1)) || 10;
+    recos.forEach((r, i) => {
+      const ry = 1.75 + i * step;
+      sr.addShape(pptx.ShapeType.ellipse, { x: 0.6, y: ry, w: 0.45, h: 0.45, fill: { color: D.ORANGE }, line: { type: "none" } });
+      sr.addText(String(i + 1), { x: 0.6, y: ry, w: 0.45, h: 0.45, fontFace: "Calibri", fontSize: 14, bold: true, color: "FFFFFF", align: "center", margin: 0, valign: "middle", isTextBox: true });
+      sr.addText(r, { x: 1.3, y: ry - 0.05, w: 11.3, h: step - 0.05, fontFace: "Calibri", fontSize: rFont, color: D.SOFT, margin: 0, valign: "top", isTextBox: true });
+    });
+    sr.addText("SOMIP — la technologie des fluides", { x: 0.6, y: 6.9, w: 5.0, h: 0.35, fontFace: "Calibri", fontSize: 10, italic: true, color: D.MUTED, margin: 0, isTextBox: true });
+  }
+
+  // Nom de fichier sans accent ni espace (« Août 2026 » -> « Aout_2026 ») : sûr sur tous les systèmes et dans les messageries.
+  const safeLabel = labels.short.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_");
+  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matiere_${safeLabel}.pptx` });
 }
 
 function ReportHeader({ title, period, showEditedDate = true }) {
@@ -1642,6 +1957,51 @@ function permsFor(role) {
   };
 }
 
+// Sites accessibles à un compte : tous si aucun site ne lui est attribué, sinon uniquement ceux
+// qui lui sont attribués (même règle que partout ailleurs dans l'application).
+function scopeSitesByAssignment(sites, assignedSiteIds) {
+  return assignedSiteIds && assignedSiteIds.length > 0 ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
+}
+
+// Signatures d'un inventaire officiel : DEUX seulement — SOMIP et TotalEnergies Marketing. La
+// signature "Opérateur" est retirée partout (PDF, écran de signature, compteur de l'historique) : le
+// nom de l'opérateur figure déjà en tête de chaque fiche. Les anciennes signatures opérateur déjà
+// enregistrées restent dans la base, simplement plus affichées ni imprimées.
+function inventaireSignatureSlots(inv) {
+  return [
+    { role: "somip", label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt },
+    { role: "total", label: "TotalEnergies Marketing", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt },
+  ];
+}
+
+// Un mouvement déjà enregistré est-il très probablement LE MÊME que celui qu'on s'apprête à
+// enregistrer (double appui, nouvel essai après une lenteur) ? Même site, produit, type, date et
+// quantité sont nécessaires mais PAS suffisants : deux camions de 20 000 L le même jour sont deux
+// réceptions distinctes (bons de livraison différents), comme deux relevés de compteur différents.
+// On ne prévient donc que si rien ne prouve qu'il s'agit de deux saisies distinctes.
+const DUPLICATE_RECENT_MS = 10 * 60 * 1000;
+function isLikelyDuplicateMovement(existing, payload, nowMs) {
+  if (existing.siteId !== payload.siteId) return false;
+  if ((existing.product || "gasoil") !== (payload.product || "gasoil")) return false;
+  if (existing.type !== payload.type || existing.date !== payload.date) return false;
+  if (Number(existing.quantity) !== Number(payload.quantity)) return false;
+  const norm = (v) => String(v ?? "").trim().toLowerCase();
+  // Deux bons de livraison différents = deux livraisons distinctes ; le même bon = doublon quasi certain.
+  if (norm(existing.ref) && norm(payload.ref)) return norm(existing.ref) === norm(payload.ref);
+  // Autre camion, autre compteur ou autre site lié = autre saisie.
+  if (norm(existing.camion) && norm(payload.camion) && norm(existing.camion) !== norm(payload.camion)) return false;
+  if (norm(existing.relatedSiteId) && norm(payload.relatedSiteId) && norm(existing.relatedSiteId) !== norm(payload.relatedSiteId)) return false;
+  if (norm(existing.compteur) && norm(payload.compteur) && norm(existing.compteur) !== norm(payload.compteur)) return false;
+  // Deux plages d'index différentes = deux relevés distincts.
+  const hasIdx = (m) => m.indexAvant !== undefined && m.indexApres !== undefined && !Number.isNaN(Number(m.indexAvant)) && !Number.isNaN(Number(m.indexApres));
+  if (hasIdx(existing) && hasIdx(payload)) return Number(existing.indexAvant) === Number(payload.indexAvant) && Number(existing.indexApres) === Number(payload.indexApres);
+  // Aucune preuve dans un sens ou dans l'autre : on ne prévient que si la saisie identique vient
+  // d'être faite, pas si elle date de plusieurs heures.
+  const t = existing.createdAt ? Date.parse(existing.createdAt) : NaN;
+  if (Number.isNaN(t)) return true;
+  return Math.abs(nowMs - t) <= DUPLICATE_RECENT_MS;
+}
+
 /* ------------------------------------------------------------------ */
 /* Base de données partagée (Supabase) — conversion lignes <-> objets  */
 /* ------------------------------------------------------------------ */
@@ -1662,6 +2022,8 @@ const rowToMovement = (r) => ({
   relatedSiteId: r.related_site_id || undefined,
   temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee),
   densite15: numOrUndef(r.densite15), vcf: numOrUndef(r.vcf), volumeCorrige15: numOrUndef(r.volume_corrige15),
+  temperatureSite: numOrUndef(r.temperature_site), densiteSite: numOrUndef(r.densite_site),
+  mesureUtilisee: numOrUndef(r.temperature_site) !== undefined && numOrUndef(r.densite_site) !== undefined ? "site" : undefined,
   indexAvant: numOrUndef(r.index_avant), indexApres: numOrUndef(r.index_apres),
   createdBy: r.created_by, createdAt: r.created_at,
 });
@@ -1673,6 +2035,8 @@ const movementToRow = (m) => ({
   related_site_id: m.relatedSiteId ?? null,
   temperature_c: m.temperatureC ?? null, densite_observee: m.densiteObservee ?? null,
   densite15: m.densite15 ?? null, vcf: m.vcf ?? null, volume_corrige15: m.volumeCorrige15 ?? null,
+  // Colonnes « mesure site » : envoyées seulement si renseignées (une saisie ordinaire reste identique à avant).
+  ...(m.temperatureSite !== undefined ? { temperature_site: m.temperatureSite } : {}), ...(m.densiteSite !== undefined ? { densite_site: m.densiteSite } : {}),
   index_avant: m.indexAvant ?? null, index_apres: m.indexApres ?? null,
   created_by: m.createdBy ?? null,
 });
@@ -1708,24 +2072,98 @@ function lubLabel(siteId, productId, productStocks) {
   return ps?.label || LUBRICANTS.find((l) => l.id === productId)?.label || productId;
 }
 
+// Huiles proposées pour l'inventaire d'un site : TOUTES celles du catalogue, toujours. Une huile ne
+// disparaît jamais du formulaire (ni de la fiche PDF) parce qu'une ligne de configuration manque
+// sur un site : l'oubli serait silencieux. Si une huile est vide, on saisit 0.
+function siteLubricants() {
+  return LUBRICANTS;
+}
+// Sites où la cuve Rubia contient DEUX produits (Rubia Tir7400 + Rubia Works 1000) : le formulaire
+// d'inventaire y propose de saisir le second produit. Les autres sites (ex. Okouma) n'en ont pas.
+const SHARED_RUBIA_TANK_SITES = ["prehomo"];
+const SHARED_RUBIA_DEFAULT_NAME = "Rubia Works 1000";
+// Saisie des lubrifiants d'un site : toutes les huiles ensemble, aucune oubliée. Les huiles déjà
+// enregistrées pour ce site/date/type ne sont jamais recréées (pas de doublon) : on ne demande que
+// celles qui manquent encore.
+function planLubricantEntry(blocks, existingRecords) {
+  const existingByProduit = {};
+  (existingRecords || []).forEach((r) => { existingByProduit[r.produit] = r; });
+  const pending = blocks.filter((b) => !existingByProduit[b.produit]);
+  const missing = pending.filter((b) => b.stockAmbiant === "" || b.stockAmbiant === null || b.stockAmbiant === undefined);
+  return { existingByProduit, pending, missing, complete: pending.length > 0 && missing.length === 0, allAlreadySaved: pending.length === 0 };
+}
+// Blocs d'huile tels qu'AFFICHÉS : une huile déjà enregistrée pour ce site, cette date et ce type
+// apparaît pré-remplie avec ses valeurs enregistrées (tant qu'on n'y a pas touché). Elle ne
+// disparaît donc jamais du formulaire : toutes les huiles se voient et se saisissent ensemble.
+function overlayLubBlocks(blocks, existingByProduit, productStocks) {
+  return blocks.map((b) => {
+    if (b.touched) return b;
+    const ex = existingByProduit[b.produit];
+    return ex ? { ...lubBlockFromRecord(ex, productStocks), touched: false } : b;
+  });
+}
+// Huiles déjà enregistrées dont les valeurs ont été corrigées à l'écran : elles sont MISES À JOUR sur
+// place (jamais recréées, donc pas de doublon). Réservé à qui a le droit de corriger un inventaire.
+function lubRecordsToUpdate(blocks, existingByProduit, canEdit) {
+  return canEdit ? blocks.filter((b) => b.touched && existingByProduit[b.produit]) : [];
+}
+
+// Contenu de la cuve d'un bloc d'huile tel qu'il est enregistré : la cuve de l'huile elle-même, plus
+// les AUTRES produits qu'elle contient (cuves[i].autresContenus), s'il y en a. Le stock enregistré
+// pour l'huile reste celui de l'huile seule : rien ne change pour les calculs existants.
+function lubBlockToCuve(b) {
+  const autres = [];
+  if (b.autreLitres !== undefined && b.autreLitres !== null && b.autreLitres !== "") {
+    autres.push({ nom: String(b.autreNom || "").trim() || SHARED_RUBIA_DEFAULT_NAME, stockAmbiant: Number(b.autreLitres) || 0, densite: LUBRICANTS.find((l) => l.id === b.produit)?.densite ?? null });
+  }
+  (b.autresReste || []).forEach((a) => autres.push(a));
+  const cuve = { cuve: b.cuve, hauteur: b.hauteur === "" || b.hauteur === null || b.hauteur === undefined ? null : Number(b.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(b.stockAmbiant) || 0 };
+  if (autres.length > 0) cuve.autresContenus = autres;
+  return cuve;
+}
+
+// Index du compteur d'une huile tel qu'enregistré (aucun index saisi -> liste vide).
+function lubIndexCompteurs(b) {
+  return b.indexFin === "" || b.indexFin === null || b.indexFin === undefined ? [] : [{ compteur: `Compteur ${b.label}`, indexFin: Number(b.indexFin) }];
+}
+// Données enregistrées pour une huile NOUVELLE (aucun inventaire de cette huile ce jour-là).
+function lubCreatePayload(b, form) {
+  return { siteId: form.siteId, date: form.date, type: form.type, produit: b.produit, inventoriste: form.inventoriste, operateur: form.operateur, cuves: [lubBlockToCuve(b)], depotage: [], indexCompteurs: lubIndexCompteurs(b), commentaire: form.commentaire };
+}
+// Données d'une MISE À JOUR sur place d'une huile déjà enregistrée : les valeurs corrigées, tandis que
+// Inventoriste, Opérateur et commentaire déjà enregistrés sont conservés si on ne les retape pas.
+// Aucune colonne de signature n'y figure : une mise à jour ne les touche jamais.
+function lubUpdatePayload(b, ex, form) {
+  return { id: ex.id, siteId: form.siteId, date: form.date, type: form.type, produit: b.produit, inventoriste: form.inventoriste || ex.inventoriste || "", operateur: form.operateur || ex.operateur || "", cuves: [lubBlockToCuve(b)], depotage: [], indexCompteurs: lubIndexCompteurs(b), commentaire: form.commentaire || ex.commentaire || "" };
+}
+
+// Bloc de saisie d'une huile rempli à partir d'un inventaire déjà enregistré, pour le corriger.
+// Reprend aussi les AUTRES produits de la cuve : corriger une valeur ne doit jamais les effacer.
+function lubBlockFromRecord(inv, productStocks) {
+  const c0 = (inv.cuves && inv.cuves[0]) || {};
+  const idx0 = (inv.indexCompteurs && inv.indexCompteurs[0]) || {};
+  const a0 = (c0.autresContenus || [])[0];
+  const label = lubLabel(inv.siteId, inv.produit, productStocks);
+  return {
+    produit: inv.produit, label, cuve: c0.cuve || `Cuve ${label}`, hauteur: c0.hauteur ?? "", stockAmbiant: String(inv.stockAmbiant ?? ""), indexFin: idx0.indexFin ?? "",
+    autreNom: a0?.nom || SHARED_RUBIA_DEFAULT_NAME, autreLitres: a0 ? String(a0.stockAmbiant ?? "") : "", autresReste: (c0.autresContenus || []).slice(1),
+  };
+}
+
 const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
 
-const rowToBilan = (r) => ({
-  id: r.id, siteId: r.site_id, periodType: r.period_type, periodKey: r.period_key,
-  reception15: Number(r.reception15), ventes15: Number(r.ventes15), transferts15: Number(r.transferts15), stockFin15: Number(r.stock_fin15),
-  receptionAmbiant: numOrUndef(r.reception_ambiant), ventesAmbiant: numOrUndef(r.ventes_ambiant),
-  transfertsAmbiant: numOrUndef(r.transferts_ambiant), stockFinAmbiant: numOrUndef(r.stock_fin_ambiant),
-  transfertSiteId: r.transfert_site_id || null,
-  commentaire: r.commentaire || "", photoUrls: r.photo_urls || [], createdBy: r.created_by, createdAt: r.created_at,
+
+// Textes rédigés de la présentation PowerPoint du bilan, par période (table réservée au Superviseur).
+const COLS_BILAN_PRESENTATIONS = "id, period_type, period_key, autonomies, natures, justificatifs, conclusion, recommandations, prepare_par, updated_at";
+const rowToBilanPresentation = (r) => ({
+  id: r.id, periodType: r.period_type, periodKey: r.period_key,
+  autonomies: r.autonomies || {}, natures: r.natures || {}, justificatifs: r.justificatifs || [],
+  conclusion: r.conclusion || "", recommandations: r.recommandations || [], preparePar: r.prepare_par || "", updatedAt: r.updated_at,
 });
-const bilanToRow = (b) => ({
-  site_id: b.siteId, period_type: b.periodType, period_key: b.periodKey,
-  reception15: b.reception15, ventes15: b.ventes15, transferts15: b.transferts15, stock_fin15: b.stockFin15,
-  reception_ambiant: b.receptionAmbiant ?? null, ventes_ambiant: b.ventesAmbiant ?? null,
-  transferts_ambiant: b.transfertsAmbiant ?? null, stock_fin_ambiant: b.stockFinAmbiant ?? null,
-  transfert_site_id: b.transfertSiteId || null,
-  commentaire: b.commentaire ?? null, photo_urls: b.photoUrls || [], created_by: b.createdBy ?? null,
+const bilanPresentationToRow = (p, userName) => ({
+  period_type: p.periodType, period_key: p.periodKey, autonomies: p.autonomies || {}, natures: p.natures || {}, justificatifs: p.justificatifs || [],
+  conclusion: p.conclusion || null, recommandations: p.recommandations || [], prepare_par: p.preparePar || null, updated_at: new Date().toISOString(), updated_by: userName || null,
 });
 
 const rowToInventaireOfficiel = (r) => ({
@@ -1741,6 +2179,12 @@ const inventaireOfficielToRow = (i) => ({
   cuves: i.cuves || [], depotage: i.depotage || [], index_compteurs: i.indexCompteurs || [], stock_ambiant: i.stockAmbiant || 0, stock15: i.stock15 ?? null, commentaire: i.commentaire ?? null,
   created_by: i.createdBy ?? null,
 });
+// Colonnes envoyées lors de la MODIFICATION d'un inventaire officiel : tout ce qui se saisit, mais ni
+// "created_by" (qui l'a créé ne doit jamais être effacé par une correction) ni les signatures.
+function inventaireOfficielUpdateRow(i) {
+  const { created_by, ...row } = inventaireOfficielToRow(i); // eslint-disable-line no-unused-vars
+  return row;
+}
 const rowToSiteTank = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteTankToRow = (t) => ({ site_id: t.siteId, name: t.name });
 const rowToSiteDepotageMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
@@ -1753,14 +2197,136 @@ const assignmentToRow = (a) => ({ truck_id: a.truckId, station_id: a.stationId, 
 const rowToAudit = (r) => ({ id: r.id, ts: r.ts, user: r.user_name, action: r.action, detail: r.detail });
 const rowToProfile = (r) => ({ id: r.id, name: r.full_name, role: r.role, lastSeenAt: r.last_seen_at || null, assignedSiteId: r.assigned_site_id || null, assignedSiteIds: r.assigned_site_ids || [], active: r.active !== false, isAdmin: !!r.is_admin });
 
-async function fetchTable(table, mapper, orderCol, ascending) {
-  if (!SUPABASE_CONFIGURED) return [];
-  let q = supabase.from(table).select("*");
-  if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
-  const { data, error } = await q;
-  if (error) return [];
-  return (data || []).map(mapper);
+// "columns" : liste exacte des colonnes dont ce mapper se sert réellement, pour ne jamais
+// récupérer plus de données que nécessaire. Optionnel et replié sur "*" par défaut, pour ne
+// jamais casser un appel existant qu'on aurait oublié de préciser.
+// IMPORTANT : en cas d'erreur (y compris un blocage Supabase, une coupure passagère...), ces
+// trois fonctions DOIVENT signaler l'échec (throw) plutôt que de rendre un tableau vide en
+// silence. Un tableau vide y ressemblerait à "il n'y a réellement rien ici" pour tout appelant
+// qui fusionne ce résultat dans les données déjà en mémoire (voir mergeRecentWindow et
+// mergeSiteDate plus bas) — un échec silencieux effacerait alors à tort des saisies bien réelles,
+// simplement parce que le rechargement qui aurait dû les confirmer a échoué au mauvais moment.
+//
+// IMPORTANT (2) : Supabase/PostgREST limite chaque requête à 1000 lignes par défaut — au-delà,
+// le résultat est silencieusement tronqué, sans aucune erreur. "runPaginatedQuery" boucle avec
+// "range()" jusqu'à avoir récupéré la table en entier, quelle que soit sa taille, pour que ce
+// plafond ne puisse plus jamais couper discrètement des saisies récentes.
+async function runPaginatedQuery(buildQuery) {
+  const PAGE_SIZE = 1000;
+  let allRows = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
+    if (error) throw error;
+    allRows = allRows.concat(data || []);
+    if (!data || data.length < PAGE_SIZE) break; // dernière page (partielle ou vide) atteinte
+    from += PAGE_SIZE;
+  }
+  return allRows;
 }
+async function fetchTable(table, mapper, orderCol, ascending, columns) {
+  if (!SUPABASE_CONFIGURED) return [];
+  const rows = await runPaginatedQuery(() => {
+    let q = supabase.from(table).select(columns || "*");
+    if (orderCol) q = q.order(orderCol, { ascending: !!ascending });
+    // Second critère UNIQUE obligatoire : sans lui, des lignes de même date peuvent changer de
+    // place d'une page à l'autre (PostgreSQL ne garantit pas l'ordre des égalités) et la
+    // pagination risque alors de dupliquer ou d'omettre silencieusement des lignes.
+    return q.order("id", { ascending: true });
+  });
+  return rows.map(mapper);
+}
+// Ne récupère que les lignes dont la date est >= dateFrom (inclus) — utilisé pour le rechargement
+// automatique périodique des tables qui ne font que grossir (movements, inventaires,
+// engin_entries), au lieu de retélécharger tout l'historique à chaque fois.
+async function fetchRecent(table, mapper, columns, dateFrom) {
+  if (!SUPABASE_CONFIGURED) return [];
+  const rows = await runPaginatedQuery(() =>
+    supabase.from(table).select(columns).gte("date", dateFrom).order("date", { ascending: true }).order("id", { ascending: true })
+  );
+  return rows.map(mapper);
+}
+// Recharge, directement depuis Supabase, les lignes d'UN SEUL site à UNE SEULE date — utilisé à
+// l'ouverture de Saisie journalière et à chaque changement de site/date, pour toujours voir la
+// version la plus à jour de cette saisie précise (celle d'un autre opérateur comprise), sans
+// attendre le prochain passage du rafraîchissement automatique global.
+async function fetchForSiteDate(table, mapper, columns, siteId, date, product) {
+  if (!SUPABASE_CONFIGURED || !siteId || !date) return [];
+  const rows = await runPaginatedQuery(() => {
+    let q = supabase.from(table).select(columns).eq("site_id", siteId).eq("date", date);
+    if (product) q = q.eq("product", product);
+    return q.order("id", { ascending: true });
+  });
+  return rows.map(mapper);
+}
+// Fusionne une fenêtre récente fraîchement rechargée dans les données déjà en mémoire : tout ce
+// qui est antérieur à cutoffDate reste tel quel (jamais retéléchargé), tout ce qui est à partir
+// de cutoffDate est intégralement remplacé par la version fraîche — ce qui reflète correctement
+// aussi bien les ajouts que les modifications et les suppressions récentes, sans avoir besoin
+// d'une colonne "mis à jour le" dédiée côté base de données.
+function mergeRecentWindow(prevArray, freshRecent, cutoffDate) {
+  return [...prevArray.filter((x) => x.date < cutoffDate), ...freshRecent];
+}
+// Plus récente date de CRÉATION (en ms) parmi des lignes venues du SERVEUR — jamais d'une horloge
+// locale, qui peut être décalée sur un téléphone. 0 = inconnue.
+function maxCreatedAt(rows) {
+  let mx = 0;
+  for (const r of rows) { const t = r.createdAt ? Date.parse(r.createdAt) : NaN; if (!Number.isNaN(t) && t > mx) mx = t; }
+  return mx;
+}
+// Lignes CRÉÉES depuis sinceMs, quelle que soit leur date : rattrape une saisie faite en retard
+// (ex. une journée du 01/10 saisie le 10/10) que la fenêtre de dates récentes ne verrait pas.
+async function fetchCreatedSince(table, mapper, columns, sinceMs) {
+  if (!SUPABASE_CONFIGURED || !sinceMs) return [];
+  const rows = await runPaginatedQuery(() =>
+    supabase.from(table).select(columns).gte("created_at", new Date(sinceMs).toISOString()).order("created_at", { ascending: true }).order("id", { ascending: true })
+  );
+  return rows.map(mapper);
+}
+// Remplace les lignes déjà connues (même id) et ajoute les nouvelles — ne supprime jamais rien.
+function mergeById(prevArray, freshRows) {
+  if (!freshRows.length) return prevArray;
+  const byId = new Map(freshRows.map((r) => [r.id, r]));
+  const seen = new Set();
+  const out = prevArray.map((x) => { if (byId.has(x.id)) { seen.add(x.id); return byId.get(x.id); } return x; });
+  for (const r of freshRows) if (!seen.has(r.id)) out.push(r);
+  return out;
+}
+// Même principe que mergeRecentWindow, mais ciblé sur UN SEUL site + UNE SEULE date (et un seul
+// produit si précisé) : remplace uniquement les lignes correspondantes, laisse tout le reste
+// intact — y compris les autres produits du même site à la même date (ex. un site à lubrifiants).
+function mergeSiteDate(prevArray, fresh, siteId, date, product) {
+  const matches = (x) => x.siteId === siteId && x.date === date && (!product || (x.product || "gasoil") === product);
+  return [...prevArray.filter((x) => !matches(x)), ...fresh];
+}
+// Colonnes exactes utilisées par chaque mapper "rowToX" ci-dessous (voir plus loin dans ce
+// fichier) — à tenir à jour si un mapper change. Si une colonne manque ici alors qu'un mapper
+// en a besoin, ce champ reviendrait simplement "undefined" côté application : aucune erreur
+// bruyante, donc à vérifier soigneusement à chaque modification d'un mapper.
+const COLS_SITES = "id, code, name, capacity, stock_initial, is_mobile, active, engins_enabled, engins_source_id, photo_url";
+const COLS_MOVEMENTS_BASE = "id, site_id, type, date, quantity, delta, product, ref, commentaire, destinataire, camion, destination, compteur, is_demo, related_site_id, temperature_c, densite_observee, densite15, vcf, volume_corrige15, index_avant, index_apres, created_by, created_at";
+const COLS_MOVEMENTS = COLS_MOVEMENTS_BASE + ", temperature_site, densite_site";
+// Garde de sécurité : tant que le script SQL « mesure site » n'est pas exécuté dans Supabase, on lit les mouvements sans ces deux colonnes
+// (l'application continue de fonctionner normalement au lieu d'afficher des données vides).
+let movementsColsAnciennes = false;
+async function avecColsMovements(appel) {
+  try { return await appel(movementsColsAnciennes ? COLS_MOVEMENTS_BASE : COLS_MOVEMENTS); }
+  catch (e) {
+    if (!movementsColsAnciennes && /temperature_site|densite_site/i.test(`${e?.message || ""} ${e?.details || ""}`)) { movementsColsAnciennes = true; return await appel(COLS_MOVEMENTS_BASE); }
+    throw e;
+  }
+}
+const COLS_INVENTAIRES = "id, site_id, date, stock_physique, commentaire, product, basis_ecart, stock_theorique_ambiant, stock_theorique15, stock_theorique, stock_physique_used, ecart, ecart_permille, nature, taux_freinte, objectif_utilise, conformite, adjustment_id, temperature_c, densite_observee, densite15, vcf, stock_physique15, photo_urls, created_by, created_at";
+const COLS_PROFILES = "id, full_name, role, last_seen_at, assigned_site_id, assigned_site_ids, active, is_admin";
+const COLS_AUDIT = "id, ts, user_name, action, detail";
+const COLS_PRODUCT_STOCKS = "id, site_id, product, capacity, stock_initial, label";
+const COLS_TRUCK_ASSIGNMENTS = "id, truck_id, station_id, start_date, end_date";
+const COLS_SITE_METERS = "id, site_id, name";
+const COLS_INVENTAIRES_OFFICIELS = "id, site_id, date, type, produit, inventoriste, operateur, cuves, depotage, index_compteurs, stock_ambiant, stock15, commentaire, signature_somip_url, signature_somip_by, signature_somip_at, signature_operateur_url, signature_operateur_by, signature_operateur_at, signature_total_url, signature_total_by, signature_total_at, created_by, created_at";
+const COLS_SITE_TANKS = "id, site_id, name";
+const COLS_SITE_DEPOTAGE_METERS = "id, site_id, name";
+const COLS_SITE_ENGINS = "id, site_id, name, code, type";
+const COLS_ENGIN_ENTRIES = "id, site_id, engin_id, date, quantity, commentaire, created_by, created_at";
 
 
 
@@ -2131,6 +2697,8 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [isOfflineStart, setIsOfflineStart] = useState(false);
+  const [offlineReason, setOfflineReason] = useState("");        // cause du dernier passage en mode cache (affichée dans le badge)
+  const [showOfflineDetail, setShowOfflineDetail] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -2141,7 +2709,9 @@ export default function App() {
   const [inventaires, setInventaires] = useState([]);
   const [productStocks, setProductStocks] = useState([]);
   const [siteMeters, setSiteMeters] = useState([]);
-  const [bilans, setBilans] = useState([]);
+  // Textes de la présentation du bilan : chargés à la demande (Superviseur, page Bilans matières), table à part.
+  const [bilanPresentations, setBilanPresentations] = useState([]);
+  const [bilanPresStatus, setBilanPresStatus] = useState("idle"); // idle | loading | ready | unavailable | error
   const [inventairesOfficiels, setInventairesOfficiels] = useState([]);
   const [siteTanks, setSiteTanks] = useState([]);
   const [siteDepotageMeters, setSiteDepotageMeters] = useState([]);
@@ -2175,19 +2745,22 @@ export default function App() {
   useEffect(() => {
     if (!SUPABASE_CONFIGURED) { setAuthLoading(false); return; }
     const fallbackOrNull = () => {
-      // Pas de session valide (jeton expiré, ou jamais rafraîchi) : si on est hors-ligne et
-      // qu'une identité a déjà été connectée avec succès sur cet appareil, on continue avec
-      // elle plutôt que d'exiger une reconnexion impossible sans réseau.
-      if (!navigator.onLine) {
-        const last = readLastUserPointer();
-        if (last?.userId) return { user: { id: last.userId, email: last.email }, access_token: last.accessToken || "", isOfflineFallback: true };
-      }
+      // Pas de session valide (jeton expiré sans pouvoir être renouvelé) — pour n'importe quelle
+      // raison : vraie coupure réseau, OU Supabase qui refuse temporairement de répondre (comme
+      // lors d'un blocage de quota, HTTP 402). Dans les deux cas, une reconnexion par mot de
+      // passe est de toute façon impossible tant que Supabase ne répond pas. Si une identité a
+      // déjà été connectée avec succès sur cet appareil et ne s'est pas explicitement déconnectée
+      // depuis (la déconnexion efface ce pointeur, voir signOut), on continue avec elle plutôt
+      // que de bloquer sur un écran de connexion qui ne peut pas aboutir.
+      const last = readLastUserPointer();
+      if (last?.userId) return { user: { id: last.userId, email: last.email }, access_token: last.accessToken || "", isOfflineFallback: true };
       return null;
     };
     // Hors-ligne dès le départ (mode avion...) : inutile d'attendre getSession(), qui peut
     // rester bloquée longtemps à tenter de joindre le serveur pour rafraîchir le jeton. On va
     // directement au secours local.
     if (!navigator.onLine) {
+      setOfflineReason("pas de réseau au démarrage (le navigateur se déclare hors ligne)");
       setSession(fallbackOrNull());
       setAuthLoading(false);
     } else {
@@ -2198,8 +2771,10 @@ export default function App() {
           writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
         } else if (data.session === undefined) {
           // Délai dépassé (ni succès ni échec net) : on retente le secours local au cas où.
+          setOfflineReason("ouverture de session sans réponse après 6 s (la base est lente ou injoignable)");
           setSession(fallbackOrNull());
         } else {
+          setOfflineReason("aucune session valide : jeton expiré ou refusé par le serveur");
           setSession(fallbackOrNull());
         }
         setAuthLoading(false);
@@ -2210,11 +2785,36 @@ export default function App() {
         setSession(s);
         writeLastUserPointer({ userId: s.user.id, email: s.user.email, accessToken: s.access_token });
       } else {
+        setOfflineReason(`session fermée par le serveur (événement « ${_event} ») : jeton invalide ou refusé`);
         setSession(fallbackOrNull());
       }
     });
     return () => listener.subscription.unsubscribe();
   }, []);
+
+  // Récupération automatique : si on est passé en « session de secours » (jeton non renouvelé) alors que le
+  // réseau est là, on réessaie d'obtenir une vraie session toutes les 20 s et au retour sur la fenêtre — sans
+  // attendre un rechargement de la page. Dès qu'elle revient, l'appli recharge ses données et le badge disparaît.
+  useEffect(() => {
+    if (!SUPABASE_CONFIGURED || !session?.isOfflineFallback) return undefined;
+    let arret = false;
+    const reessayer = async () => {
+      if (arret || !navigator.onLine) return;
+      try {
+        const { data } = await supabase.auth.getSession();
+        if (!arret && data?.session) {
+          writeLastUserPointer({ userId: data.session.user.id, email: data.session.user.email, accessToken: data.session.access_token });
+          setOfflineReason("");
+          setSession(data.session);
+        }
+      } catch (e) { /* on réessaiera au prochain passage */ }
+    };
+    const id = setInterval(reessayer, 20000);
+    const auRetour = () => { if (document.visibilityState === "visible") reessayer(); };
+    window.addEventListener("focus", reessayer);
+    document.addEventListener("visibilitychange", auRetour);
+    return () => { arret = true; clearInterval(id); window.removeEventListener("focus", reessayer); document.removeEventListener("visibilitychange", auRetour); };
+  }, [session]);
 
   useEffect(() => {
     if (!session) { setProfile(null); return; }
@@ -2226,6 +2826,7 @@ export default function App() {
         const cached = readAppCache(session.user.id);
         if (cached?.profile) {
           setProfile(cached.profile);
+          setOfflineReason((r) => r || "session de secours : le jeton de connexion n'a pas pu être renouvelé");
           setIsOfflineStart(true);
           return;
         }
@@ -2262,6 +2863,7 @@ export default function App() {
           const cached = readAppCache(session.user.id);
           if (cached?.profile) {
             setProfile(cached.profile);
+            setOfflineReason(`chargement du profil : ${explainOfflineCause(e)}`);
             setIsOfflineStart(true);
             return;
           }
@@ -2276,12 +2878,26 @@ export default function App() {
   const currentUserName = profile?.name || session?.user?.email || "Utilisateur";
   const currentRole = profile?.role || "lecture";
   const perms = permsFor(currentRole);
+  useEffect(() => {
+    if (view !== "doc_bilan_sap" || !perms.canManage || bilanPresStatus !== "idle") return;
+    setBilanPresStatus("loading");
+    fetchTable("bilan_presentations", rowToBilanPresentation, null, false, COLS_BILAN_PRESENTATIONS)
+      .then((rows) => { setBilanPresentations(rows); setBilanPresStatus("ready"); })
+      // « unavailable » = table pas encore créée (script SQL non exécuté) ; « error » = chargement impossible (connexion…).
+      // Dans les deux cas la présentation reste générable, mais l'enregistrement est interdit : un panneau resté vide par
+      // erreur pourrait sinon écraser des textes déjà enregistrés.
+      .catch((e) => setBilanPresStatus(/bilan_presentations|schema cache|does not exist|42P01|PGRST205/i.test(`${e?.message || ""} ${e?.code || ""}`) ? "unavailable" : "error"));
+  }, [view, perms.canManage, bilanPresStatus]);
   const isAdmin = currentRole === "superviseur" && !!profile?.isAdmin;
   // Un opérateur ou chauffeur avec un/des site(s) attribué(s) est limité à une vue simplifiée,
   // centrée sur son propre site — le Superviseur et les comptes sans site attribué gardent
   // l'accès complet, sans changement.
   const isSiteRestricted = (currentRole === "operateur" || currentRole === "chauffeur") && (profile?.assignedSiteIds || []).length > 0;
-  const signOut = () => supabase.auth.signOut();
+  // Efface aussi la "dernière identité connue" de cet appareil : une déconnexion volontaire doit
+  // toujours ramener à l'écran de connexion, jamais être contournée plus tard par le secours
+  // hors-ligne/blocage (voir fallbackOrNull plus haut) — sinon quelqu'un qui se déconnecte
+  // explicitement (ex. appareil partagé) pourrait se retrouver reconnecté automatiquement.
+  const signOut = () => { clearLastUserPointer(); return supabase.auth.signOut(); };
 
   /* ---- chargement initial des données (une fois connecté) ---- */
   useEffect(() => {
@@ -2296,12 +2912,12 @@ export default function App() {
           setSites(cached.sitesData);
           setMovements(cached.movementsData || []);
           setInventaires(cached.inventairesData || []);
+          serverWatermarkRef.current = { movements: maxCreatedAt(cached.movementsData || []), inventaires: maxCreatedAt(cached.inventairesData || []), margin: 86400000 };
           setProfiles(cached.profilesData || []);
           setAudit(cached.auditData || []);
           setProductStocks(cached.productStocksData || []);
           setTruckAssignments(cached.assignmentsData || []);
           setSiteMeters(cached.siteMetersData || []);
-          setBilans(cached.bilansData || []);
           setInventairesOfficiels(cached.invOffData || []);
           setSiteTanks(cached.siteTanksData || []);
           setSiteDepotageMeters(cached.siteDepotageMetersData || []);
@@ -2317,43 +2933,61 @@ export default function App() {
         }
         return;
       }
+      const tLoad0 = Date.now();
       try {
         const timeout = (ms) => new Promise((_, reject) => setTimeout(() => reject(new Error("Délai dépassé (le serveur ne répond pas)")), ms));
+        // Chaque table est chargée indépendamment : si l'une d'elles échoue (ex. une colonne
+        // manquante après une mise à jour incomplète de la base), elle revient simplement vide,
+        // SANS empêcher les 13 autres de se charger normalement. Avant cette protection, une
+        // seule table en échec bloquait l'application entière pour tout le monde — exactement ce
+        // qui s'est produit avec la colonne "reception_ambiant" manquante sur bilan_matieres.
+        const durees = {};
+        const loadTableSafe = async (promise, label) => {
+          const t0 = Date.now();
+          try { const r = await promise; durees[label] = Date.now() - t0; return r; }
+          catch (e) {
+            durees[label] = Date.now() - t0;
+            // Une coupure, un délai ou un quota dépassé (402) n'est PAS un problème de structure (colonne manquante) : on ne le
+            // masque pas. Sinon l'appli démarrerait avec des tables VIDES et écraserait le cache local avec ce vide. On laisse
+            // remonter l'erreur : le chargement bascule alors proprement sur les données en cache, avec la cause dans le badge.
+            if (isNetworkError(e)) throw e;
+            console.error(`Échec du chargement de "${label}" — cette table reviendra vide :`, e); return [];
+          }
+        };
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
-            fetchTable("sites", rowToSite),
-            fetchTable("movements", rowToMovement, "date"),
-            fetchTable("inventaires", rowToInventaire, "date"),
-            fetchTable("profiles", rowToProfile),
-            fetchTable("audit", rowToAudit, "ts", false),
-            fetchTable("product_stocks", rowToProductStock),
-            fetchTable("truck_assignments", rowToAssignment, "start_date"),
-            fetchTable("site_meters", rowToSiteMeter, "name"),
-            fetchTable("bilan_matieres", rowToBilan, "period_key"),
-            fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
-            fetchTable("site_tanks", rowToSiteTank, "name"),
-            fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
-            fetchTable("site_engins", rowToSiteEngin, "name"),
-            fetchTable("engin_entries", rowToEnginEntry, "date"),
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
+            loadTableSafe(fetchTable("sites", rowToSite, null, false, COLS_SITES), "sites"),
+            loadTableSafe(avecColsMovements((cols) => fetchTable("movements", rowToMovement, "date", true, cols)), "movements"),
+            loadTableSafe(fetchTable("inventaires", rowToInventaire, "date", true, COLS_INVENTAIRES), "inventaires"),
+            loadTableSafe(fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES), "profiles"),
+            loadTableSafe(fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT), "audit"),
+            loadTableSafe(fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS), "product_stocks"),
+            loadTableSafe(fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS), "truck_assignments"),
+            loadTableSafe(fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS), "site_meters"),
+                loadTableSafe(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), "inventaires_officiels"),
+            loadTableSafe(fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS), "site_tanks"),
+            loadTableSafe(fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS), "site_depotage_meters"),
+            loadTableSafe(fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS), "site_engins"),
+            loadTableSafe(fetchTable("engin_entries", rowToEnginEntry, "date", true, COLS_ENGIN_ENTRIES), "engin_entries"),
           ]);
           let settingsRow = null;
           try {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
         setSites(result.sitesData);
         setMovements(result.movementsData);
         setInventaires(result.inventairesData);
+        serverWatermarkRef.current = { movements: maxCreatedAt(result.movementsData), inventaires: maxCreatedAt(result.inventairesData), margin: 600000 };
         setProfiles(result.profilesData);
         setAudit(result.auditData);
         setProductStocks(result.productStocksData);
         setTruckAssignments(result.assignmentsData);
         setSiteMeters(result.siteMetersData);
-        setBilans(result.bilansData);
         setInventairesOfficiels(result.invOffData);
         setSiteTanks(result.siteTanksData);
         setSiteDepotageMeters(result.siteDepotageMetersData);
@@ -2364,6 +2998,14 @@ export default function App() {
         setLoadError(null);
         setLoading(false);
         setIsOfflineStart(false);
+        setOfflineReason("");
+        // Mesure du chargement complet (diagnostic : affichée si le badge « Hors-connexion » apparaît plus tard)
+        try {
+          const plus = Object.entries(durees).sort((a, b) => b[1] - a[1])[0];
+          const diag = { at: new Date().toISOString(), totalMs: Date.now() - tLoad0, plusLent: plus ? plus[0] : null, plusLentMs: plus ? plus[1] : 0 };
+          localStorage.setItem("somip_startup_diag", JSON.stringify(diag));
+          console.info(`[SOMIP] chargement complet en ${(diag.totalMs / 1000).toFixed(1)} s (le plus lent : ${diag.plusLent} ${diag.plusLentMs} ms)`, durees);
+        } catch (e) { /* diagnostic facultatif */ }
         // Snapshot complet en cache local : permet de rouvrir l'appli et saisir même sans
         // AUCUN réseau au démarrage (pas seulement une coupure en cours de session).
         const cached = readAppCache(session.user.id) || {};
@@ -2373,15 +3015,16 @@ export default function App() {
         if (isNetworkError(e)) {
           const cached = readAppCache(session.user.id);
           if (cached && cached.sitesData) {
+            setOfflineReason(`chargement des données : ${explainOfflineCause(e)} (au bout de ${((Date.now() - tLoad0) / 1000).toFixed(1)} s)`);
             setSites(cached.sitesData);
             setMovements(cached.movementsData || []);
             setInventaires(cached.inventairesData || []);
+            serverWatermarkRef.current = { movements: maxCreatedAt(cached.movementsData || []), inventaires: maxCreatedAt(cached.inventairesData || []), margin: 86400000 };
             setProfiles(cached.profilesData || []);
             setAudit(cached.auditData || []);
             setProductStocks(cached.productStocksData || []);
             setTruckAssignments(cached.assignmentsData || []);
             setSiteMeters(cached.siteMetersData || []);
-            setBilans(cached.bilansData || []);
             setInventairesOfficiels(cached.invOffData || []);
             setSiteTanks(cached.siteTanksData || []);
             setSiteDepotageMeters(cached.siteDepotageMetersData || []);
@@ -2408,24 +3051,56 @@ export default function App() {
      fréquemment, le reste (sites, comptes, réglages...) beaucoup plus rarement, puisque ça
      bouge très peu en cours de journée. */
   const heartbeatRef = useRef(0);
+  // Heure du dernier rechargement réussi (rapide / lent). Sert à ne recharger au retour dans
+  // l'application que si les données sont réellement périmées, au lieu de tout retélécharger à
+  // chaque déverrouillage de téléphone ou changement d'onglet.
+  const syncStampsRef = useRef({ fast: 0, slow: 0 });
+  // Plus récente création connue côté serveur (ms), par table — point de départ du filet qui
+  // rattrape les saisies tardives. "margin" : recul de sécurité (10 min ; 24 h si le point de
+  // départ vient du cache de l'appareil plutôt que d'un chargement frais).
+  const serverWatermarkRef = useRef({ movements: 0, inventaires: 0, margin: 600000 });
   useEffect(() => {
     if (loading || !session || !profile) return;
+    // Les données viennent d'être chargées en entier : c'est le point de départ de la "fraîcheur".
+    if (!syncStampsRef.current.fast) syncStampsRef.current = { fast: Date.now(), slow: Date.now() };
 
     const fastTick = async () => {
       if (!navigator.onLine) return;
+      // Onglet en arrière-plan ou téléphone verrouillé : aucune utilité de recharger quoi que ce
+      // soit, personne ne regarde l'écran. Le minuteur continue de "sonner" toutes les 5 minutes,
+      // sans coût réel, mais ne déclenche plus aucun rechargement tant que ça reste invisible.
+      if (document.visibilityState !== "visible") return;
       try {
         await flushOfflineQueue();
-        const [m, i, ee] = await Promise.all([
-          fetchTable("movements", rowToMovement, "date"),
-          fetchTable("inventaires", rowToInventaire, "date"),
-          fetchTable("engin_entries", rowToEnginEntry, "date"),
+        // Seuls les 7 derniers jours sont retéléchargés et remplacés ici (ajouts, corrections et
+        // suppressions récents) — l'historique plus ancien, chargé une fois à la connexion, reste
+        // en mémoire tel quel. En plus, un filet récupère les lignes CRÉÉES depuis le dernier
+        // rechargement quelle que soit leur date : une journée saisie en retard par un collègue
+        // apparaît donc aussi, sans retélécharger 30 jours d'historique à chaque fois.
+        const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const wm = serverWatermarkRef.current;
+        const [mRecent, iRecent, eeRecent, mNew, iNew] = await Promise.all([
+          avecColsMovements((cols) => fetchRecent("movements", rowToMovement, cols, recentCutoff)),
+          fetchRecent("inventaires", rowToInventaire, COLS_INVENTAIRES, recentCutoff),
+          fetchRecent("engin_entries", rowToEnginEntry, COLS_ENGIN_ENTRIES, recentCutoff),
+          wm.movements ? avecColsMovements((cols) => fetchCreatedSince("movements", rowToMovement, cols, wm.movements - wm.margin)) : [],
+          wm.inventaires ? fetchCreatedSince("inventaires", rowToInventaire, COLS_INVENTAIRES, wm.inventaires - wm.margin) : [],
         ]);
-        setMovements(m); setInventaires(i); setEnginEntries(ee);
+        let mergedMovements, mergedInventaires, mergedEnginEntries;
+        setMovements((prev) => (mergedMovements = mergeById(mergeRecentWindow(prev, mRecent, recentCutoff), mNew)));
+        setInventaires((prev) => (mergedInventaires = mergeById(mergeRecentWindow(prev, iRecent, recentCutoff), iNew)));
+        serverWatermarkRef.current = {
+          movements: Math.max(wm.movements, maxCreatedAt(mRecent), maxCreatedAt(mNew)),
+          inventaires: Math.max(wm.inventaires, maxCreatedAt(iRecent), maxCreatedAt(iNew)),
+          margin: 600000,
+        };
+        setEnginEntries((prev) => (mergedEnginEntries = mergeRecentWindow(prev, eeRecent, recentCutoff)));
+        syncStampsRef.current.fast = Date.now();
         setLastSync(new Date());
         setIsOfflineStart(false);
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
-          writeAppCache(session.user.id, { ...cached, movementsData: m, inventairesData: i, enginEntriesData: ee, cachedAt: new Date().toISOString() });
+          writeAppCache(session.user.id, { ...cached, movementsData: mergedMovements, inventairesData: mergedInventaires, enginEntriesData: mergedEnginEntries, cachedAt: new Date().toISOString() });
         }
         // Présence en ligne : met à jour la dernière activité connue, au plus toutes les 30s.
         const now = Date.now();
@@ -2441,29 +3116,53 @@ export default function App() {
 
     const slowTick = async () => {
       if (!navigator.onLine) return;
+      if (document.visibilityState !== "visible") return;
       try {
-        const [s, p, a, ps, ta, sm, bl, io, st, sdm, se2] = await Promise.all([
-          fetchTable("sites", rowToSite),
-          fetchTable("profiles", rowToProfile),
-          fetchTable("audit", rowToAudit, "ts", false),
-          fetchTable("product_stocks", rowToProductStock),
-          fetchTable("truck_assignments", rowToAssignment, "start_date"),
-          fetchTable("site_meters", rowToSiteMeter, "name"),
-          fetchTable("bilan_matieres", rowToBilan, "period_key"),
-          fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date"),
-          fetchTable("site_tanks", rowToSiteTank, "name"),
-          fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name"),
-          fetchTable("site_engins", rowToSiteEngin, "name"),
+        // "audit" (l'Historique) n'est retiré de cette boucle : c'est un journal qui ne fait que
+        // grossir, consulté par le Superviseur seul, rarement — pas besoin de le recharger en
+        // entier toutes les 2 minutes pour tout le monde. Il est rechargé séparément, seulement
+        // à l'ouverture de la page Historique (voir plus bas, à l'affichage de la page).
+        // Chaque table est indépendante : si l'une échoue, on NE L'ÉCRASE PAS avec un tableau
+        // vide (contrairement à "remplacer en entier" comme avant) — on garde simplement ce qui
+        // était déjà en mémoire pour cette table précise, et les autres continuent de se mettre à
+        // jour normalement. Un problème isolé sur une seule table ne doit plus jamais effacer ses
+        // propres données ni empêcher le reste de l'application de rester à jour.
+        // "captured" retient la valeur fraîche de chaque table qui a réussi, pour l'écriture du
+        // cache juste en dessous — une table en échec garde sa précédente valeur en cache (via
+        // "cached.xxxData ?? ..." plus bas), au lieu d'être écrasée par du vide.
+        const captured = {};
+        const tryUpdate = async (promise, setter, label) => {
+          try { const v = await promise; setter(v); captured[label] = v; }
+          catch (e) { console.error(`Échec du rafraîchissement de "${label}" — données existantes conservées :`, e); }
+        };
+        await Promise.all([
+          tryUpdate(fetchTable("sites", rowToSite, null, false, COLS_SITES), setSites, "sites"),
+          tryUpdate(fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES), setProfiles, "profiles"),
+          tryUpdate(fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS), setProductStocks, "productStocks"),
+          tryUpdate(fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS), setTruckAssignments, "assignments"),
+          tryUpdate(fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS), setSiteMeters, "siteMeters"),
+          tryUpdate(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), setInventairesOfficiels, "invOff"),
+          tryUpdate(fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS), setSiteTanks, "siteTanks"),
+          tryUpdate(fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS), setSiteDepotageMeters, "siteDepotageMeters"),
+          tryUpdate(fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS), setSiteEngins, "siteEngins"),
         ]);
-        setSites(s); setProfiles(p); setAudit(a); setProductStocks(ps); setTruckAssignments(ta); setSiteMeters(sm); setBilans(bl); setInventairesOfficiels(io); setSiteTanks(st); setSiteDepotageMeters(sdm); setSiteEngins(se2);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
+        if (Object.keys(captured).length === 9) syncStampsRef.current.slow = Date.now(); // 9 tables, toutes rechargées
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
           writeAppCache(session.user.id, {
-            ...cached, sitesData: s, profilesData: p, auditData: a, productStocksData: ps,
-            assignmentsData: ta, siteMetersData: sm, bilansData: bl, invOffData: io,
-            siteTanksData: st, siteDepotageMetersData: sdm, siteEnginsData: se2, settingsRow: se, cachedAt: new Date().toISOString(),
+            ...cached,
+            sitesData: captured.sites ?? cached.sitesData,
+            profilesData: captured.profiles ?? cached.profilesData,
+            productStocksData: captured.productStocks ?? cached.productStocksData,
+            assignmentsData: captured.assignments ?? cached.assignmentsData,
+            siteMetersData: captured.siteMeters ?? cached.siteMetersData,
+            invOffData: captured.invOff ?? cached.invOffData,
+            siteTanksData: captured.siteTanks ?? cached.siteTanksData,
+            siteDepotageMetersData: captured.siteDepotageMeters ?? cached.siteDepotageMetersData,
+            siteEnginsData: captured.siteEngins ?? cached.siteEnginsData,
+            settingsRow: se, cachedAt: new Date().toISOString(),
           });
         }
       } catch (e) {
@@ -2471,10 +3170,48 @@ export default function App() {
       }
     };
 
-    const fastInterval = setInterval(fastTick, 25000);
-    const slowInterval = setInterval(slowTick, 120000);
-    return () => { clearInterval(fastInterval); clearInterval(slowInterval); };
+    // Fréquences nettement allongées (25s -> 5 min, 2 min -> 15 min) : ni la saisie ni la
+    // consultation n'ont besoin d'une mise à jour à la seconde près pour un suivi de stock de
+    // carburant — ce rythme reste largement suffisant pour que les saisies d'un collègue
+    // apparaissent chez les autres en quelques minutes, tout en réduisant très fortement le volume
+    // de données rechargées chaque jour (objectif : rester sous le quota gratuit de Supabase).
+    // Les minuteurs ne rechargent plus si un rechargement vient d'avoir lieu entre-temps (par
+    // exemple au retour dans l'application) : évite deux rechargements à quelques secondes
+    // d'écart. Marge d'une minute pour ne jamais "rater" le passage normal.
+    const fastInterval = setInterval(() => { if (Date.now() - syncStampsRef.current.fast > 240000) fastTick(); }, 300000);
+    const slowInterval = setInterval(() => { if (Date.now() - syncStampsRef.current.slow > 840000) slowTick(); }, 900000);
+
+    // Au retour (onglet qui redevient visible, téléphone déverrouillé) : on recharge UNE fois, mais
+    // seulement ce qui est réellement périmé — les données courantes si elles ont plus de 2
+    // minutes, les données de configuration (sites, comptes, affectations...) si elles ont plus
+    // de 14 minutes. Sans cette règle, chaque déverrouillage retéléchargeait tout, même après
+    // seulement quelques secondes d'absence.
+    let lastVisibleRefresh = 0;
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      // Petite protection : si l'onglet redevient visible plusieurs fois en quelques secondes
+      // (changement rapide d'application, par exemple), on ne redéclenche pas à chaque fois.
+      if (now - lastVisibleRefresh < 10000) return;
+      lastVisibleRefresh = now;
+      if (now - syncStampsRef.current.fast > 120000) fastTick();
+      if (now - syncStampsRef.current.slow > 840000) slowTick();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearInterval(fastInterval); clearInterval(slowInterval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, [loading, session, profile]);
+
+  // "audit" (Historique) n'est plus tenu à jour en continu (voir slowTick ci-dessus) — on le
+  // recharge seulement au moment où le Superviseur ouvre réellement cette page.
+  useEffect(() => {
+    if (view === "historique" && perms.canManage) {
+      fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT).then(setAudit).catch(() => {});
+    }
+  }, [view]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Vide la file d'attente hors-connexion vers Supabase, dès qu'une tentative semble possible.
   // Ce qui échoue encore (toujours hors-ligne) reste en attente pour la prochaine tentative.
@@ -2484,26 +3221,43 @@ export default function App() {
     const q = readOfflineQueue();
     if (q.length === 0) return;
     flushingRef.current = true;
+    // Après une coupure longue (plusieurs heures sur le terrain), le jeton de connexion a souvent
+    // expiré (~1h de durée de vie) — sans ce renouvellement explicite, chaque tentative d'envoi
+    // échoue à cause du jeton périmé, pas du réseau, et la saisie reste bloquée en attente
+    // indéfiniment puisque l'erreur est traitée à tort comme "toujours hors ligne". On tente donc
+    // de rafraîchir la session AVANT d'essayer d'envoyer quoi que ce soit.
+    try { await supabase.auth.refreshSession(); } catch (e) { /* session déjà valide, ou réseau encore indisponible : on tente quand même l'envoi ci-dessous */ }
     const remaining = [];
     let anySucceeded = false;
+    let stuckCount = 0;
+    const STUCK_THRESHOLD = 5; // au-delà, ce n'est plus juste "toujours hors ligne" — à signaler clairement
     for (const item of q) {
       try {
         const { error } = await supabase.from(item.table).insert(item.row);
         if (error) throw error;
         anySucceeded = true;
       } catch (e) {
-        remaining.push(item);
+        const attempts = (item.attempts || 0) + 1;
+        remaining.push({ ...item, attempts, lastError: String(e?.message || e || "") });
+        if (attempts >= STUCK_THRESHOLD) stuckCount++;
       }
     }
     writeOfflineQueue(remaining);
     setOfflineQueueCount(remaining.length);
     flushingRef.current = false;
     if (anySucceeded) {
-      // Au moins une entrée a été synchronisée : les remplace localement par les vraies
-      // données du serveur (retire les entrées optimistes temporaires du même coup).
-      const [m, i] = await Promise.all([fetchTable("movements", rowToMovement, "date"), fetchTable("inventaires", rowToInventaire, "date")]);
-      setMovements(m); setInventaires(i);
+      // Au moins une entrée a été synchronisée. On ne recharge plus movements/inventaires en
+      // entier ici : les valeurs affichées localement (saisies optimistes) sont déjà correctes
+      // pour tous les calculs — seul leur identifiant interne diffère temporairement de celui du
+      // serveur, sans aucune conséquence visible. Le prochain cycle automatique (fastTick) les
+      // mettra à jour avec les vraies données — inutile de recharger deux fois la même chose.
       flash(remaining.length === 0 ? "Toutes les saisies hors-connexion ont été synchronisées." : `${q.length - remaining.length} saisie(s) synchronisée(s), ${remaining.length} en attente.`);
+    }
+    // Une saisie qui échoue encore après plusieurs tentatives malgré une connexion apparemment
+    // revenue n'est probablement plus un simple problème de réseau — on le signale clairement
+    // plutôt que de continuer à réessayer indéfiniment en silence, invisible pour l'opérateur.
+    if (stuckCount > 0 && navigator.onLine) {
+      flash(`${stuckCount} saisie(s) hors-connexion n'arrivent pas à se synchroniser malgré la connexion revenue — contacte un Superviseur si ça persiste.`, "error");
     }
   };
   useEffect(() => {
@@ -2593,28 +3347,18 @@ export default function App() {
     flash("Compteur supprimé.");
   });
 
-  /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
-  const saveBilan = ({ siteId, periodType, periodKey, reception15, ventes15, transferts15, transfertSiteId, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
-    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${siteId}/${periodType}`) : [];
-    const photoUrls = [...existingPhotoUrls, ...newUrls];
-    const row = bilanToRow({ siteId, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, transfertSiteId: transfertSiteId || null, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
-    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "site_id,period_type,period_key" }).select().maybeSingle();
+  // Enregistre (ou met à jour) les textes de la présentation d'une période. Renvoie true/false (withSync).
+  const saveBilanPresentation = ({ periodType, periodKey, patch }) => withSync(async () => {
+    const existing = bilanPresentations.find((p) => p.periodType === periodType && p.periodKey === periodKey);
+    const merged = { autonomies: {}, natures: {}, justificatifs: [], conclusion: "", recommandations: [], preparePar: "", ...(existing || {}), ...patch, periodType, periodKey };
+    const { data, error } = await supabase.from("bilan_presentations").upsert(bilanPresentationToRow(merged, currentUserName), { onConflict: "period_type,period_key" }).select().maybeSingle();
     if (error) throw error;
-    if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
-    const saved = rowToBilan(data);
-    setBilans((prev) => {
-      const exists = prev.some((b) => b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey);
-      return exists ? prev.map((b) => (b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
-    });
-    appendAudit("Bilan Matières", `${sites.find((s) => s.id === siteId)?.name || siteId} — ${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
-    flash("Bilan Matières enregistré.");
-  });
-  const deleteBilan = (bilan) => withSync(async () => {
-    const { data, error } = await supabase.from("bilan_matieres").delete().eq("id", bilan.id).select();
-    if (error) throw error;
-    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données.");
-    setBilans((prev) => prev.filter((b) => b.id !== bilan.id));
-    flash("Bilan supprimé.");
+    if (!data) throw new Error("Les textes de la présentation n'ont pas pu être confirmés par le serveur — réessaie.");
+    const saved = rowToBilanPresentation(data);
+    setBilanPresentations((prev) => (prev.some((p) => p.periodType === periodType && p.periodKey === periodKey) ? prev.map((p) => (p.periodType === periodType && p.periodKey === periodKey ? saved : p)) : [...prev, saved]));
+    setBilanPresStatus("ready");
+    appendAudit("Présentation du bilan matière", `${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`);
+    flash("Textes de la présentation enregistrés.");
   });
 
   /* ---- mutations : Inventaires officiels (inopinés/mensuels), cuve par cuve ---- */
@@ -2658,7 +3402,7 @@ export default function App() {
     });
     const stockAmbiant = cuvesComputed.reduce((a, c) => a + c.stockAmbiant, 0);
     const stock15 = cuvesComputed.every((c) => c.volume15 !== null) ? cuvesComputed.reduce((a, c) => a + c.volume15, 0) : undefined;
-    const row = inventaireOfficielToRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, depotage: depotage || [], indexCompteurs: indexCompteurs || [], stockAmbiant, stock15, commentaire });
+    const row = inventaireOfficielUpdateRow({ siteId, date, type, produit, inventoriste, operateur, cuves: cuvesComputed, depotage: depotage || [], indexCompteurs: indexCompteurs || [], stockAmbiant, stock15, commentaire });
     const { data, error } = await supabase.from("inventaires_officiels").update(row).eq("id", id).select().maybeSingle();
     if (error) throw error;
     if (!data) throw new Error("La modification n'a pas pu être confirmée par le serveur — réessaie.");
@@ -2776,7 +3520,23 @@ export default function App() {
   });
 
   /* ---- mutations : mouvements ---- */
-  const addMovement = (payload) => withSync(async () => {
+  // Avertit (sans jamais bloquer) avant d'enregistrer un mouvement qui ressemble fortement à un
+  // autre déjà présent pour le même site, la même date, le même produit et le même type, avec une
+  // quantité identique — le signe classique d'une double saisie (ex. un opérateur hors connexion
+  // et un Superviseur qui ressaisit la même chose depuis son PC sans le savoir). Une vraie saisie
+  // distincte mais de quantité différente n'est jamais concernée.
+  const addMovement = (payload) => {
+    const nowMs = Date.now();
+    const isDuplicate = movements.some((m) => isLikelyDuplicateMovement(m, payload, nowMs));
+    if (isDuplicate) {
+      const label = TYPE_META[payload.type]?.label || payload.type;
+      const siteName = sites.find((s) => s.id === payload.siteId)?.name || payload.siteId;
+      const ok = window.confirm(`Une saisie "${label}" de ${fmt(payload.quantity)} L vient d'être enregistrée pour ${siteName} (${payload.date}), ou porte le même numéro de bon / les mêmes index. Est-ce une saisie différente, ou un doublon ?\n\nOK = l'enregistrer quand même (saisie distincte)\nAnnuler = ne rien enregistrer`);
+      if (!ok) return Promise.resolve(false);
+    }
+    return addMovementConfirmed(payload);
+  };
+  const addMovementConfirmed = (payload) => withSync(async () => {
     const record = { id: uid(), createdBy: currentUserName, createdAt: new Date().toISOString(), isDemo: false, ...payload };
     const row = movementToRow(record);
     try {
@@ -2786,6 +3546,7 @@ export default function App() {
       setMovements((prev) => [...prev, saved]);
       appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
     } catch (e) {
+      if (/temperature_site|densite_site/i.test(`${e?.message || ""}`)) throw new Error("La base de données n\'est pas encore à jour pour la mesure site (script supabase_reception_mesure_site.sql à exécuter dans Supabase). La réception n\'a PAS été enregistrée.");
       if (!isNetworkError(e)) throw e;
       // Pas de réseau : on garde la saisie en local (visible immédiatement) et on la met en
       // file d'attente, synchronisée automatiquement dès le retour de la connexion.
@@ -2815,22 +3576,10 @@ export default function App() {
   const editMovementTempDensite = ({ id, temperatureC, densiteObservee }) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
     if (!m) throw new Error("Mouvement introuvable.");
-    const hasTemp = temperatureC !== "" && temperatureC !== null && temperatureC !== undefined;
-    const hasDens = densiteObservee !== "" && densiteObservee !== null && densiteObservee !== undefined;
-    let row;
-    if (hasTemp && hasDens) {
-      const corr = correctVolumeTo15({ volumeAmbiant: m.quantity, tempC: Number(temperatureC), densiteObservee: Number(densiteObservee) });
-      row = {
-        temperature_c: Number(temperatureC), densite_observee: Number(densiteObservee),
-        densite15: corr ? corr.densite15 : null, vcf: corr ? corr.vcf : null, volume_corrige15: corr ? corr.volume15 : null,
-      };
-    } else {
-      // Effacement volontaire (champs vidés) : on retire aussi la correction à 15°C, qui n'a
-      // plus de sens sans les deux valeurs d'origine.
-      row = { temperature_c: null, densite_observee: null, densite15: null, vcf: null, volume_corrige15: null };
-    }
+    const row = mesureSiteUpdateRow(m.quantity, temperatureC, densiteObservee);
     const { data, error } = await supabase.from("movements").update(row).eq("id", id).select().maybeSingle();
-    if (error) throw error;
+    if (error && /temperature_site|densite_site/i.test(`${error.message || ""}`)) throw new Error("La base de données n\'est pas encore à jour pour la mesure site (script supabase_reception_mesure_site.sql à exécuter dans Supabase). Rien n\'a été changé.");
+      if (error) throw error;
     if (!data) throw new Error("Modification refusée par la base de données (droits insuffisants) — rien n'a été changé.");
     const saved = rowToMovement(data);
     setMovements((prev) => prev.map((mm) => (mm.id === id ? saved : mm)));
@@ -2882,6 +3631,19 @@ export default function App() {
       appendAudit("Inventaire", `${sites.find((s) => s.id === siteId)?.name || ""} — base ${has15 ? "15°C" : "ambiante"} — ${NATURE_META[cls.nature].label} ${ecart >= 0 ? "+" : ""}${fmt(ecart)} L (${cls.ecartPermille >= 0 ? "+" : ""}${cls.ecartPermille.toFixed(2)} ‰)`);
       flash("Inventaire enregistré.");
     } catch (e) {
+      // Une saisie existe déjà pour ce site, cette date et ce produit — très probablement faite
+      // entre-temps par quelqu'un d'autre (un opérateur sur le terrain) avant que ce rafraîchissait
+      // local n'ait eu l'occasion de la récupérer. On ne l'écrase JAMAIS silencieusement : on
+      // recharge la vraie ligne depuis le serveur et on prévient clairement, plutôt que de
+      // continuer avec un formulaire qui aurait montré une version vide ou différente.
+      const code = e?.code || e?.originalError?.code;
+      const msg = String(e?.message || e || "");
+      if (code === "23505" || /duplicate key value violates unique constraint/i.test(msg)) {
+        const fresh = await fetchForSiteDate("inventaires", rowToInventaire, COLS_INVENTAIRES, siteId, date, product);
+        setInventaires((prev) => mergeSiteDate(prev, fresh, siteId, date, product));
+        flash("Une saisie existe déjà pour ce site et cette date (enregistrée depuis un autre appareil) — les données ont été actualisées.", "error");
+        return;
+      }
       if (!isNetworkError(e)) throw e;
       const q = readOfflineQueue();
       q.push({ id: uid(), table: "inventaires", row, createdAt: new Date().toISOString() });
@@ -2893,6 +3655,25 @@ export default function App() {
         : "Pas de connexion — inventaire enregistré sur l'appareil, sera synchronisé automatiquement dès le retour du réseau.");
     }
   });
+  // Recharge, directement depuis Supabase, les mouvements et l'inventaire d'UN SEUL site à UNE
+  // SEULE date — appelé à l'ouverture de Saisie journalière et à chaque changement de site/date,
+  // pour toujours voir la version la plus à jour de cette saisie précise (celle d'un autre
+  // opérateur comprise), sans attendre le prochain passage du rafraîchissement automatique global.
+  const refreshSiteDate = async (siteId, date, product) => {
+    if (!siteId || !date || !navigator.onLine) return;
+    try {
+      const [freshMovs, freshInv] = await Promise.all([
+        avecColsMovements((cols) => fetchForSiteDate("movements", rowToMovement, cols, siteId, date, product)),
+        fetchForSiteDate("inventaires", rowToInventaire, COLS_INVENTAIRES, siteId, date, product),
+      ]);
+      setMovements((prev) => mergeSiteDate(prev, freshMovs, siteId, date, product));
+      setInventaires((prev) => mergeSiteDate(prev, freshInv, siteId, date, product));
+    } catch (e) {
+      // Pas de réseau ou Supabase indisponible : on continue avec ce qui est déjà en mémoire,
+      // sans bloquer la saisie — ce n'est qu'un rafraîchissement de confort, pas une condition
+      // préalable pour pouvoir travailler.
+    }
+  };
   const deleteInventaire = (inv) => withSync(async () => {
     const { data, error: e1 } = await supabase.from("inventaires").delete().eq("id", inv.id).select();
     if (e1) throw e1;
@@ -3101,7 +3882,7 @@ export default function App() {
     { id: "sites", label: "Sites", icon: Factory, show: perms.canManage },
     { id: "saisie", label: "Saisie journalière", icon: ClipboardList, show: !perms.isTotalEnergiesOnly },
     { id: "engins", label: "Saisie par engins", icon: Truck, show: !perms.isTotalEnergiesOnly && sites.some((s) => s.enginsEnabled && s.active !== false && (!(profile?.assignedSiteIds || []).length || (profile?.assignedSiteIds || []).includes(s.id))) },
-    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted },
+    { id: "inventaires", label: "Inventaires", icon: ClipboardList, show: !isSiteRestricted || perms.canInventaireOfficiel },
     { id: "vcf", label: "Correction 15°C", icon: Thermometer, show: !perms.isTotalEnergiesOnly && !isSiteRestricted },
     { id: "rapports", label: "Rapports", icon: FileBarChart, show: !perms.isTotalEnergiesOnly },
     // « Documents & suivis » : mêmes droits que les anciens onglets de Rapports.
@@ -3118,7 +3899,7 @@ export default function App() {
   // classement plus clair : Opérations, Documents & suivis, Rapports, Administration.
   const NAV_GROUPS = [
     { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "dashboard_lub", "saisie", "engins", "inventaires", "vcf"] },
-    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_lubrifiants"] },
+    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilan_sap", "doc_lubrifiants"] },
     { label: null, ids: ["rapports"] },
     { label: null, ids: ["reunions"] },
     { label: null, ids: ["stock_jour"] },
@@ -3344,10 +4125,21 @@ export default function App() {
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                 <SyncIndicator status={syncStatus} lastSync={lastSync} />
                 {isOfflineStart && (
-                  <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.danger, background: "#FDEBEB", padding: "2px 8px", borderRadius: 12 }}>
-                    <CloudOff size={11} /> Hors-connexion — données en cache
-                  </span>
+                  <button type="button" onClick={() => setShowOfflineDetail((v) => !v)} data-testid="badge-offline" title="Touche pour voir la cause"
+                    style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.danger, background: "#FDEBEB", padding: "2px 8px", borderRadius: 12, border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+                    <CloudOff size={11} /> Hors-connexion — données en cache <span style={{ fontWeight: 400 }}>{showOfflineDetail ? "▲" : "▼ cause"}</span>
+                  </button>
                 )}
+                {isOfflineStart && showOfflineDetail && (() => {
+                  let diag = null; try { diag = JSON.parse(localStorage.getItem("somip_startup_diag") || "null"); } catch (e) { diag = null; }
+                  return (
+                    <div data-testid="offline-detail" style={{ flexBasis: "100%", fontSize: 11.5, lineHeight: 1.45, color: C.muted || "#555", background: "#FDF6F6", border: "1px solid #F2D4D4", borderRadius: 8, padding: "6px 10px" }}>
+                      <div><b>Cause :</b> {offlineReason || "non déterminée (état antérieur à ce diagnostic)"}.</div>
+                      {diag && <div><b>Dernier chargement complet réussi :</b> {(diag.totalMs / 1000).toFixed(1)} s{diag.plusLent ? ` (le plus lent : ${diag.plusLent}, ${diag.plusLentMs} ms)` : ""}, le {new Date(diag.at).toLocaleString("fr-FR")}.</div>}
+                      {session?.isOfflineFallback && <div>Nouvelle tentative automatique de connexion toutes les 20 secondes.</div>}
+                    </div>
+                  );
+                })()}
                 {offlineQueueCount > 0 && (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, color: C.warning, background: "#FFF6E5", padding: "2px 8px", borderRadius: 12 }}>
                     <CloudOff size={11} /> {offlineQueueCount} en attente
@@ -3419,11 +4211,11 @@ export default function App() {
           {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
           {view === "engins" && <EnginEntryView sites={sites} siteEngins={siteEngins} enginEntries={enginEntries} addEnginEntry={addEnginEntry} deleteEnginEntry={deleteEnginEntry} canWrite={perms.canWrite} assignedSiteIds={profile?.assignedSiteIds || []} />}
-          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
-          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} />}
+          {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
+          {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "vcf" && <VcfView />}
-          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
-          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
+          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={settings.objectifFreinte} presenterName={currentUserName} appendAudit={appendAudit} flash={flash} />}
+          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
@@ -3624,53 +4416,55 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
   const [imgFailed, setImgFailed] = useState(false);
   useEffect(() => { setImgFailed(false); }, [site?.id, site?.photoUrl]);
 
+  // Filtre par date : par défaut « aujourd'hui » (vue en direct, strictement comme avant). En
+  // choisissant une date passée, toute la page se recale sur cette date : stock recalé sur la
+  // dernière jauge connue à cette date, cumuls du mois jusqu'à cette date, courbe des 30 jours
+  // qui s'y terminent, camions rattachés à cette date, mouvements de ce jour précis.
+  const today = todayStr();
+  const [viewDate, setViewDate] = useState(today);
+  const isLive = viewDate === today;
+  const shiftViewDate = (delta) => {
+    const dt = new Date(`${viewDate}T00:00:00`);
+    dt.setDate(dt.getDate() + delta);
+    setViewDate(`${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`);
+  };
+
   // Calculs regroupés et mémorisés : la synchronisation périodique re-rend souvent la page.
   const d = useMemo(() => {
     if (!site) return null;
-    const month = currentMonth();
+    const month = viewDate.slice(0, 7);
     const monthStartD = `${month}-01`;
-    const todayD = todayStr();
+    const todayD = viewDate;
+    const upTo = isLive ? "9999-12-31" : viewDate; // en direct : aucune borne, exactement comme avant
     const gas = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil");
-    const inMonth = gas.filter((m) => m.date.startsWith(month));
+    const inMonth = gas.filter((m) => m.date.startsWith(month) && m.date <= upTo);
     const receptionsMonth = sumQty(inMonth, ["reception"]);
     const ventesMonth = sumQty(inMonth, ["sortie"]);
     const chargementsMonth = site.isMobile ? 0 : sumQty(inMonth, ["sortie_camion"]);
 
-    // Gain/Perte cumulé du mois : exactement le calcul du Tableau de bord général et des Rapports.
-    let ecartCumule = 0, daysWithJauge = 0;
-    let cur = new Date(monthStartD);
-    const end = new Date(todayD);
-    while (cur <= end) {
-      const day = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate(site, movements, day, inventaires);
-      const dayMovs = gas.filter((m) => m.date === day);
-      const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]);
-      const chargement = site.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = site.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargement;
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === day));
-      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
-      cur.setDate(cur.getDate() + 1);
-    }
+    // Gain/Perte cumulé du mois : la fonction UNIQUE gainPerteMois (la même que le Tableau de bord général).
+    const { ecartCumule, daysWithJauge } = gainPerteMois(site, movements, inventaires, todayD);
 
     // Courbe du stock en fin de journée sur 30 jours (stock au début du lendemain).
     const trend = [];
+    const baseDay = isLive ? new Date() : new Date(`${viewDate}T00:00:00`);
     for (let k = 29; k >= 0; k--) {
-      const day = new Date(); day.setDate(day.getDate() - k);
+      const day = new Date(baseDay); day.setDate(day.getDate() - k);
       const next = new Date(day); next.setDate(next.getDate() + 1);
       const nextStr = `${next.getFullYear()}-${pad2(next.getMonth() + 1)}-${pad2(next.getDate())}`;
       trend.push({ label: `${pad2(day.getDate())}/${pad2(day.getMonth() + 1)}`, stock: Math.round(stockBeforeDate(site, movements, nextStr, inventaires)) });
     }
 
-    const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil"));
+    const lastInv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date <= upTo));
     const yest = new Date(); yest.setDate(yest.getDate() - 1);
     const yestStr = `${yest.getFullYear()}-${pad2(yest.getMonth() + 1)}-${pad2(yest.getDate())}`;
     const hasYesterdayJauge = inventaires.some((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === yestStr);
-    const recent = movements.filter((m) => m.siteId === site.id).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || "").localeCompare(a.createdAt || ""))).slice(0, 10);
+    const recent = isLive
+      ? movements.filter((m) => m.siteId === site.id).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.createdAt || "").localeCompare(a.createdAt || ""))).slice(0, 10)
+      : movements.filter((m) => m.siteId === site.id && m.date === viewDate).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
     const trucksToday = site.isMobile ? [] : trucksAssignedAt(truckAssignments || [], site.id, todayD).map((id) => sites.find((s) => s.id === id)).filter(Boolean);
     return { receptionsMonth, ventesMonth, chargementsMonth, ecartCumule, daysWithJauge, trend, lastInv, hasYesterdayJauge, recent, trucksToday };
-  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites]);
+  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites, viewDate, isLive]);
 
   // Vue « station + camions » (Okouma, Prehomo) : mêmes règles que le rapport Synthèse
   // journalière — Station (site + camion). Les camions sont pris selon leur rattachement à la
@@ -3678,9 +4472,9 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
   // les jours où ils ont été jaugés.
   const st = useMemo(() => {
     if (!site || site.isMobile || !LUBRICANT_SITE_IDS.includes(site.id)) return null;
-    const month = currentMonth();
+    const month = viewDate.slice(0, 7);
     const monthStartD = `${month}-01`;
-    const todayD = todayStr();
+    const todayD = viewDate;
     const assignments = truckAssignments || [];
     const cache = {};
     const gasOf = (id) => cache[id] || (cache[id] = movements.filter((m) => m.siteId === id && (m.product || "gasoil") === "gasoil"));
@@ -3718,8 +4512,9 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
     // Courbe : stock en fin de journée de la station + des camions rattachés CE jour-là.
     const trend = [];
+    const baseDay = isLive ? new Date() : new Date(`${viewDate}T00:00:00`);
     for (let k = 29; k >= 0; k--) {
-      const dd = new Date(); dd.setDate(dd.getDate() - k);
+      const dd = new Date(baseDay); dd.setDate(dd.getDate() - k);
       const nx = new Date(dd); nx.setDate(nx.getDate() + 1);
       const dayStr = `${dd.getFullYear()}-${pad2(dd.getMonth() + 1)}-${pad2(dd.getDate())}`;
       const nextStr = `${nx.getFullYear()}-${pad2(nx.getMonth() + 1)}-${pad2(nx.getDate())}`;
@@ -3731,7 +4526,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
     }
     const trucks = Object.values(perTruck).sort((a, b) => (attachedToday.includes(b.site.id) ? 1 : 0) - (attachedToday.includes(a.site.id) ? 1 : 0) || a.site.name.localeCompare(b.site.name));
     return { trucks, attachedToday, ventesCombinees, siteEcart, trucksEcart, trend };
-  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites]);
+  }, [site?.id, site?.isMobile, movements, inventaires, truckAssignments, sites, viewDate, isLive]);
 
   if (!site || !d) {
     return (
@@ -3741,14 +4536,14 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
     );
   }
 
-  const stock = stockThroughDate(site, movements, todayStr(), inventaires);
+  const stock = stockThroughDate(site, movements, viewDate, inventaires);
   const pct = site.capacity ? (stock / site.capacity) * 100 : 0;
   const level = pct < 20 ? C.danger : pct < 35 ? C.warning : C.blue;
   const fixed = accessible.filter((s) => !s.isMobile);
   const trucks = accessible.filter((s) => s.isMobile);
   const HeroIcon = site.isMobile ? Truck : Factory;
   const stationExtra = st ? (() => {
-    const trucksNow = st.attachedToday.reduce((a, id) => a + stockThroughDate(sites.find((x) => x.id === id), movements, todayStr(), inventaires), 0);
+    const trucksNow = st.attachedToday.reduce((a, id) => a + stockThroughDate(sites.find((x) => x.id === id), movements, viewDate, inventaires), 0);
     const ecart = st.siteEcart + st.trucksEcart;
     const hasJauge = d.daysWithJauge > 0 || st.trucks.some((t) => t.jaugeDays > 0);
     return { trucksNow, ecart, hasJauge, trucksVentes: st.trucks.reduce((a, t) => a + t.ventes, 0), trucksRecu: st.trucks.reduce((a, t) => a + t.recu, 0), trucksEcartTotal: st.trucksEcart };
@@ -3758,6 +4553,26 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
   return (
     <div className="somip-fade">
+      <div className="somip-no-print" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+        <button className="somip-btn somip-btn-ghost" style={{ padding: "7px 10px" }} title="Jour précédent" onClick={() => shiftViewDate(-1)}>
+          <ChevronsLeft size={14} />
+        </button>
+        <input type="date" className="somip-input" style={{ width: "auto", maxWidth: 170 }} value={viewDate} max={today} onChange={(e) => e.target.value && setViewDate(e.target.value > today ? today : e.target.value)} />
+        <button className="somip-btn somip-btn-ghost" style={{ padding: "7px 10px" }} title="Jour suivant" disabled={isLive} onClick={() => shiftViewDate(1)}>
+          <ChevronsRight size={14} />
+        </button>
+        {!isLive && (
+          <button className="somip-btn somip-btn-primary" style={{ padding: "7px 12px", fontSize: 12.5 }} onClick={() => setViewDate(today)}>
+            Revenir à aujourd'hui
+          </button>
+        )}
+        {!isLive && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: C.orange, background: `${C.orange}14`, padding: "6px 12px", borderRadius: 20 }}>
+            <Clock size={13} /> Données arrêtées au {viewDate} — cumuls du mois jusqu'à cette date
+          </span>
+        )}
+      </div>
+
       <div className="somip-no-print" style={{ position: "relative", borderRadius: 16, overflow: "hidden", marginBottom: 18, minHeight: "clamp(150px, 22vw, 210px)", background: `linear-gradient(120deg, ${C.navy}, ${C.blue})`, boxShadow: C.cardShadow }}>
         {site.photoUrl && !imgFailed ? (
           <img src={site.photoUrl} alt={site.name} onError={() => setImgFailed(true)} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
@@ -3780,7 +4595,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
               <div style={{ fontSize: "clamp(18px, 2.8vw, 26px)", fontWeight: 800, textShadow: "0 2px 8px rgba(0,0,0,0.4)" }}>{site.name}</div>
               <div style={{ fontSize: 12.5, opacity: 0.9, marginTop: 3 }}>{site.isMobile ? "Camion" : `Site ${site.code}`} · capacité {fmt(site.capacity)} L</div>
             </div>
-            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>Stock actuel<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(stock)} L</span></div>
+            <div className="somip-mono" style={{ fontSize: 13, opacity: 0.95, textAlign: "right" }}>{isLive ? "Stock actuel" : `Stock au ${viewDate}`}<br /><span style={{ fontSize: 22, fontWeight: 700 }}>{fmt(stock)} L</span></div>
           </div>
         </div>
       </div>
@@ -3801,8 +4616,8 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "2 1 460px", padding: 18, minHeight: 320 }}>
-          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock en fin de journée — 30 derniers jours</h3>
-          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point peut différer du « stock actuel » affiché, qui cumule les mouvements depuis le stock initial.</p>
+          <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />Stock en fin de journée — {isLive ? "30 derniers jours" : `30 jours jusqu'au ${viewDate}`}</h3>
+          <p style={{ margin: "0 0 10px", fontSize: 12, color: C.sub }}>Courbe recalée sur les jauges mesurées : son dernier point correspond au stock affiché en haut de la page.</p>
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={d.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
               <defs>
@@ -3829,15 +4644,15 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
           <GaugeBar pct={pct} color={level} />
           <div style={{ marginTop: 14, fontSize: 12.5, color: C.sub, lineHeight: 1.6 }}>
             <div>Dernière jauge : {d.lastInv ? <strong style={{ color: C.ink }}>{fmt(d.lastInv.stockPhysique)} L — {d.lastInv.date}</strong> : <strong style={{ color: C.ink }}>aucune</strong>}</div>
-            {!d.hasYesterdayJauge && <div style={{ color: C.warning, fontWeight: 600 }}>⚠ Stock fin de la veille pas encore saisi.</div>}
+            {isLive && !d.hasYesterdayJauge && <div style={{ color: C.warning, fontWeight: 600 }}>⚠ Stock fin de la veille pas encore saisi.</div>}
           </div>
           {d.trucksToday.length > 0 && (
             <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><Truck size={13} color={C.blue} />Camions rattachés aujourd'hui</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}><Truck size={13} color={C.blue} />{isLive ? "Camions rattachés aujourd'hui" : `Camions rattachés au ${viewDate}`}</div>
               {d.trucksToday.map((t) => (
                 <div key={t.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "4px 0" }}>
                   <span style={{ fontWeight: 600 }}>{t.name}</span>
-                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockThroughDate(t, movements, todayStr(), inventaires))} L</span>
+                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(stockThroughDate(t, movements, viewDate, inventaires))} L</span>
                 </div>
               ))}
             </div>
@@ -3851,10 +4666,10 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
           <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>{site.name} et les camions qui lui sont rattachés — mêmes règles que le rapport « Synthèse journalière — Station (site + camion) ».</p>
 
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 8 }}>
-            <StatCard label="Stock combiné (station + camions)" value={fmt(stock + stationExtra.trucksNow)} unit="L" accent={C.blue} icon={Fuel} />
+            <StatCard label={isLive ? "Stock combiné (station + camions)" : `Stock combiné au ${viewDate}`} value={fmt(stock + stationExtra.trucksNow)} unit="L" accent={C.blue} icon={Fuel} />
             <StatCard label="Ventes combinées (mois)" value={fmt(st.ventesCombinees)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
             <StatCard label="Gain/Perte combiné (mois)" value={stationExtra.hasJauge ? signed(stationExtra.ecart) : "—"} unit={stationExtra.hasJauge ? "L" : ""} accent={stationExtra.hasJauge ? ecartColor(stationExtra.ecart) : C.sub} icon={TrendingDown} />
-            <StatCard label="Camions rattachés" value={st.attachedToday.length} unit="aujourd'hui" accent={C.success} icon={Truck} />
+            <StatCard label="Camions rattachés" value={st.attachedToday.length} unit={isLive ? "aujourd'hui" : `au ${viewDate}`} accent={C.success} icon={Truck} />
           </div>
           {stationExtra.hasJauge && (
             <p style={{ margin: "0 0 16px", fontSize: 12, color: C.sub }}>
@@ -3865,7 +4680,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
 
           <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap", marginTop: 8 }}>
             <div style={{ flex: "1 1 340px", minWidth: 280 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Stock en fin de journée — 30 jours (station + camions)</div>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 6 }}>Stock en fin de journée — {isLive ? "30 jours" : `30 jours jusqu'au ${viewDate}`} (station + camions)</div>
               <ResponsiveContainer width="100%" height={230}>
                 <AreaChart data={st.trend} margin={{ top: 6, right: 10, left: -12, bottom: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
@@ -3890,7 +4705,7 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
                     return (
                       <tr key={t.site.id}>
                         <td style={{ fontWeight: 600 }}>{t.site.name}{!here && <span style={{ marginLeft: 6 }}><Badge color={C.sub}>plus rattaché</Badge></span>}</td>
-                        <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(stockThroughDate(t.site, movements, todayStr(), inventaires))} L</td>
+                        <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(stockThroughDate(t.site, movements, viewDate, inventaires))} L</td>
                         <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(t.ventes)} L</td>
                         <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(t.recu)} L</td>
                         <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: t.jaugeDays > 0 ? ecartColor(t.ecart) : C.sub }}>{t.jaugeDays > 0 ? `${signed(t.ecart)} L` : "—"}</td>
@@ -3908,18 +4723,18 @@ function SiteDashboardView({ sites, movements, inventaires, stockOf, truckAssign
                   )}
                 </tbody>
               </table>
-              <p style={{ margin: "8px 0 0", fontSize: 11, color: C.sub }}>« Stock » : camions rattachés aujourd'hui. « Ventes » : nettes du retour cuve. « Reçu » : chargements reçus.</p>
+              <p style={{ margin: "8px 0 0", fontSize: 11, color: C.sub }}>« Stock » : camions rattachés {isLive ? "aujourd'hui" : `au ${viewDate}`}. « Ventes » : nettes du retour cuve. « Reçu » : chargements reçus.</p>
             </div>
           </div>
         </div>
       )}
 
       <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />Derniers mouvements — {site.name}</h3>
+        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />{isLive ? "Derniers mouvements" : `Mouvements du ${viewDate}`} — {site.name}</h3>
         <table className="somip-table">
           <thead><tr><th>Date</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
           <tbody>
-            {d.recent.length === 0 && <EmptyRow colSpan={3} text="Aucun mouvement enregistré pour ce site." />}
+            {d.recent.length === 0 && <EmptyRow colSpan={3} text={isLive ? "Aucun mouvement enregistré pour ce site." : `Aucun mouvement enregistré pour ce site le ${viewDate}.`} />}
             {d.recent.map((m) => {
               const meta = TYPE_META[m.type];
               if (!meta) return null;
@@ -4284,6 +5099,74 @@ function StockDuJourView({ sites, movements, inventaires, stockOf, assignedSiteI
   );
 }
 
+// Tableau de diagnostic (Superviseur) : pour chaque site fixe et chaque camion laitier, ce que comptaient le Tableau de bord général
+// (avant correction) et le Tableau de bord par site, côte à côte, pour expliquer l'écart du total réseau. Lecture seule, rien n'est modifié.
+function DiagnosticGainPerte({ rows, ancienTotal, nouveauTotal, month, viewDate }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [copie, setCopie] = useState(false);
+  const sg = (v) => `${v >= 0 ? "+" : ""}${fmt(v)}`;
+  const lignes = [...rows].sort((a, b) => (a.site.isMobile === b.site.isMobile ? String(a.site.name).localeCompare(String(b.site.name)) : a.site.isMobile ? 1 : -1));
+  const actif = (r) => r.site.active !== false;
+  const general = (r) => (!r.site.isMobile ? r.ecartCumule : null);   // avant correction : camions non comptés, sites désactivés comptés
+  const parSite = (r) => (actif(r) ? r.ecartCumule : null);            // Tableau de bord par site : sites et camions actifs
+  const sommeParSite = lignes.reduce((a, r) => a + (parSite(r) ?? 0), 0);
+  const camionsActifs = lignes.filter((r) => r.site.isMobile && actif(r)).reduce((a, r) => a + r.ecartCumule, 0);
+  const fixesInactifs = lignes.filter((r) => !r.site.isMobile && !actif(r)).reduce((a, r) => a + r.ecartCumule, 0);
+  const camionsInactifs = lignes.filter((r) => r.site.isMobile && !actif(r)).reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartConstate = sommeParSite - ancienTotal;
+  const ecartExplique = camionsActifs - fixesInactifs;
+  const verifie = Math.abs(ecartConstate - ecartExplique) < 0.5;
+  const copier = async () => {
+    const tsv = ["Entité\tType\tStatut\tJours avec jauge\tTableau de bord général (avant correction)\tTableau de bord par site\tCompté dans le total corrigé"]
+      .concat(lignes.map((r) => [r.site.name, r.site.isMobile ? "Camion laitier" : "Site fixe", actif(r) ? "Actif" : "Désactivé", r.daysWithJauge, general(r) === null ? "non compté" : Math.round(general(r)), parSite(r) === null ? "non affiché" : Math.round(parSite(r)), actif(r) ? "oui" : "non"].join("\t")))
+      .concat([`TOTAL général avant correction\t\t\t\t${Math.round(ancienTotal)}`, `SOMME du Tableau de bord par site (sites + camions)\t\t\t\t\t${Math.round(sommeParSite)}`, `ÉCART\t\t\t\t${Math.round(ecartConstate)}`, `dont camions laitiers actifs non comptés par l'ancien total\t\t\t\t${Math.round(camionsActifs)}`, `dont sites désactivés comptés par l'ancien total (retirés)\t\t\t\t${Math.round(-fixesInactifs)}`, `TOTAL général corrigé\t\t\t\t${Math.round(nouveauTotal)}`]).join("\n");
+    try { await navigator.clipboard.writeText(tsv); setCopie(true); setTimeout(() => setCopie(false), 2500); } catch (e) { /* copie indisponible */ }
+  };
+  const th = { textAlign: "left", padding: "7px 10px", fontSize: 11.5, color: C.sub, borderBottom: "1px solid #dde3ea", whiteSpace: "nowrap" };
+  const td = { padding: "6px 10px", fontSize: 12.5, borderBottom: "1px solid #eef1f4", whiteSpace: "nowrap" };
+  const num = { ...td, textAlign: "right", fontVariantNumeric: "tabular-nums" };
+  const nc = (t) => <span style={{ color: C.sub, fontStyle: "italic" }}>{t}</span>;
+  return (
+    <div className="somip-panel" data-testid="gp-diagnostic" style={{ padding: "12px 16px", marginBottom: 16 }}>
+      <button type="button" onClick={() => setOuvert((v) => !v)} data-testid="gp-diagnostic-bouton" style={{ background: "none", border: "none", cursor: "pointer", fontWeight: 700, color: C.ink, fontSize: 13.5, padding: 0 }}>
+        {ouvert ? "▾" : "▸"} Diagnostic gain/perte — pourquoi les totaux différaient (Superviseur, temporaire)
+      </button>
+      {ouvert && (
+        <div style={{ marginTop: 10 }}>
+          <p style={{ margin: "0 0 8px", fontSize: 12.5, color: C.sub }}>Période : du 01/{month.slice(5, 7)}/{month.slice(0, 4)} au {viewDate.slice(8, 10)}/{viewDate.slice(5, 7)}/{viewDate.slice(0, 4)} (gasoil, à l'ambiance). La formule jour par jour est la même partout : seule la liste des entités additionnées diffère.</p>
+          <div style={{ overflowX: "auto" }}>
+            <table data-testid="gp-table" style={{ borderCollapse: "collapse", width: "100%" }}>
+              <thead><tr><th style={th}>Site / camion</th><th style={th}>Type</th><th style={th}>Statut</th><th style={{ ...th, textAlign: "right" }}>Jours avec jauge</th><th style={{ ...th, textAlign: "right" }}>Tableau de bord général (avant correction)</th><th style={{ ...th, textAlign: "right" }}>Tableau de bord par site</th><th style={th}>Compté dans le total corrigé</th></tr></thead>
+              <tbody>
+                {lignes.map((r) => (
+                  <tr key={r.site.id} data-testid={`gp-ligne-${r.site.id}`}>
+                    <td style={td}>{r.site.name}</td><td style={td}>{r.site.isMobile ? "Camion laitier" : "Site fixe"}</td><td style={{ ...td, color: actif(r) ? C.success : C.danger }}>{actif(r) ? "Actif" : "Désactivé"}</td>
+                    <td style={num}>{r.daysWithJauge}</td>
+                    <td style={num} data-testid={`gp-general-${r.site.id}`}>{general(r) === null ? nc("non compté") : `${sg(general(r))} L`}</td>
+                    <td style={num} data-testid={`gp-parsite-${r.site.id}`}>{parSite(r) === null ? nc("non affiché") : `${sg(parSite(r))} L`}</td>
+                    <td style={td}>{actif(r) ? "oui" : "non"}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr><td style={{ ...td, fontWeight: 700 }} colSpan={4}>Total</td><td style={{ ...num, fontWeight: 700 }} data-testid="gp-total-ancien">{sg(ancienTotal)} L</td><td style={{ ...num, fontWeight: 700 }} data-testid="gp-total-parsite">{sg(sommeParSite)} L</td><td style={td}></td></tr>
+              </tfoot>
+            </table>
+          </div>
+          <div data-testid="gp-explication" style={{ marginTop: 10, fontSize: 12.5, lineHeight: 1.6 }}>
+            <div>Écart constaté (somme du Tableau de bord par site − total général d'avant) : <strong data-testid="gp-ecart">{sg(ecartConstate)} L</strong></div>
+            <div>• camions laitiers actifs, <em>non comptés</em> par l'ancien total général : <strong data-testid="gp-camions">{sg(camionsActifs)} L</strong></div>
+            <div>• sites désactivés, <em>comptés</em> par l'ancien total mais absents du Tableau de bord par site : <strong data-testid="gp-inactifs">{sg(-fixesInactifs)} L</strong></div>
+            <div style={{ color: verifie ? C.success : C.danger, fontWeight: 600 }} data-testid="gp-controle">{verifie ? "✔ Ces deux causes expliquent exactement l'écart." : "⚠ L'écart n'est pas entièrement expliqué par ces deux causes."}</div>
+            {camionsInactifs !== 0 && <div style={{ color: C.sub }}>Pour information : camions désactivés (comptés nulle part) {sg(camionsInactifs)} L.</div>}
+            <div style={{ marginTop: 4 }}>Total général <strong>corrigé</strong> : <strong data-testid="gp-total-nouveau">{sg(nouveauTotal)} L</strong> {Math.abs(nouveauTotal - sommeParSite) < 0.5 ? "= somme du Tableau de bord par site ✔" : "≠ somme du Tableau de bord par site ⚠"}</div>
+          </div>
+          <button type="button" className="somip-btn" onClick={copier} data-testid="gp-copier" style={{ marginTop: 10, padding: "6px 12px", cursor: "pointer" }}>{copie ? "Copié ✔" : "Copier le tableau"}</button>
+        </div>
+      )}
+    </div>
+  );
+}
 function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments, onOpenSite }) {
   // Filtre par date : par défaut, aujourd'hui (données en direct). En choisissant une date
   // passée, tout le tableau de bord se recalcule comme s'il était "arrêté" à la fin de cette
@@ -4319,32 +5202,17 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
   [...inventaires].sort((a, b) => (a.date < b.date ? -1 : 1)).forEach((i) => { latestInventaireBySite[i.siteId] = i; });
   const horsObjectif = Object.values(latestInventaireBySite).filter((i) => i.conformite === "non_conforme").length;
 
-  // Gain/Perte cumulé du mois (de la date choisie), pour chaque site fixe ET chaque camion
-  // (calcul propre à chacun, indépendant — comme demandé, tout dans un même tableau).
-  const monthStartD = `${month}-01`;
-  const ecartRows = sites.map((s) => {
-    let cur = new Date(monthStartD);
-    const end = new Date(viewDate);
-    let ecartCumule = 0, daysWithJauge = 0;
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
-      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]); // camion : flux brut du compteur (retour cuve inclus, cf. théorique)
-      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
-      if (inv) {
-        const dayEcart = inv.stockPhysique - theorique;
-        ecartCumule += dayEcart; daysWithJauge++;
-      }
-      cur.setDate(cur.getDate() + 1);
-    }
-    return { site: s, ecartCumule, daysWithJauge };
-  }).sort((a, b) => a.ecartCumule - b.ecartCumule);
-  const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  // Gain/Perte cumulé du mois (de la date choisie) : la fonction UNIQUE gainPerteMois, pour chaque site fixe ET chaque camion laitier
+  // (la même que le Tableau de bord par site). Total réseau = sites fixes ACTIFS + camions laitiers ACTIFS : exactement les entités
+  // que le Tableau de bord par site permet d'ouvrir, donc total général = somme des sites et des camions.
+  const ecartRows = sites.map((s) => ({ site: s, ...gainPerteMois(s, movements, inventaires, viewDate) })).sort((a, b) => a.ecartCumule - b.ecartCumule);
+  const ecartActifs = ecartRows.filter((r) => r.site.active !== false);
+  const ecartSitesFixes = ecartActifs.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartCamions = ecartActifs.filter((r) => r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  const ecartReseauTotal = ecartSitesFixes + ecartCamions;
+  const aDesCamions = ecartActifs.some((r) => r.site.isMobile);
+  // Ancienne règle (avant correction : tous les sites fixes y compris désactivés, sans les camions), gardée pour le tableau de diagnostic.
+  const ecartReseauAncien = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
 
   // Alerte saisie manquante : à partir de 6h00, signale les sites (fixes et camions) sans
   // Stock fin saisi pour la veille — sauf un camion dont le dernier stock connu était à zéro
@@ -4424,6 +5292,12 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
         <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
         <StatCard label={`Gain/Perte réseau (${month})`} value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
       </div>
+      {aDesCamions && (
+        <div data-testid="gp-detail" style={{ fontSize: 12.5, color: C.sub, margin: "-6px 0 14px 2px" }}>
+          Gain/Perte réseau = sites fixes <strong style={{ color: C.ink }}>{ecartSitesFixes >= 0 ? "+" : ""}{fmt(ecartSitesFixes)} L</strong> + camions laitiers <strong style={{ color: C.ink }}>{ecartCamions >= 0 ? "+" : ""}{fmt(ecartCamions)} L</strong> (sites et camions actifs, comme dans le Tableau de bord par site).
+        </div>
+      )}
+      {canManage && <DiagnosticGainPerte rows={ecartRows} ancienTotal={ecartReseauAncien} nouveauTotal={ecartReseauTotal} month={month} viewDate={viewDate} />}
 
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
@@ -4968,21 +5842,21 @@ function SitesView({ sites, movements, inventaires, stockOf, addSite, editSite, 
 /* ------------------------------------------------------------------ */
 /* Saisie journalière (écran unique : réception, sortie/camion, retour) */
 /* ------------------------------------------------------------------ */
-function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, editMovementTempDensite, deleteInventaire, settings, canWrite, canManage, assignedSiteIds, truckAssignments }) {
+function DailyEntryView({ sites, movements, inventaires, productStocks, siteMeters, addMovement, addInventaire, deleteMovement, editMovementTempDensite, deleteInventaire, refreshSiteDate, settings, canWrite, canManage, assignedSiteIds, truckAssignments }) {
   const hasSiteRestriction = assignedSiteIds && assignedSiteIds.length > 0;
   const activeSites = sites.filter((s) => s.active !== false);
   const availableSites = hasSiteRestriction ? activeSites.filter((s) => assignedSiteIds.includes(s.id)) : activeSites;
   const [siteId, setSiteId] = useState((hasSiteRestriction ? assignedSiteIds[0] : sites[0]?.id) || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
-  const [receptions, setReceptions] = useState([{ quantite: "", ref: "" }]);
+  const [receptions, setReceptions] = useState([{ quantite: "", ref: "", tempSite: "", densSite: "" }]);
   // Ajout/correction a posteriori de la température et de la densité d'une réception déjà
   // enregistrée (un opérateur les a parfois oubliées sur le moment) — Superviseur uniquement.
   const [editingTempId, setEditingTempId] = useState(null);
   const [tempEditForm, setTempEditForm] = useState({ temperatureC: "", densiteObservee: "" });
   const startEditTemp = (m) => {
     setEditingTempId(m.id);
-    setTempEditForm({ temperatureC: m.temperatureC !== undefined ? String(m.temperatureC) : "", densiteObservee: m.densiteObservee !== undefined ? String(m.densiteObservee) : "" });
+    setTempEditForm({ temperatureC: m.temperatureSite !== undefined ? String(m.temperatureSite) : "", densiteObservee: m.densiteSite !== undefined ? String(m.densiteSite) : "" });
   };
   const saveEditTemp = () => {
     editMovementTempDensite({ id: editingTempId, temperatureC: tempEditForm.temperatureC, densiteObservee: tempEditForm.densiteObservee });
@@ -5008,6 +5882,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [commentaireInv, setCommentaireInv] = useState("");
   const [stockFinPhotos, setStockFinPhotos] = useState([]);
   const [stockDebutConfirm, setStockDebutConfirm] = useState("");
+
+  // À l'ouverture de cette page, et à chaque changement de site ou de date, on va chercher
+  // directement sur le serveur la version la plus à jour de CETTE saisie précise — sans attendre
+  // le prochain passage du rafraîchissement automatique global (toutes les 5 minutes). Ça évite
+  // qu'une saisie faite entre-temps par un autre opérateur n'apparaisse comme "vide" ici.
+  useEffect(() => {
+    refreshSiteDate?.(siteId, date, product);
+  }, [siteId, date, product]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const truckSites = sites.filter((s) => s.isMobile);
   const stationSites = sites.filter((s) => !s.isMobile);
@@ -5085,6 +5967,24 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   };
   const vcfPreview = skipVcf ? null : vcfFor(receptionN || sortieQty || retourN || retourCuveTruckN || 1);
 
+  // Mesure prélevée SUR SITE à chaque réception de gasoil d'un site : obligatoire (température ET densité) dès qu'un N° de bon de livraison est saisi.
+
+  const mesureSiteActive = !isMobileSite && !isLub;
+
+  const receptionLignes = receptions.map((r) => {
+
+    const qty = Number(r.quantite) || 0, tOk = nombreSaisi(r.tempSite), dOk = nombreSaisi(r.densSite);
+
+    const exigeMesure = mesureSiteActive && qty > 0 && String(r.ref || "").trim() !== "";
+
+    return { qty, tOk, dOk, exigeMesure, manque: exigeMesure && !(tOk && dOk), partielle: mesureSiteActive && qty > 0 && !exigeMesure && tOk !== dOk, avertissements: mesureSiteActive ? avertissementsMesureSite(r.tempSite, r.densSite) : [] };
+
+  });
+
+  const receptionsMesureOk = !receptionLignes.some((l) => l.manque);
+
+  const receptionExtra = (r, qty) => (mesureSiteActive && nombreSaisi(r.tempSite) && nombreSaisi(r.densSite) ? receptionMesureSiteFields(qty, r.tempSite, r.densSite) : vcfExtra(qty));
+
   const stockFinN = Number(stockFinMesure) || 0;
   const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
   // Le Gain/Perte "officiel" est toujours en base ambiante (voir addInventaire) : le 15°C est
@@ -5098,10 +5998,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
   const stockFinConflict = stockFinMesure !== "" && !!existingInv;
   const photosWithoutStockFin = stockFinPhotos.length > 0 && stockFinMesure === "";
-  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && !photosWithoutStockFin && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
+  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && receptionsMesureOk && !stockFinConflict && !photosWithoutStockFin && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
-    setReceptions([{ quantite: "", ref: "" }]);
+    setReceptions([{ quantite: "", ref: "", tempSite: "", densSite: "" }]);
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
     setIndexBloque(false); setSortieDirecte("");
     setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]);
@@ -5129,7 +6029,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         for (const r of receptions) {
           const qty = Number(r.quantite) || 0;
           if (qty > 0) {
-            const ok = await addMovement({ siteId, product, type: "reception", date, quantity: qty, delta: qty, ref: r.ref, ...vcfExtra(qty) });
+            const ok = await addMovement({ siteId, product, type: "reception", date, quantity: qty, delta: qty, ref: r.ref, ...receptionExtra(r, qty) });
             if (!ok) return;
           }
         }
@@ -5247,6 +6147,13 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
     + sumQty(dayMovs, ["reception"]) + sumQty(dayMovs, ["retour_camion"])
     - sumQty(dayMovs, ["sortie"]) - sumQty(dayMovs, ["sortie_camion"]);
   const gainPerteJour = existingInv ? existingInv.stockPhysique - theoriqueDuJourSauve : null;
+  // Pour un camion : la "Sortie terrain" saisie est la sortie GLOBALE de la journée (ce qui a
+  // quitté la citerne), qui peut inclure une part revenue en cuve plutôt que distribuée. La vraie
+  // distribution sur le terrain est donc sortie − retour cuve, affichée à part plutôt que de
+  // changer l'étiquette des lignes individuelles (qui restent fidèles à ce qui a été saisi).
+  const sortieGlobaleJour = sumQty(dayMovs, ["sortie"]);
+  const retourCuveJour = sumQty(dayMovs, ["retour_cuve_camion"]);
+  const sortieTerrainNette = isMobileSite && retourCuveJour > 0 ? sortieGlobaleJour - retourCuveJour : null;
 
   return (
     <div className="somip-fade">
@@ -5318,8 +6225,12 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           )}
 
           <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Chargement" : "Réception"}</p>
-          {receptions.map((r, idx) => (
-            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+{receptions.map((r, idx) => {
+const lg = receptionLignes[idx];
+const nomChamp = !lg.tOk && !lg.dOk ? "la température ET la densité" : !lg.tOk ? "la température" : "la densité";
+return (
+<div key={idx} style={{ marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
               <div style={{ flex: 1 }}>
                 <Field label="Quantité reçue (L)">
                   <input type="number" className="somip-input" value={r.quantite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, quantite: e.target.value } : row)))} placeholder="0" />
@@ -5338,8 +6249,27 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </button>
               )}
             </div>
-          ))}
-          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setReceptions((prev) => [...prev, { quantite: "", ref: "" }])}>
+{mesureSiteActive && (
+<div style={{ display: "flex", gap: 8, marginBottom: 4 }} data-testid={`mesure-site-${idx}`}>
+<div style={{ flex: 1 }}>
+<Field label={`Température site (°C)${lg.exigeMesure ? " *" : ""}`}>
+<input type="number" step="0.1" className="somip-input" data-testid={`temp-site-${idx}`} style={lg.manque && !lg.tOk ? { borderColor: C.danger } : undefined} value={r.tempSite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, tempSite: e.target.value } : row)))} placeholder="Ex : 28.5" />
+</Field>
+</div>
+<div style={{ flex: 1 }}>
+<Field label={`Densité site (kg/m³)${lg.exigeMesure ? " *" : ""}`}>
+<input type="number" step="0.1" className="somip-input" data-testid={`dens-site-${idx}`} style={lg.manque && !lg.dOk ? { borderColor: C.danger } : undefined} value={r.densSite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, densSite: e.target.value } : row)))} placeholder="Ex : 845" />
+</Field>
+</div>
+</div>
+)}
+{lg.manque && <p data-testid={`mesure-erreur-${idx}`} style={{ margin: "0 0 6px", fontSize: 11.5, color: C.danger, fontWeight: 600 }}>⛔ Réception {idx + 1} (bon {String(r.ref).trim()}) : {nomChamp} prélevée{lg.tOk || lg.dOk ? "" : "s"} sur site {lg.tOk || lg.dOk ? "est obligatoire" : "sont obligatoires"} avec un N° de bon de livraison. Enregistrement bloqué tant que ce n'est pas renseigné.</p>}
+{lg.partielle && <p style={{ margin: "0 0 6px", fontSize: 11.5, color: C.warning }}>⚠ Renseigne la température ET la densité du site (ou aucune des deux) : une seule valeur n'est pas prise en compte.</p>}
+{lg.avertissements.map((w, k) => <p key={k} data-testid={`mesure-avert-${idx}-${k}`} style={{ margin: "0 0 6px", fontSize: 11.5, color: C.warning }}>⚠ {w}</p>)}
+</div>
+);
+})}
+          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setReceptions((prev) => [...prev, { quantite: "", ref: "", tempSite: "", densSite: "" }])}>
             <Plus size={13} /> Ajouter une réception
           </button>
           {receptions.filter((r) => Number(r.quantite) > 0).length > 1 && (
@@ -5719,19 +6649,23 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                     {m.indexAvant !== undefined && m.indexApres !== undefined && (
                       <div className="somip-mono" style={{ marginTop: 2, fontSize: 11, color: C.sub }}>Index : {fmt(m.indexAvant)} → {fmt(m.indexApres)}</div>
                     )}
-                    {m.type === "reception" && editingTempId !== m.id && (
-                      <div style={{ marginTop: 2, fontSize: 11, color: C.sub, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>
-                          {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
-                          {m.temperatureC === undefined && m.densiteObservee === undefined && "Température/densité non saisies"}
-                        </span>
-                        {canManage && (
-                          <button onClick={() => startEditTemp(m)} title="Ajouter ou corriger la température/densité" style={{ border: "none", background: "none", cursor: "pointer", padding: 2, display: "inline-flex" }}>
-                            <Pencil size={11} color={C.blue} />
-                          </button>
-                        )}
-                      </div>
-                    )}
+{m.type === "reception" && editingTempId !== m.id && (
+<div style={{ marginTop: 2, fontSize: 11, color: C.sub, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+<span data-testid={`recep-mesure-${m.id}`}>
+{aMesureSite(m)
+? `Mesure site : ${m.temperatureSite}°C · densité ${m.densiteSite}`
+: (m.temperatureC !== undefined || m.densiteObservee !== undefined)
+? `Mesure du jour : ${m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}${m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}${m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}`
+: "Température/densité non saisies"}
+</span>
+{receptionSansMesureSite(m) && <span data-testid={`recep-pastille-${m.id}`}><PastilleMesureManquante /></span>}
+{canManage && (
+<button onClick={() => startEditTemp(m)} title="Ajouter ou corriger la température et la densité prélevées sur site" style={{ border: "none", background: "none", cursor: "pointer", padding: 2, display: "inline-flex" }}>
+<Pencil size={11} color={C.blue} />
+</button>
+)}
+</div>
+)}
                     {m.type !== "reception" && (m.temperatureC !== undefined || m.densiteObservee !== undefined) && (
                       <div style={{ marginTop: 2, fontSize: 11, color: C.sub }}>
                         {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
@@ -5739,8 +6673,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                     )}
                     {editingTempId === m.id && (
                       <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
-                        <input type="number" className="somip-input" style={{ width: 70, padding: "4px 6px", fontSize: 11.5 }} placeholder="°C" value={tempEditForm.temperatureC} onChange={(e) => setTempEditForm({ ...tempEditForm, temperatureC: e.target.value })} />
-                        <input type="number" step="0.1" className="somip-input" style={{ width: 95, padding: "4px 6px", fontSize: 11.5 }} placeholder="Densité (kg/m³)" value={tempEditForm.densiteObservee} onChange={(e) => setTempEditForm({ ...tempEditForm, densiteObservee: e.target.value })} />
+                        <input type="number" className="somip-input" style={{ width: 70, padding: "4px 6px", fontSize: 11.5 }} placeholder="°C site" value={tempEditForm.temperatureC} onChange={(e) => setTempEditForm({ ...tempEditForm, temperatureC: e.target.value })} />
+                        <input type="number" step="0.1" className="somip-input" style={{ width: 95, padding: "4px 6px", fontSize: 11.5 }} placeholder="Densité site (kg/m³)" value={tempEditForm.densiteObservee} onChange={(e) => setTempEditForm({ ...tempEditForm, densiteObservee: e.target.value })} />
                         <button onClick={saveEditTemp} style={{ border: "none", background: C.blue, color: "#fff", borderRadius: 5, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>OK</button>
                         <button onClick={() => setEditingTempId(null)} style={{ border: "none", background: "none", color: C.sub, cursor: "pointer", fontSize: 11 }}>Annuler</button>
                       </div>
@@ -5751,6 +6685,16 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </tr>
               );
             })}
+            {sortieTerrainNette !== null && (
+              <tr style={{ background: C.bg }}>
+                <td><Badge color={C.orange}>Sortie terrain nette</Badge></td>
+                <td style={{ color: C.sub, fontSize: 11.5 }}>
+                  Sortie globale {fmt(sortieGlobaleJour)} L − retour cuve {fmt(retourCuveJour)} L = réellement distribué sur le terrain
+                </td>
+                <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.orange }}>{fmt(sortieTerrainNette)} L</td>
+                {canManage && <td></td>}
+              </tr>
+            )}
             {existingInv && (
               <tr>
                 <td><Badge color={C.blue}>Stock fin</Badge></td>
@@ -6123,9 +7067,16 @@ function SortiesView({ sites, movements, addMovement, deleteMovement, canWrite, 
 /* ------------------------------------------------------------------ */
 /* Inventaires                                                           */
 /* ------------------------------------------------------------------ */
-function InventairesView({ sites, inventaires, movements, truckAssignments, stockOf, stockOf15, addInventaire, addMovement, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
+function InventairesView({ sites, inventaires, movements, truckAssignments, stockOf, stockOf15, addInventaire, addMovement, deleteInventaire, settings, updateSettings, canWrite, canManage, canInventaireOfficiel, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, siteTanks, siteDepotageMeters, siteMeters, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks, assignedSiteIds }) {
+  // Un compte rattaché à des sites (ex. un opérateur) ne voit et ne manipule que les inventaires
+  // de SES sites — rapides comme officiels (inopiné / mensuel), donc aussi leurs signatures.
+  const isScoped = !!(assignedSiteIds && assignedSiteIds.length > 0);
+  const scopedSites = scopeSitesByAssignment(sites, assignedSiteIds);
+  const scopedIds = new Set(scopedSites.map((s) => s.id));
+  const scopedInventaires = isScoped ? inventaires.filter((i) => scopedIds.has(i.siteId)) : inventaires;
+  const scopedInventairesOfficiels = isScoped ? inventairesOfficiels.filter((i) => scopedIds.has(i.siteId)) : inventairesOfficiels;
   const [mainTab, setMainTab] = useState(isTotalEnergiesOnly ? "officiel" : "rapide");
-  const [siteId, setSiteId] = useState(sites[0]?.id || "");
+  const [siteId, setSiteId] = useState(scopedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [productId, setProductId] = useState("gasoil");
   const [stockPhysique, setStockPhysique] = useState("");
@@ -6210,17 +7161,22 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
     setStockPhysique(""); setCommentaire(""); setTempC(""); setDensite("");
   };
 
-  const list = inventaires.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const list = scopedInventaires.filter((i) => filterSite === "all" || i.siteId === filterSite).sort((a, b) => (a.date < b.date ? 1 : -1));
 
   return (
     <div className="somip-fade">
+      {isScoped && (
+        <div className="somip-no-print" style={{ marginBottom: 12, fontSize: 12.5, color: C.sub }}>
+          Accès limité à : <strong style={{ color: C.ink }}>{scopedSites.map((s) => s.name).join(", ") || "—"}</strong>
+        </div>
+      )}
       <div className="somip-no-print" style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         {!isTotalEnergiesOnly && <button className={`somip-tab ${mainTab === "rapide" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("rapide")}><ClipboardList size={13} />Inventaire rapide</button>}
         <button className={`somip-tab ${mainTab === "officiel" ? "active" : ""}`} style={{ display: "inline-flex", alignItems: "center", gap: 6 }} onClick={() => setMainTab("officiel")}><Pencil size={13} />Inventaire officiel (inopiné / mensuel)</button>
       </div>
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
-      <InventaireRapidePrintPanel sites={sites} inventaires={inventaires} />
+      <InventaireRapidePrintPanel sites={scopedSites} inventaires={scopedInventaires} />
       )}
 
       {mainTab === "rapide" && !isTotalEnergiesOnly && (
@@ -6231,7 +7187,7 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
           <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Plus size={15} color={C.blue} />Nouvel inventaire</h3>
           <Field label="Site">
             <select className="somip-select" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-              {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              {scopedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
           </Field>
           <Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
@@ -6400,8 +7356,8 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
           <h3 style={{ margin: 0, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><History size={15} color={C.blue} />Historique des inventaires</h3>
           <select className="somip-select" style={{ width: 200 }} value={filterSite} onChange={(e) => setFilterSite(e.target.value)}>
-            <option value="all">Tous les sites</option>
-            {sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <option value="all">{isScoped ? "Tous mes sites" : "Tous les sites"}</option>
+            {scopedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
         </div>
         <div style={{ overflowX: "auto" }}>
@@ -6449,7 +7405,7 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
       )}
 
       {mainTab === "officiel" && (
-        <InventaireOfficielTab sites={sites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
+        <InventaireOfficielTab sites={scopedSites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={scopedInventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
       )}
     </div>
   );
@@ -6533,35 +7489,45 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
   const removeIndexRow = (idx) => setIndexReadings((prev) => prev.filter((_, i) => i !== idx));
 
   const isLubTous = produit === "lubrifiants_tous";
-  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "" });
-  const [lubBlocks, setLubBlocks] = useState(() => LUBRICANTS.map(emptyLubBlock));
+  const emptyLubBlock = (l) => ({ produit: l.id, label: lubLabel(siteId, l.id, productStocks), cuve: `Cuve ${lubLabel(siteId, l.id, productStocks)}`, hauteur: "", stockAmbiant: "", indexFin: "", autreNom: SHARED_RUBIA_DEFAULT_NAME, autreLitres: "", autresReste: [], touched: false });
+  const [lubBlocks, setLubBlocks] = useState(() => siteLubricants(siteId, productStocks).map(emptyLubBlock));
   useEffect(() => {
     if (editLoadingRef.current) return;
-    setLubBlocks(LUBRICANTS.map(emptyLubBlock));
-  }, [siteId, date]); // eslint-disable-line react-hooks/exhaustive-deps
+    setLubBlocks(siteLubricants(siteId, productStocks).map(emptyLubBlock));
+  }, [siteId, date, type]); // eslint-disable-line react-hooks/exhaustive-deps
   // Dernier des effets liés à siteId/date à s'exécuter (déclaré après eux) : abaisse le drapeau
   // une fois qu'ils ont tous eu l'occasion de le consulter pour ce rendu.
   useEffect(() => { editLoadingRef.current = false; });
-  const updateLubBlock = (idx, field, value) => setLubBlocks((prev) => prev.map((b, i) => (i === idx ? { ...b, [field]: value } : b)));
-  const lubBlocksFilled = lubBlocks.filter((b) => b.stockAmbiant !== "");
+  // Huiles déjà enregistrées pour ce site, cette date et ce type : elles restent dans le formulaire,
+  // pré-remplies ; les corriger les met à jour sur place (jamais de doublon).
+  const existingLubRecords = inventairesOfficiels.filter((i) => i.siteId === siteId && i.date === date && i.type === type && i.produit && i.produit !== "gasoil");
+  const existingByProduit = {};
+  existingLubRecords.forEach((r) => { existingByProduit[r.produit] = r; });
+  // En modification d'une huile précise (crayon), pas de fusion : on édite exactement cet enregistrement.
+  const overlayMap = editingId ? {} : existingByProduit;
+  const effectiveLubBlocks = overlayLubBlocks(lubBlocks, overlayMap, productStocks);
+  const updateLubBlock = (idx, field, value) => setLubBlocks((prev) => overlayLubBlocks(prev, overlayMap, productStocks).map((b, i) => (i === idx ? { ...b, [field]: value, touched: true } : prev[i])));
+  const lubBlocksFilled = effectiveLubBlocks.filter((b) => b.stockAmbiant !== "");
+  const lubPlan = planLubricantEntry(effectiveLubBlocks, existingLubRecords);
+  const lubToUpdate = editingId ? [] : lubRecordsToUpdate(effectiveLubBlocks, existingByProduit, canManage);
   const lubBlocksKg = (b) => { const d = LUBRICANTS.find((l) => l.id === b.produit)?.densite; return d && b.stockAmbiant !== "" ? (Number(b.stockAmbiant) || 0) * d : null; };
 
   // En modification, un inventaire lubrifiant ne porte que sur LE bloc d'origine (editingProduit)
   // — les 3 autres blocs affichés à l'écran appartiennent à d'autres enregistrements séparés.
-  const editingLubBlock = editingId && editingProduit && editingProduit !== "gasoil" ? lubBlocks.find((b) => b.produit === editingProduit) : null;
+  const editingLubBlock = editingId && editingProduit && editingProduit !== "gasoil" ? effectiveLubBlocks.find((b) => b.produit === editingProduit) : null;
   const canSubmit = siteId && date && (
     editingId
       ? (editingProduit === "gasoil"
           ? (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== ""))
           : (editingLubBlock ? editingLubBlock.stockAmbiant !== "" : false))
-      : (isLubTous ? lubBlocksFilled.length > 0 : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")))
+      : (isLubTous ? (lubPlan.complete || (lubPlan.allAlreadySaved && lubToUpdate.length > 0)) : (cuveReadings.length > 0 && cuveReadings.every((c) => c.stockAmbiant !== "")))
   );
 
   const resetCreateForm = () => {
     setCuveReadings(tanksForSite.length ? tanksForSite.map((t) => emptyCuve(t.name)) : [emptyCuve("Cuve 1")]);
     setDepotageReadings(depotageMetersForSite.length ? depotageMetersForSite.map((m) => emptyDepotage(m.name)) : []);
     setIndexReadings(salesMetersForSite.map((name) => emptyIndex(name)));
-    setLubBlocks(LUBRICANTS.map(emptyLubBlock));
+    setLubBlocks(siteLubricants(siteId, productStocks).map(emptyLubBlock));
     setInventoriste(""); setOperateur(""); setCommentaire("");
   };
 
@@ -6587,11 +7553,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       setDepotageReadings((inv.depotage || []).map((d) => ({ compteur: d.compteur, indexFin: d.indexFin ?? "" })));
     } else {
       setProduit("lubrifiants_tous");
-      const c0 = (inv.cuves && inv.cuves[0]) || {};
-      const idx0 = (inv.indexCompteurs && inv.indexCompteurs[0]) || {};
-      setLubBlocks(LUBRICANTS.map((l) => (l.id === inv.produit
-        ? { produit: l.id, label: lubLabel(inv.siteId, l.id, productStocks), cuve: c0.cuve || `Cuve ${lubLabel(inv.siteId, l.id, productStocks)}`, hauteur: c0.hauteur ?? "", stockAmbiant: String(inv.stockAmbiant ?? ""), indexFin: idx0.indexFin ?? "" }
-        : emptyLubBlock(l))));
+      setLubBlocks(siteLubricants(inv.siteId, productStocks).map((l) => (l.id === inv.produit ? lubBlockFromRecord(inv, productStocks) : emptyLubBlock(l))));
     }
   };
   const cancelEdit = () => {
@@ -6616,7 +7578,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       } else if (editingLubBlock) {
         editInventaireOfficiel({
           id: editingId, siteId, date, type, produit: editingProduit, inventoriste, operateur,
-          cuves: [{ cuve: editingLubBlock.cuve, hauteur: editingLubBlock.hauteur === "" ? null : Number(editingLubBlock.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(editingLubBlock.stockAmbiant) || 0 }],
+          cuves: [lubBlockToCuve(editingLubBlock)],
           depotage: [],
           indexCompteurs: editingLubBlock.indexFin === "" ? [] : [{ compteur: `Compteur ${editingLubBlock.label}`, indexFin: Number(editingLubBlock.indexFin) }],
           commentaire,
@@ -6627,20 +7589,17 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
       return;
     }
     if (isLubTous) {
-      // Les 4 lubrifiants saisis ensemble, dans la même action : un enregistrement par huile
-      // renseignée (une huile à zéro ce mois-ci peut rester vide), tous avec le même site, la
-      // même date, le même type et les mêmes Inventoriste/Opérateur/Commentaire. Comme ils
-      // partagent ces mêmes site/date/type, le bouton "PDF combiné" les regroupera automatiquement
-      // dans l'historique une fois enregistrés.
-      lubBlocksFilled.forEach((b) => {
-        addInventaireOfficiel({
-          siteId, date, type, produit: b.produit, inventoriste, operateur,
-          cuves: [{ cuve: b.cuve, hauteur: b.hauteur === "" ? null : Number(b.hauteur), densite: null, temperatureC: null, eau: false, stockAmbiant: Number(b.stockAmbiant) || 0 }],
-          depotage: [],
-          indexCompteurs: b.indexFin === "" ? [] : [{ compteur: `Compteur ${b.label}`, indexFin: Number(b.indexFin) }],
-          commentaire,
-        });
-      });
+      // Toutes les huiles du site saisies ensemble, dans la même action : un enregistrement par
+      // huile (0 si l'huile est vide — aucune ne peut être oubliée), tous avec le même site, la même
+      // date, le même type et les mêmes Inventoriste/Opérateur/Commentaire. Les huiles déjà
+      // enregistrées pour ce site/date/type ne sont pas recréées. Comme elles partagent ces mêmes
+      // site/date/type, le bouton "PDF combiné" les regroupera automatiquement dans l'historique.
+      const lubForm = { siteId, date, type, inventoriste, operateur, commentaire };
+      lubPlan.pending.forEach((b) => addInventaireOfficiel(lubCreatePayload(b, lubForm)));
+      // Huiles déjà enregistrées dont on a corrigé les valeurs : mise à jour sur place. Les noms
+      // (Inventoriste, Opérateur) et le commentaire déjà enregistrés sont conservés si on ne les
+      // retape pas ; les signatures ne sont jamais touchées.
+      lubToUpdate.forEach((b) => editInventaireOfficiel(lubUpdatePayload(b, existingByProduit[b.produit], lubForm)));
     } else {
       addInventaireOfficiel({
         siteId, date, type, produit, inventoriste, operateur,
@@ -6696,7 +7655,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
               <Field label="Produit">
                 <select className="somip-select" value={produit} onChange={(e) => setProduit(e.target.value)} disabled={!!editingId}>
                   <option value="gasoil">Gasoil</option>
-                  <option value="lubrifiants_tous">Lubrifiants — les 4 ensemble (AC30, AC50, SW10, Rubia Tir7400)</option>
+                  <option value="lubrifiants_tous">{`Lubrifiants — tous ensemble (${siteLubricants(siteId, productStocks).map((l) => lubLabel(siteId, l.id, productStocks)).join(", ")})`}</option>
                 </select>
               </Field>
             </div>
@@ -6807,37 +7766,86 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
           )}
           {isLubTous && (
             <>
-              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{editingId ? `Modification — ${editingLubBlock?.label || ""}` : "Les 4 lubrifiants, saisis ensemble"}</p>
+              <p style={{ margin: "12px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{editingId ? `Modification — ${editingLubBlock?.label || ""}` : "Tous les lubrifiants de ce site, saisis ensemble"}</p>
               <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.sub }}>
                 {editingId
                   ? "Corrige les valeurs de cette huile, puis clique sur Enregistrer. Les autres huiles de ce même jour ne sont pas affectées."
-                  : "Renseigne le stock (L) d'au moins une huile pour pouvoir enregistrer — une huile à zéro ce mois-ci peut rester vide. Les 4 partageront le même site, la même date et le même type, et pourront ensuite être réunies en un seul PDF depuis l'historique."}
+                  : `Renseigne le stock (L) de CHAQUE huile du site — ${effectiveLubBlocks.map((b) => b.label).join(", ")} — avec 0 si une huile est vide : aucune ne peut être oubliée. Elles partagent le même site, la même date et le même type, et seront réunies en un seul PDF depuis l'historique.${canManage ? " Une huile déjà enregistrée pour ce jour apparaît pré-remplie : la corriger la met à jour, sans doublon." : ""}`}
               </p>
-              {lubBlocks.map((b, idx) => (editingId && b.produit !== editingProduit) ? null : (
-                <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                  <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
-                  <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
-                    <div style={{ flex: 1.3 }}>
-                      <Field label="Contenant"><input className="somip-input" value={b.cuve} onChange={(e) => updateLubBlock(idx, "cuve", e.target.value)} placeholder={`Cuve ${b.label}`} /></Field>
+              {effectiveLubBlocks.map((b, idx) => {
+                if (editingId && b.produit !== editingProduit) return null;
+                const already = !editingId ? lubPlan.existingByProduit[b.produit] : null;
+                // Qui ne peut pas corriger un inventaire voit l'huile déjà enregistrée en lecture seule ;
+                // le Superviseur la voit pré-remplie et modifiable, avec tous ses champs.
+                if (already && !canManage) {
+                  const ac = (already.cuves && already.cuves[0]) || {};
+                  return (
+                    <div key={b.produit} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 8, background: C.bg }}>
+                      <p style={{ margin: "0 0 4px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}</p>
+                      <p style={{ margin: 0, fontSize: 11.5, color: C.sub }}>
+                        Déjà enregistré : <strong style={{ color: C.ink }}>{fmt(already.stockAmbiant)} L</strong>{ac.hauteur !== null && ac.hauteur !== undefined ? ` — ${fmt(ac.hauteur)} mm` : ""}. Pour le corriger, utilise le crayon dans l'historique.
+                      </p>
                     </div>
-                    <div style={{ flex: 1 }}>
-                      <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={b.hauteur} onChange={(e) => updateLubBlock(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                  );
+                }
+                const sharedTank = b.produit === "rubia_tir7400" && (SHARED_RUBIA_TANK_SITES.includes(siteId) || b.autreLitres !== "");
+                return (
+                  <div key={b.produit} style={{ border: `1px solid ${already ? C.blue : C.border}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+                    <p style={{ margin: "0 0 8px", fontSize: 12.5, fontWeight: 700, color: C.orange }}>{b.label}{already && <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: C.blue }}>Déjà enregistré — corrige les valeurs puis Enregistrer pour le mettre à jour</span>}</p>
+                    <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1.3 }}>
+                        <Field label="Contenant"><input className="somip-input" value={b.cuve} onChange={(e) => updateLubBlock(idx, "cuve", e.target.value)} placeholder={`Cuve ${b.label}`} /></Field>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Hauteur (mm)"><input type="number" className="somip-input" value={b.hauteur} onChange={(e) => updateLubBlock(idx, "hauteur", e.target.value)} placeholder="0" /></Field>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Index du compteur"><input type="number" className="somip-input" value={b.indexFin} onChange={(e) => updateLubBlock(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+                      </div>
                     </div>
-                    <div style={{ flex: 1 }}>
-                      <Field label="Index du compteur"><input type="number" className="somip-input" value={b.indexFin} onChange={(e) => updateLubBlock(idx, "indexFin", e.target.value)} placeholder="0" /></Field>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                      <div style={{ flex: 1 }}>
+                        <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.stockAmbiant} onChange={(e) => updateLubBlock(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
+                      </div>
+                      <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
+                        <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Conversion en kg</span>
+                        <span className="somip-mono" style={{ fontWeight: 700, color: lubBlocksKg(b) !== null ? C.orange : C.sub }}>{lubBlocksKg(b) !== null ? `${fmt(lubBlocksKg(b))} kg` : "—"}</span>
+                      </div>
                     </div>
+                    {sharedTank && (
+                      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px dashed ${C.border}` }}>
+                        <p style={{ margin: "0 0 6px", fontSize: 11.5, fontWeight: 700, color: C.ink }}>Autre produit dans la même cuve (optionnel)</p>
+                        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                          <div style={{ flex: 1.3 }}>
+                            <Field label="Produit"><input className="somip-input" value={b.autreNom} onChange={(e) => updateLubBlock(idx, "autreNom", e.target.value)} placeholder={SHARED_RUBIA_DEFAULT_NAME} /></Field>
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.autreLitres} onChange={(e) => updateLubBlock(idx, "autreLitres", e.target.value)} placeholder="0" /></Field>
+                          </div>
+                        </div>
+                        {b.autreLitres !== "" && (
+                          <p style={{ margin: "6px 0 0", fontSize: 11, color: C.sub }}>
+                            Total dans la cuve : <strong style={{ color: C.ink }}>{fmt((Number(b.stockAmbiant) || 0) + (Number(b.autreLitres) || 0))} L</strong> — le stock de l'huile ci-dessus reste celui de l'huile seule.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                    <div style={{ flex: 1 }}>
-                      <Field label="Stock (L, ambiant)"><input type="number" className="somip-input" value={b.stockAmbiant} onChange={(e) => updateLubBlock(idx, "stockAmbiant", e.target.value)} placeholder="0" /></Field>
-                    </div>
-                    <div style={{ flex: 1, textAlign: "right", paddingBottom: 9 }}>
-                      <span style={{ fontSize: 11, color: C.sub, display: "block" }}>Conversion en kg</span>
-                      <span className="somip-mono" style={{ fontWeight: 700, color: lubBlocksKg(b) !== null ? C.orange : C.sub }}>{lubBlocksKg(b) !== null ? `${fmt(lubBlocksKg(b))} kg` : "—"}</span>
-                    </div>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
+              {!editingId && lubPlan.allAlreadySaved && (
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.sub, fontWeight: 600 }}>
+                  {canManage
+                    ? "Toutes les huiles de ce site sont déjà enregistrées pour cette date et ce type. Corrige directement les valeurs ci-dessus, puis clique sur Enregistrer pour les mettre à jour (sans créer de doublon)."
+                    : "Toutes les huiles de ce site sont déjà enregistrées pour cette date et ce type. Pour corriger l'une d'elles, utilise le crayon dans l'historique."}
+                </p>
+              )}
+              {!editingId && lubToUpdate.length > 0 && (
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.blue, fontWeight: 600 }}>{lubToUpdate.length} huile(s) déjà enregistrée(s) seront mises à jour : {lubToUpdate.map((b) => b.label).join(", ")}.</p>
+              )}
+              {!editingId && !lubPlan.allAlreadySaved && lubPlan.missing.length > 0 && (
+                <p style={{ margin: "4px 0 10px", fontSize: 12, color: C.warning, fontWeight: 700 }}>Il manque : {lubPlan.missing.map((b) => b.label).join(", ")} — saisis 0 si l'huile est vide.</p>
+              )}
             </>
           )}
 
@@ -6899,7 +7907,10 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   <td><Badge color={inv.type === "inopine" ? C.orange : C.blue}>{TYPE_INVENTAIRE_LABELS[inv.type]}</Badge></td>
                   <td style={{ color: C.sub }}>{inv.inventoriste || "—"}</td>
                   <td style={{ color: C.sub }}>{inv.operateur || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(inv.stockAmbiant)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>
+                    {fmt(inv.stockAmbiant)} L
+                    {(() => { const extra = (inv.cuves || []).reduce((a, cv) => a + (cv.autresContenus || []).reduce((b, x) => b + (Number(x.stockAmbiant) || 0), 0), 0); return extra > 0 ? <span style={{ display: "block", fontSize: 10.5, fontWeight: 600, color: C.sub }}>+ {fmt(extra)} L autre produit</span> : null; })()}
+                  </td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: inv.stock15 !== undefined ? C.blue : C.sub }}>
                     {inv.produit && inv.produit !== "gasoil"
                       ? (() => { const d = LUBRICANTS.find((l) => l.id === inv.produit)?.densite; return d ? `${fmt(inv.stockAmbiant * d)} kg` : "—"; })()
@@ -6907,7 +7918,7 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
                   </td>
                   <td>
                     <button className="somip-btn somip-btn-ghost" style={{ fontSize: 11.5, padding: "4px 8px" }} onClick={() => setSigningId(signingId === inv.id ? null : inv.id)}>
-                      <Pencil size={12} /> {[inv.signatureSomipUrl, inv.signatureOperateurUrl, inv.signatureTotalUrl].filter(Boolean).length}/3
+                      <Pencil size={12} /> {inventaireSignatureSlots(inv).filter((s) => s.url).length}/2
                     </button>
                   </td>
                   <td>
@@ -6939,11 +7950,8 @@ function InventaireOfficielTab({ sites, siteTanks, siteDepotageMeters, siteMeter
         {signingId && (() => {
           const inv = list.find((i) => i.id === signingId);
           if (!inv) return null;
-          const slots = [
-            { role: "somip", label: "SOMIP", url: inv.signatureSomipUrl, by: inv.signatureSomipBy, at: inv.signatureSomipAt, can: canSignSomip },
-            { role: "operateur", label: "Opérateur", url: inv.signatureOperateurUrl, by: inv.signatureOperateurBy, at: inv.signatureOperateurAt, can: canSignOperateur },
-            { role: "total", label: "TotalEnergies", url: inv.signatureTotalUrl, by: inv.signatureTotalBy, at: inv.signatureTotalAt, can: canSignTotal },
-          ];
+          const canByRole = { somip: canSignSomip, total: canSignTotal };
+          const slots = inventaireSignatureSlots(inv).map((s) => ({ ...s, can: canByRole[s.role] }));
           return (
             <div className="somip-panel" style={{ marginTop: 14, padding: 14, background: C.bg }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -7003,6 +8011,7 @@ function VcfView() {
         <h3 style={{ margin: "0 0 4px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Thermometer size={15} color={C.blue} />Volume ambiant → Température → Densité → Volume à 15°C</h3>
         <p style={{ margin: "0 0 16px", fontSize: 12.5, color: C.sub }}>
           Formule ASTM D1250 / API MPMS Chapitre 11.1 (Tables 53B/54B, produits pétroliers généralisés) — plage valide {VCF_MIN_DENSITY} à {VCF_MAX_DENSITY} kg/m³.
+          {" "}Pour une densité de {GESTOCK_VCF_DENS_MIN} à {GESTOCK_VCF_DENS_MAX} kg/m³ et une température de {GESTOCK_VCF_TEMP_MIN} à {GESTOCK_VCF_TEMP_MAX} °C, le coefficient suit la convention GESTOCK (densité arrondie à l'unité, température au quart de degré, 4 décimales) : mêmes volumes à 15 °C que dans GESTOCK.
         </p>
         <Field label="Volume à température ambiante (L)">
           <input type="number" className="somip-input" value={volumeAmbiant} onChange={(e) => setVolumeAmbiant(e.target.value)} placeholder="Ex : 10000" />
@@ -7067,7 +8076,7 @@ function VcfView() {
 /* même contenu, les mêmes filtres et les mêmes exports partout.          */
 /* ------------------------------------------------------------------ */
 function renderReportTab(tab, ctx) {
-  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds } = ctx;
+  const { sites, movements, inventaires, productStocks, truckAssignments, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, presenterName, appendAudit, flash } = ctx;
   // Déjà filtré en amont (la page Rapports est ouverte à tous sauf les comptes TotalEnergies,
   // et "Documents & suivis" a son propre contrôle par page) — cette barrière ne doit donc pas
   // exclure en plus un compte Lecture seule sans site attribué, qui doit tout voir comme un
@@ -7075,14 +8084,13 @@ function renderReportTab(tab, ctx) {
   const canSee = true;
   switch (tab) {
     case "synthese_mensuelle_site": return <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
-    case "synthese_mensuelle_site_15": return <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
     case "synthese_mensuelle_lub": return <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} assignedSiteIds={assignedSiteIds} />;
     case "synthese_station_jour": return <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
-    case "synthese_station_jour_15": return <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
-    case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
-    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} /> : null;
+    case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} canManage={canManage} editMovementTempDensite={editMovementTempDensite} /> : null;
+    case "bilansap": return canSee ? <BilansMatieresSap sites={sites} movements={movements} canManage={canManage} canEdit={!!(canManage || isSiteRestricted)} assignedSiteIds={assignedSiteIds} userName={presenterName} appendAudit={appendAudit} flash={flash}
+      exportToExcel={exportToExcel} exportToPdf={exportToPdf} PresentationPanel={BilanPresentationPanel} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
     case "retours_chargements": return canSee ? <RetoursChargementsReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
@@ -7107,9 +8115,9 @@ const DOC_PAGES = {
     label: "Transferts", icon: Truck, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
     tabs: [{ id: "transferts", label: "Transferts entre sites" }, { id: "retours_chargements", label: "Retours cuve & Chargements" }],
   },
-  doc_bilans: {
-    label: "Bilans matières", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
-    tabs: [{ id: "bilan", label: "Bilan Matières" }],
+  doc_bilan_sap: {
+    label: "Bilan matières", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    tabs: [{ id: "bilansap", label: "Bilan matières" }],
   },
   doc_lubrifiants: {
     label: "Lubrifiants", icon: Fuel, allowed: () => true,
@@ -7141,13 +8149,11 @@ function DocumentsPage({ page, ...ctx }) {
   );
 }
 
-function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds }) {
+function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, canManage, isSiteRestricted, assignedSiteIds }) {
   const CATEGORIES = [
     { id: "synthese_mois", label: "Synthèse journalière du mois", icon: TrendingUp, show: true, tabs: [
         { id: "synthese_mensuelle_site", label: "Gasoil" },
-        { id: "synthese_mensuelle_site_15", label: "Gasoil 15°C" },
         { id: "synthese_station_jour", label: "Station + camion" },
-        { id: "synthese_station_jour_15", label: "Station + camion 15°C" },
       ] },
     { id: "ecart_cat", label: "Gain/Perte du mois", icon: TrendingDown, show: canManage || isSiteRestricted, tabs: [
         { id: "ecart_mensuel", label: "Gain/Perte du mois" },
@@ -7183,7 +8189,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
         </div>
       )}
       {activeCategory && activeCategory.tabs.length === 1 && <div style={{ marginBottom: 4 }} />}
-      {renderReportTab(tab, { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds })}
+      {renderReportTab(tab, { sites, movements, inventaires, productStocks, truckAssignments, canManage, isSiteRestricted, assignedSiteIds })}
     </div>
   );
 }
@@ -7341,137 +8347,6 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
             : isLubSite
             ? "Stock théorique = Stock début + Réception − Ventes − Chargement laitiers (calcul pur). Le Chargement laitiers crée automatiquement le Chargement correspondant côté camion. Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
             : "Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* ---- Synthèse journalière du mois, par site — Base 15°C ---- */
-function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSiteIds }) {
-  const selectableSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
-  const [siteId, setSiteId] = useState(selectableSites[0]?.id || "");
-  const [month, setMonth] = useState(currentMonth());
-  const site = sites.find((s) => s.id === siteId);
-  const isTruck = !!site?.isMobile;
-  const isLubSite = site ? LUBRICANT_SITE_IDS.includes(site.id) : false;
-  const bounds = monthBounds(month);
-
-  const days = [];
-  if (site) {
-    let cur = new Date(bounds.start);
-    const end = new Date(bounds.end);
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate15(site, movements, d, inventaires);
-      const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty15(dayMovs, ["reception"]);
-      const ventesRaw = sumQty15(dayMovs, ["sortie"]);
-      const chargementLaitiers = isTruck ? 0 : sumQty15(dayMovs, ["sortie_camion"]);
-      const retourCamions = isTruck ? 0 : sumQty15(dayMovs, ["retour_camion"]);
-      const retourCuve = isTruck ? sumQty15(dayMovs, ["retour_cuve_camion"]) : 0;
-      const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw;
-      const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
-      const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
-      const tempDensiteLbl = tempDensiteLabel(dayMovs, ["reception"]);
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
-      const stockJauge = inv ? inv.stockPhysique15 : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, tempDensiteLbl, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
-      cur.setDate(cur.getDate() + 1);
-    }
-  }
-
-  const totalReception = days.reduce((a, d) => a + d.reception, 0);
-  const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
-  const totalChargementLaitiers = days.reduce((a, d) => a + d.chargementLaitiers, 0);
-  const totalRetourCuve = days.reduce((a, d) => a + d.retourCuve, 0);
-  const daysWithJauge = days.filter((d) => d.stockJauge !== null);
-  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
-  const firstDay = days[0] || null;
-  const lastDay = days[days.length - 1] || null;
-  const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
-
-  const receptionLabel = isTruck ? "Chargement" : "Réception";
-  const ventesLabel = isTruck ? "Sortie Fiche Terrain" : "Ventes";
-
-  const doExcel = () => exportToExcel(`SOMIP_Synthese15_${site?.code || ""}_${month}.xlsx`, [{
-    name: "Synthèse 15°C", rows: days.map((d) => ({
-      Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), [`${receptionLabel} 15°C (L)`]: Math.round(d.reception), [`${ventesLabel} 15°C (L)`]: Math.round(d.ventes),
-      ...(isLubSite ? { "Chargement laitiers 15°C (L)": Math.round(d.chargementLaitiers) } : {}),
-      ...(isTruck ? { "Retour Cuve 15°C (L)": Math.round(d.retourCuve) } : {}),
-      "Index (compteurs)": d.indexLabel || "",
-      "Stock théorique 15°C (L)": Math.round(d.stockTheorique), "Stock jauge 15°C (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
-      "Gain/Perte 15°C (L)": d.ecart !== null ? Math.round(d.ecart) : "",
-    })),
-  }]);
-
-  return (
-    <div>
-      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <Field label="Site">
-          <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {selectableSites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
-          </select>
-        </Field>
-        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
-      </div>
-
-      {site && (
-        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name} (15°C)</h4>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
-            <MiniStat label={`Total ${receptionLabel}`} value={`+${fmt(totalReception)} L`} color={C.success} />
-            <MiniStat label={`Total ${ventesLabel}`} value={`${fmt(totalVentes)} L`} />
-            {isLubSite && <MiniStat label="Total Chargement laitiers" value={`${fmt(totalChargementLaitiers)} L`} color={C.orange} />}
-            {isTruck && <MiniStat label="Total Retour Cuve" value={`${fmt(totalRetourCuve)} L`} />}
-            <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
-            <MiniStat label="Stock jauge (dernière mesure 15°C)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
-            <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
-          </div>
-        </div>
-      )}
-
-      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title={`Synthèse journalière — ${site?.name || ""} — Base 15°C`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead>
-              <tr>
-                <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
-                <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
-                {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
-                {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
-                <th>Index (compteurs)</th>
-                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
-                <th style={{ textAlign: "right" }}>Gain/Perte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 9 : 8} text="Sélectionne un site." />}
-              {days.map((d) => (
-                <tr key={d.date}>
-                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
-                  {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
-                  {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
-                  <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
-                  <td style={{ fontSize: 12, color: C.sub }}>{d.tempDensiteLbl || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
-                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Toutes les valeurs sont corrigées à 15°C. Stock jauge = dernière mesure avec température/densité renseignées ce mois-ci. Les jours sans température/densité saisie n'affichent pas de Stock jauge ici (voir la version Ambiant).
         </p>
       </div>
     </div>
@@ -7775,89 +8650,6 @@ function StockStatementAmbiant({ sites, movements, inventaires }) {
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Base entièrement en volumes ambiants (aucune correction de température). Stock fin = valeur mesurée à la jauge, saisie lors de la Saisie journalière. Gain/Perte = Stock fin − Stock théorique. N'apparaît que pour les sites où un Stock fin a été saisi ce jour-là.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function StockStatement15({ sites, movements, inventaires }) {
-  const [date, setDate] = useState(todayStr());
-
-  const rows = sites.map((s) => {
-    const stockDebut = stockBeforeDate15(s, movements, date, inventaires);
-    const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === date);
-    const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-    const reception = sumQty15(dayMovs, ["reception"]);
-    const ventes = sumQty15(dayMovs, ["sortie"]);
-    const chargementsCamions = sumQty15(dayMovs, ["sortie_camion"]);
-    const retourCamions = sumQty15(dayMovs, ["retour_camion"]);
-    const sorties = ventes + chargementsCamions;
-    const stockTheorique = stockDebut + reception + retourCamions - sorties;
-    const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
-    const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
-    const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
-    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === date));
-    const stockFin = inv && inv.stockPhysique15 !== undefined ? inv.stockPhysique15 : null;
-    const ecart = stockFin !== null ? stockFin - stockTheorique : null;
-    return { site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique, stockFin, ecart, hasTemp: inv ? inv.stockPhysique15 !== undefined : false };
-  });
-
-  const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_15C_${date}.xlsx`, [{
-    name: "Etat 15C", rows: rows.map((r) => ({
-      Site: r.site.name, "Stock début 15°C (L)": Math.round(r.stockDebut), "Réception 15°C (L)": Math.round(r.reception),
-      "Ventes 15°C (L)": Math.round(r.ventes), "Chargement camions 15°C (L)": Math.round(r.chargementsCamions), "Retour camions 15°C (L)": Math.round(r.retourCamions),
-      "Index avant": r.sortIndexAvant ?? "", "Index après": r.sortIndexApres ?? "",
-      "Stock théorique 15°C (L)": Math.round(r.stockTheorique),
-      "Stock fin 15°C - jauge (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
-      "Gain/Perte 15°C (L)": r.ecart !== null ? Math.round(r.ecart) : "",
-    })),
-  }]);
-
-  return (
-    <div>
-      <div className="somip-no-print" style={{ marginBottom: 14 }}>
-        <Field label="Date de l'état journalier"><input type="date" className="somip-input" style={{ maxWidth: 220 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-      </div>
-      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="État journalier des stocks — Base à 15°C" period={`Journée du ${date}`} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead>
-              <tr>
-                <th>Site</th><th style={{ textAlign: "right" }}>Stock début</th>
-                <th style={{ textAlign: "right" }}>Réception</th>
-                <th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Chargement camions</th>
-                <th style={{ textAlign: "right" }}>Retour camions</th>
-                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
-                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin (jauge)</th>
-                <th style={{ textAlign: "right" }}>Gain/Perte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.site.id}>
-                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.ink : C.sub, fontWeight: r.ventes ? 600 : 400 }}>{r.ventes ? `${fmt(r.ventes)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexApres !== null ? fmt(r.sortIndexApres) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
-                    {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Toutes les valeurs sont corrigées à 15°C (ASTM D1250 / API MPMS 11.1). Stock fin = valeur mesurée à la jauge, corrigée avec la température/densité saisies au moment de la mesure. N'apparaît que pour les sites où une température et une densité ont été renseignées avec le Stock fin ce jour-là.
         </p>
       </div>
     </div>
@@ -8421,182 +9213,6 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
   );
 }
 
-/* ---- Synthèse journalière — Station (site + camion) — 15°C ---- */
-function StationDailyLedgerReport15({ sites, movements, inventaires, truckAssignments, assignedSiteIds }) {
-  const stationsAll = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
-  const stations = assignedSiteIds?.length ? stationsAll.filter((s) => assignedSiteIds.includes(s.id)) : stationsAll;
-  const [stationId, setStationId] = useState(stations[0]?.id || "");
-  const [month, setMonth] = useState(currentMonth());
-  const station = sites.find((s) => s.id === stationId);
-  const bounds = monthBounds(month);
-
-  const days = [];
-  const truckEcartByTruck = {};
-  if (station) {
-    let cur = new Date(bounds.start);
-    const end = new Date(bounds.end);
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const siteStockDebut = stockBeforeDate15(station, movements, d, inventaires);
-      const dayMovsSite = movements.filter((m) => m.siteId === station.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty15(dayMovsSite, ["reception"]);
-      const ventesDirectes = sumQty15(dayMovsSite, ["sortie"]);
-      const chargementLaitiers = sumQty15(dayMovsSite, ["sortie_camion"]);
-      const chargementTransfers = dayMovsSite.filter((m) => m.type === "sortie_camion" && m.camion)
-        .map((m) => transferLabel(sites, truckAssignments, m.camion, station.id, d)).filter(Boolean);
-      const retourCamions = sumQty15(dayMovsSite, ["retour_camion"]);
-      const siteTheorique = siteStockDebut + reception + retourCamions - ventesDirectes - chargementLaitiers;
-      const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
-      const siteEcart = siteInv ? siteInv.stockPhysique15 - siteTheorique : null;
-
-      const truckIdsToday = trucksAssignedAt(truckAssignments, station.id, d);
-      let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJaugeOuTheorique = 0;
-      const truckDetails = [];
-      for (const truckId of truckIdsToday) {
-        const truck = sites.find((s) => s.id === truckId);
-        if (!truck) continue;
-        const tStockDebut = stockBeforeDate15(truck, movements, d, inventaires);
-        const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
-        const tChargement = sumQty15(dayMovsTruck, ["reception"]);
-        const tSortieTerrainRaw = sumQty15(dayMovsTruck, ["sortie"]);
-        const tRetourCuve = sumQty15(dayMovsTruck, ["retour_cuve_camion"]);
-        const tSortieTerrain = Math.max(0, tSortieTerrainRaw - tRetourCuve);
-        const tTheorique = tStockDebut + tChargement - tSortieTerrainRaw;
-        const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
-        trucksStockDebut += tStockDebut;
-        trucksTheorique += tTheorique;
-        trucksVentesTerrain += tSortieTerrain;
-        trucksJaugeOuTheorique += tInv ? tInv.stockPhysique15 : tTheorique;
-        if (tInv) {
-          const tEcart = tInv.stockPhysique15 - tTheorique;
-          if (!truckEcartByTruck[truckId]) truckEcartByTruck[truckId] = { name: truck.name, sum: 0 };
-          truckEcartByTruck[truckId].sum += tEcart;
-        }
-        truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique15 : null });
-      }
-
-      const stockDebutCombine = siteStockDebut + trucksStockDebut;
-      const ventesCombinees = ventesDirectes + trucksVentesTerrain;
-      const stockTheoriqueCombine = siteTheorique + trucksTheorique;
-      const stockJaugeCombine = siteInv !== null ? siteInv.stockPhysique15 + trucksJaugeOuTheorique : null;
-      const ecart = stockJaugeCombine !== null ? stockJaugeCombine - stockTheoriqueCombine : null;
-
-      days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, chargementTransfers, stockTheoriqueCombine, stockJaugeCombine, ecart, siteEcart, truckDetails, nbTrucks: truckIdsToday.length });
-      cur.setDate(cur.getDate() + 1);
-    }
-  }
-
-  const totalReception = days.reduce((a, d) => a + d.reception, 0);
-  const totalVentes = days.reduce((a, d) => a + d.ventesCombinees, 0);
-  const daysWithJauge = days.filter((d) => d.stockJaugeCombine !== null);
-  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
-  const firstDay = days[0] || null;
-  const lastDay = days[days.length - 1] || null;
-  const siteEcartCumule = days.reduce((a, d) => a + (d.siteEcart || 0), 0);
-  const truckEcarts = Object.values(truckEcartByTruck);
-  const trucksEcartCumule = truckEcarts.reduce((a, t) => a + t.sum, 0);
-  const ecartCumule = siteEcartCumule + trucksEcartCumule;
-
-  const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_15C_${station?.code || ""}_${month}.xlsx`, [{
-    name: "Synthèse Station 15°C", rows: days.map((d) => ({
-      Date: d.date, "Stock début combiné (L)": Math.round(d.stockDebutCombine), "Réception (L)": Math.round(d.reception),
-      "Ventes combinées (L)": Math.round(d.ventesCombinees), "Chargement laitiers (L)": Math.round(d.chargementLaitiers),
-      "Camions rattachés": d.nbTrucks, "Stock théorique combiné (L)": Math.round(d.stockTheoriqueCombine),
-      "Stock jauge combiné (L)": d.stockJaugeCombine !== null ? Math.round(d.stockJaugeCombine) : "",
-      "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
-    })),
-  }]);
-
-  const doPdf = () => exportToPdf({
-    filename: `SOMIP_Synthese_Station_15C_${station?.code || ""}_${month}.pdf`,
-    title: `Synthèse journalière — ${station?.name || ""} (site + camions) — 15°C`,
-    period: `Mois de ${bounds.start} au ${bounds.end}`,
-    columns: ["Date", "Stock début combiné", "Réception", "Ventes combinées", "Chargement laitiers", "Camions", "Stock théorique combiné", "Stock jauge combiné", "Gain/Perte"],
-    rows: days.map((d) => [
-      d.date, `${fmt(d.stockDebutCombine)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—",
-      d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—", String(d.nbTrucks || 0),
-      `${fmt(d.stockTheoriqueCombine)} L`, d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—",
-      d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
-    ]),
-  });
-
-  return (
-    <div>
-      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <Field label="Station">
-          <select className="somip-select" style={{ maxWidth: 240 }} value={stationId} onChange={(e) => setStationId(e.target.value)}>
-            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
-      </div>
-
-      {station && (
-        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {station.name} (site + camions rattachés) — base 15°C</h4>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <MiniStat label="Stock début combiné (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebutCombine)} L` : "—"} />
-            <MiniStat label="Total Réceptions (site)" value={`+${fmt(totalReception)} L`} color={C.success} />
-            <MiniStat label="Total Ventes combinées" value={`${fmt(totalVentes)} L`} />
-            <MiniStat label="Stock théorique combiné (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheoriqueCombine)} L` : "—"} bold />
-            <MiniStat label="Stock jauge combiné (dernière mesure complète)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJaugeCombine)} L (${lastDayWithJauge.date})` : "—"} bold />
-            <MiniStat label="Gain/Perte cumulé (site + camions)" value={`${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L`} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
-          </div>
-          <p style={{ margin: "12px 0 0", fontSize: 12, color: C.sub }}>
-            Détail du cumul : <strong style={{ color: C.ink }}>{station.name}</strong> {siteEcartCumule >= 0 ? "+" : ""}{fmt(siteEcartCumule)} L
-            {truckEcarts.map((t) => <span key={t.name}> · <strong style={{ color: C.ink }}>{t.name}</strong> {t.sum >= 0 ? "+" : ""}{fmt(t.sum)} L</span>)}
-            {truckEcarts.length === 0 && " (aucun camion jaugé ce mois-ci)"}
-          </p>
-        </div>
-      )}
-
-      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title={`Synthèse journalière — ${station?.name || ""} (site + camions) — 15°C`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
-        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead>
-              <tr>
-                <th>Date</th><th style={{ textAlign: "right" }}>Stock début combiné</th>
-                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes combinées</th>
-                <th style={{ textAlign: "right" }}>Chargement laitiers</th><th style={{ textAlign: "right" }}>Camions</th>
-                <th style={{ textAlign: "right" }}>Stock théorique combiné</th><th style={{ textAlign: "right" }}>Stock jauge combiné</th>
-                <th style={{ textAlign: "right" }}>Gain/Perte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne une station." />}
-              {days.map((d) => (
-                <tr key={d.date}>
-                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebutCombine)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventesCombinees ? C.ink : C.sub, fontWeight: d.ventesCombinees ? 600 : 400 }}>{d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub }}>
-                    {d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}
-                    {d.chargementTransfers?.length > 0 && d.chargementTransfers.map((t, i) => (
-                      <div key={i} style={{ fontSize: 10, fontWeight: 600, color: C.warning }}>{t}</div>
-                    ))}
-                  </td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.nbTrucks || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheoriqueCombine)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
-                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Version 15°C — mêmes règles que la synthèse en base ambiante, avec les valeurs corrigées à 15°C (jours sans température/densité renseignées exclus du Stock jauge).
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function MiniStat({ label, value, color, bold }) {
   return (
     <div style={{ background: C.bg, borderRadius: 8, padding: "10px 14px", minWidth: 150 }}>
@@ -8606,438 +9222,140 @@ function MiniStat({ label, value, color, bold }) {
   );
 }
 
-/* ---- Registre des bons de livraison ---- */
-/* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
-// Une cellule de tableau Bilan Matières : la valeur à 15°C en avant (comme avant), la valeur
-// ambiant juste au-dessus en plus petit — "—" si cette saisie ne porte pas encore de valeur
-// ambiant (anciennes saisies, faites avant l'ajout de ce champ).
-function BilanCell({ ambiant, v15, color, bold, sign }) {
-  const fmtSigned = (v) => `${sign && v >= 0 ? "+" : ""}${fmt(v)} L`;
-  return (
-    <td className="somip-mono" style={{ textAlign: "right" }}>
-      <div style={{ fontSize: 10.5, color: C.sub }}>{ambiant !== null && ambiant !== undefined ? fmtSigned(ambiant) : "—"}</div>
-      <div style={{ fontWeight: bold ? 700 : 400, color: color || "inherit" }}>{fmtSigned(v15)}</div>
-    </td>
-  );
-}
+/* ---- Présentation PowerPoint du bilan : textes à saisir + génération (Superviseur) ---- */
+function BilanPresentationPanel({ rows, periodType, periodKey, saved, status, onSave, defaultPreparePar, seuil }) {
+  const labels = bilanPeriodLabels(periodType, periodKey);
+  const init = saved || {};
+  const [autonomies, setAutonomies] = useState(() => Object.fromEntries(rows.map((r) => [r.site.id, init.autonomies?.[r.site.id] ?? ""])));
+  const [natures, setNatures] = useState(() => Object.fromEntries(rows.map((r) => [r.site.id, init.natures?.[r.site.id] || ""])));
+  const [justificatifs, setJustificatifs] = useState(() => (init.justificatifs || []).map((j) => ({ ...j, lignes: (j.lignes || []).map((l) => ({ ...l })) })));
+  const [conclusion, setConclusion] = useState(init.conclusion || "");
+  const [recoText, setRecoText] = useState((init.recommandations || []).join("\n"));
+  const [preparePar, setPreparePar] = useState(init.preparePar || defaultPreparePar || "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
 
-function BilanMatieresView({ sites, bilans, movements, saveBilan, deleteBilan, canManage, assignedSiteIds }) {
-  const fixedSites = sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
-  const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
-  const [periodType, setPeriodType] = useState("mensuel");
-  const [monthKey, setMonthKey] = useState(currentMonth());
-  const [year, setYear] = useState(new Date().getFullYear());
-  const [quarter, setQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
-  const [decadeMonth, setDecadeMonth] = useState(currentMonth());
-  const [decadeNum, setDecadeNum] = useState(1);
-  const periodKey = periodType === "mensuel" ? monthKey : periodType === "trimestriel" ? `${year}-Q${quarter}` : `${decadeMonth}-D${decadeNum}`;
-  const site = sites.find((s) => s.id === siteId);
-
-  // reception15/receptionAmbiant ne sont plus des champs du formulaire : la réception est
-  // désormais automatique (voir receptionAuto15/receptionAutoAmbiant), reprise de Saisie journalière.
-  const emptyForm = {
-    ventes15: "", transferts15: "", transfertSiteId: "", stockFin15: "",
-    ventesAmbiant: "", transfertsAmbiant: "", stockFinAmbiant: "",
-    commentaire: "",
-  };
-  const [form, setForm] = useState(emptyForm);
-  const [photoFiles, setPhotoFiles] = useState([]);
-  const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
-
-  const sorted = [...bilans].filter((b) => b.siteId === siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
-  const existing = sorted.find((b) => b.periodKey === periodKey);
-  const idx = sorted.findIndex((b) => b.periodKey === periodKey);
-  const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
-  // Le Stock début reprend automatiquement le Stock fin de la période précédente pour ce site
-  // (ambiant et 15°C séparément) — comme c'était déjà le cas pour le 15°C.
-  const stockDebut = previous ? previous.stockFin15 : 0;
-  const stockDebutAmbiant = previous?.stockFinAmbiant ?? 0;
-
-  // Réception : automatique, reprise des réceptions déjà saisies dans Saisie journalière pour
-  // ce site sur la période choisie — plus besoin de la retaper, et toujours la même donnée que
-  // partout ailleurs dans l'application.
-  const periodRange = periodType === "mensuel" ? { start: `${periodKey}-01`, end: `${periodKey}-31` }
-    : periodType === "trimestriel" ? (() => {
-        const [y, q] = periodKey.split("-Q").map(Number);
-        const startMonth = (q - 1) * 3 + 1;
-        const endMonth = startMonth + 2;
-        return { start: `${y}-${pad2(startMonth)}-01`, end: `${y}-${pad2(endMonth)}-31` };
-      })()
-    : (() => { const [m, d] = periodKey.split("-D"); return decadeBoundsExplicit(m, Number(d)); })();
-  const receptionMovs = (movements || []).filter((m) => m.siteId === siteId && m.type === "reception" && (m.product || "gasoil") === "gasoil" && m.date >= periodRange.start && m.date <= periodRange.end);
-  const receptionAuto15 = receptionMovs.reduce((a, m) => a + (m.volumeCorrige15 ?? m.quantity), 0);
-  const receptionAutoAmbiant = receptionMovs.reduce((a, m) => a + m.quantity, 0);
-
-  const receptionN = receptionAuto15;
-  const ventesN = Number(form.ventes15) || 0;
-  const transfertsN = Number(form.transferts15) || 0;
-  const stockFinN = Number(form.stockFin15) || 0;
-  const stockTheorique = stockDebut + receptionN - ventesN + transfertsN;
-  const ecart = form.stockFin15 !== "" ? stockFinN - stockTheorique : null;
-
-  const receptionAmbiantN = receptionAutoAmbiant;
-  const ventesAmbiantN = Number(form.ventesAmbiant) || 0;
-  const transfertsAmbiantN = Number(form.transfertsAmbiant) || 0;
-  const stockFinAmbiantN = Number(form.stockFinAmbiant) || 0;
-  const stockTheoriqueAmbiant = stockDebutAmbiant + receptionAmbiantN - ventesAmbiantN + transfertsAmbiantN;
-  const ecartAmbiant = form.stockFinAmbiant !== "" ? stockFinAmbiantN - stockTheoriqueAmbiant : null;
-
-  const resetForm = () => { setForm(emptyForm); setPhotoFiles([]); setExistingPhotoUrls([]); };
-
-  const submit = () => {
-    if (form.stockFin15 === "" || form.stockFinAmbiant === "" || !siteId) return;
-    // La réception n'est plus retapée : on enregistre directement la valeur automatique calculée
-    // à partir des réceptions déjà saisies dans Saisie journalière pour cette période.
-    saveBilan({ siteId, periodType, periodKey, ...form, reception15: receptionAuto15, receptionAmbiant: receptionAutoAmbiant, photoFiles, existingPhotoUrls });
-    resetForm();
-  };
-
-  const loadForEdit = (b) => {
-    // La réception n'est plus rechargée depuis la saisie passée : elle est systématiquement
-    // recalculée en automatique pour la période en cours (voir receptionAuto15/receptionAutoAmbiant).
-    setForm({
-      ventes15: String(b.ventes15), transferts15: String(b.transferts15),
-      transfertSiteId: b.transfertSiteId || "", stockFin15: String(b.stockFin15),
-      ventesAmbiant: b.ventesAmbiant !== undefined ? String(b.ventesAmbiant) : "",
-      transfertsAmbiant: b.transfertsAmbiant !== undefined ? String(b.transfertsAmbiant) : "",
-      stockFinAmbiant: b.stockFinAmbiant !== undefined ? String(b.stockFinAmbiant) : "",
-      commentaire: b.commentaire || "",
-    });
-    setExistingPhotoUrls(b.photoUrls || []);
-    setPhotoFiles([]);
-  };
-
-  // Historique enrichi pour le tableau + le diagramme (ce site uniquement).
-  const history = sorted.map((b, i) => {
-    const prev = i > 0 ? sorted[i - 1] : null;
-    const debut = prev ? prev.stockFin15 : 0;
-    const debutAmbiant = prev?.stockFinAmbiant ?? 0;
-    const theorique = debut + b.reception15 - b.ventes15 + b.transferts15;
-    const ec = b.stockFin15 - theorique;
-    const theoriqueAmbiant = b.receptionAmbiant !== undefined ? debutAmbiant + (b.receptionAmbiant || 0) - (b.ventesAmbiant || 0) + (b.transfertsAmbiant || 0) : null;
-    const ecAmbiant = b.stockFinAmbiant !== undefined && theoriqueAmbiant !== null ? b.stockFinAmbiant - theoriqueAmbiant : null;
-    return { ...b, stockDebut: debut, stockDebutAmbiant: debutAmbiant, stockTheorique: theorique, ecart: ec, stockTheoriqueAmbiant: theoriqueAmbiant, ecartAmbiant: ecAmbiant };
+  const collect = () => ({
+    autonomies: Object.fromEntries(Object.entries(autonomies).filter(([, v]) => v !== "" && Number.isFinite(Number(v))).map(([k, v]) => [k, Number(v)])),
+    natures: Object.fromEntries(Object.entries(natures).filter(([, v]) => String(v).trim() !== "").map(([k, v]) => [k, String(v).trim()])),
+    justificatifs, conclusion, recommandations: recoText.split("\n").map((s) => s.trim()).filter(Boolean), preparePar: preparePar.trim(),
   });
-
-  const doPptx = () => exportBilanToPptx(history, periodType, site?.name);
-
-  // ---- Vue combinée "Tous les sites", pour une période choisie séparément ----
-  const [allPeriodType, setAllPeriodType] = useState("mensuel");
-  const [allMonthKey, setAllMonthKey] = useState(currentMonth());
-  const [allYear, setAllYear] = useState(new Date().getFullYear());
-  const [allQuarter, setAllQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
-  const [allDecadeMonth, setAllDecadeMonth] = useState(currentMonth());
-  const [allDecadeNum, setAllDecadeNum] = useState(1);
-  const allPeriodKey = allPeriodType === "mensuel" ? allMonthKey : allPeriodType === "trimestriel" ? `${allYear}-Q${allQuarter}` : `${allDecadeMonth}-D${allDecadeNum}`;
-
-  const allSitesRows = fixedSites.map((s) => {
-    const siteSorted = [...bilans].filter((b) => b.siteId === s.id && b.periodType === allPeriodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
-    const entry = siteSorted.find((b) => b.periodKey === allPeriodKey);
-    if (!entry) return null;
-    const i = siteSorted.findIndex((b) => b.periodKey === allPeriodKey);
-    const prev = i > 0 ? siteSorted[i - 1] : null;
-    const debut = prev ? prev.stockFin15 : 0;
-    const debutAmbiant = prev?.stockFinAmbiant ?? 0;
-    const theorique = debut + entry.reception15 - entry.ventes15 + entry.transferts15;
-    const theoriqueAmbiant = entry.receptionAmbiant !== undefined ? debutAmbiant + (entry.receptionAmbiant || 0) - (entry.ventesAmbiant || 0) + (entry.transfertsAmbiant || 0) : null;
-    const ecartAmbiant = entry.stockFinAmbiant !== undefined && theoriqueAmbiant !== null ? entry.stockFinAmbiant - theoriqueAmbiant : null;
-    return {
-      site: s, ...entry, stockDebut: debut, stockDebutAmbiant: debutAmbiant, stockTheorique: theorique, ecart: entry.stockFin15 - theorique,
-      stockTheoriqueAmbiant: theoriqueAmbiant, ecartAmbiant, photoUrls: entry.photoUrls,
-    };
-  }).filter(Boolean);
-
-  const doAllSitesPdf = () => exportToPdf({
-    filename: `SOMIP_Bilan_Matieres_TousSites_${allPeriodType}_${allPeriodKey}.pdf`,
-    title: "Bilan Matières — Tous les sites",
-    period: `${PERIOD_TYPE_LABELS[allPeriodType]} — ${allPeriodKey}`,
-    columns: ["Site", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"],
-    rows: allSitesRows.map((r) => [
-      r.site.name, `${fmt(r.stockDebut)} L`, `+${fmt(r.reception15)} L`, `${fmt(r.ventes15)} L`,
-      `${r.transferts15 >= 0 ? "+" : ""}${fmt(r.transferts15)} L`, `${fmt(r.stockTheorique)} L`, `${fmt(r.stockFin15)} L`,
-      `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L`,
-    ]),
-    totalsRow: ["TOTAL",
-      `${fmt(allSitesRows.reduce((a, r) => a + r.stockDebut, 0))} L`, `+${fmt(allSitesRows.reduce((a, r) => a + r.reception15, 0))} L`,
-      `${fmt(allSitesRows.reduce((a, r) => a + r.ventes15, 0))} L`, `${fmt(allSitesRows.reduce((a, r) => a + r.transferts15, 0))} L`,
-      `${fmt(allSitesRows.reduce((a, r) => a + r.stockTheorique, 0))} L`, `${fmt(allSitesRows.reduce((a, r) => a + r.stockFin15, 0))} L`,
-      `${fmt(allSitesRows.reduce((a, r) => a + r.ecart, 0))} L`,
-    ],
-  });
-  const doAllSitesPptx = () => exportBilanAllSitesToPptx(allSitesRows, allPeriodType, allPeriodKey);
+  const buildModel = () => buildBilanDeckModel({ rows, periodType, periodKey, texts: collect(), seuil, preparePar });
+  const canSave = status === "ready"; // jamais d'enregistrement tant que les textes existants ne sont pas chargés (risque d'écrasement)
+  const saveOnly = async () => { if (!canSave) return; setBusy(true); setMsg(""); const ok = await onSave({ periodType, periodKey, patch: collect() }); setBusy(false); setMsg(ok ? "Textes enregistrés." : ""); };
+  const generate = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const model = buildModel(); // figé avant l'enregistrement : la présentation reflète exactement ce qui est à l'écran
+      const saved = canSave ? await onSave({ periodType, periodKey, patch: collect() }) : false;
+      await exportBilanPresentationPptx(model);
+      setMsg(saved ? "Présentation générée et textes enregistrés." : "Présentation générée. Les textes n'ont pas pu être enregistrés — ils seront à ressaisir.");
+    } catch (e) {
+      setMsg(`Erreur lors de la génération : ${e?.message || e}`);
+    } finally { setBusy(false); }
+  };
+  const proposeConclusion = () => {
+    if (conclusion.trim() && !window.confirm("Remplacer la conclusion actuelle par un brouillon calculé ?")) return;
+    setConclusion(draftBilanConclusion(buildModel()));
+  };
+  const newJustif = () => ({ siteId: rows[0]?.site.id || "", sujet: "", accroche: "", lignes: [{ libelle: "", montant: "" }], totalLibelle: "", soldeLibelle: "", texte: "" });
+  const setJ = (i, patch) => setJustificatifs((prev) => prev.map((j, k) => (k === i ? { ...j, ...patch } : j)));
+  const setLigne = (i, li, patch) => setJustificatifs((prev) => prev.map((j, k) => (k === i ? { ...j, lignes: j.lignes.map((l, m) => (m === li ? { ...l, ...patch } : l)) } : j)));
+  const small = { fontSize: 12.5, padding: "6px 8px" };
 
   return (
-    <div className="somip-fade">
-      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 24 }}>
-        {canManage && (
-          <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-            <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
-            <Field label="Site">
-              <select className="somip-select" value={siteId} onChange={(e) => { setSiteId(e.target.value); resetForm(); }}>
-                {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </Field>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
-              <button className={`somip-tab ${periodType === "decadaire" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("decadaire")}>Décadaire</button>
-              <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
-            </div>
-            {periodType === "mensuel" && (
-              <Field label="Mois"><input type="month" className="somip-input" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} /></Field>
-            )}
-            {periodType === "decadaire" && (
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Mois"><input type="month" className="somip-input" value={decadeMonth} onChange={(e) => setDecadeMonth(e.target.value)} /></Field></div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Décade">
-                    <select className="somip-select" value={decadeNum} onChange={(e) => setDecadeNum(Number(e.target.value))}>
-                      <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
-                    </select>
-                  </Field>
-                </div>
-              </div>
-            )}
-            {periodType === "trimestriel" && (
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Année"><input type="number" className="somip-input" value={year} onChange={(e) => setYear(Number(e.target.value))} /></Field></div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Trimestre">
-                    <select className="somip-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
-                      <option value={1}>T1 (Jan-Mars)</option><option value={2}>T2 (Avr-Juin)</option>
-                      <option value={3}>T3 (Juil-Sept)</option><option value={4}>T4 (Oct-Déc)</option>
-                    </select>
-                  </Field>
-                </div>
-              </div>
-            )}
-
-            {existing && (
-              <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.warning }}>
-                Une saisie existe déjà pour cette période — enregistrer à nouveau la remplace. <button onClick={() => loadForEdit(existing)} style={{ border: "none", background: "none", color: C.blue, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Charger pour modifier</button>
-              </p>
-            )}
-
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600, display: "block", marginBottom: 6 }}>Stock début (période précédente — {site?.name})</span>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>Ambiant</span>
-                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebutAmbiant)} L</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>À 15°C</span>
-                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
-              </div>
-            </div>
-
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600, display: "block", marginBottom: 6 }}>Réception (automatique — reprise de Saisie journalière)</span>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>Ambiant</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: C.success }}>+{fmt(receptionAutoAmbiant)} L</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>À 15°C</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: C.success }}>+{fmt(receptionAuto15)} L</span>
-              </div>
-              {receptionMovs.length === 0 && <p style={{ margin: "6px 0 0", fontSize: 10.5, color: C.warning }}>Aucune réception trouvée dans Saisie journalière pour cette période.</p>}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Ventes ambiant (L)"><input type="number" className="somip-input" value={form.ventesAmbiant} onChange={(e) => setForm({ ...form, ventesAmbiant: e.target.value })} placeholder="0" /></Field></div>
-              <div style={{ flex: 1 }}><Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field></div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Transferts ambiant (L, net)"><input type="number" className="somip-input" value={form.transfertsAmbiant} onChange={(e) => setForm({ ...form, transfertsAmbiant: e.target.value })} placeholder="0" /></Field></div>
-              <div style={{ flex: 1 }}><Field label="Transferts à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field></div>
-            </div>
-            {Number(form.transferts15) !== 0 && (
-              <Field label={Number(form.transferts15) > 0 ? "Reçu depuis quel site ?" : "Envoyé vers quel site ?"}>
-                <select className="somip-select" value={form.transfertSiteId} onChange={(e) => setForm({ ...form, transfertSiteId: e.target.value })}>
-                  <option value="">— Choisir un site —</option>
-                  {fixedSites.filter((s) => s.id !== siteId).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  {sites.filter((s) => s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name} (camion)</option>)}
-                </select>
-              </Field>
-            )}
-
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
-              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
-            </div>
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Stock fin ambiant (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFinAmbiant} onChange={(e) => setForm({ ...form, stockFinAmbiant: e.target.value })} placeholder="Jauge du site" /></Field></div>
-              <div style={{ flex: 1 }}><Field label="Stock fin à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field></div>
-            </div>
-            <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
-            <Field label="Photos justificatives (optionnel)">
-              <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
-            </Field>
-
-            {(ecart !== null || ecartAmbiant !== null) && (
-              <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
-                {ecartAmbiant !== null && (
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte ambiant</span>
-                    <span className="somip-mono" style={{ fontWeight: 700, color: ecartAmbiant < 0 ? C.danger : ecartAmbiant > 0 ? C.success : C.ink }}>{ecartAmbiant >= 0 ? "+" : ""}{fmt(ecartAmbiant)} L</span>
-                  </div>
-                )}
-                {ecart !== null && (
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte à 15°C</span>
-                    <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === "" || form.stockFinAmbiant === ""}>
-                <Plus size={15} /> Enregistrer
-              </button>
-              <button className="somip-btn somip-btn-secondary" onClick={resetForm}><X size={15} /> Annuler</button>
-            </div>
-          </div>
-        )}
-
-        <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-            <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {site?.name} — {PERIOD_TYPE_LABELS[periodType]}</h3>
-            {history.length > 0 && (
-              <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint (ce site)</button>
-            )}
-          </div>
-          <div style={{ overflowX: "auto", marginBottom: 20 }}>
-            <table className="somip-table">
-              <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
-              <tbody>
-                {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré pour ce site." />}
-                {history.map((b) => (
-                  <tr key={b.id}>
-                    <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
-                    <BilanCell ambiant={b.stockDebutAmbiant} v15={b.stockDebut} bold />
-                    <BilanCell ambiant={b.receptionAmbiant} v15={b.reception15} color={C.success} sign />
-                    <BilanCell ambiant={b.ventesAmbiant} v15={b.ventes15} />
-                    <td className="somip-mono" style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 10.5, color: C.sub }}>{b.transfertsAmbiant !== undefined ? `${b.transfertsAmbiant >= 0 ? "+" : ""}${fmt(b.transfertsAmbiant)} L` : "—"}</div>
-                      <div>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</div>
-                      {b.transfertSiteId && (
-                        <div style={{ fontSize: 10.5, fontWeight: 600, color: C.orange }}>
-                          {b.transferts15 >= 0 ? "← " : "→ "}{sites.find((s) => s.id === b.transfertSiteId)?.name || b.transfertSiteId}
-                        </div>
-                      )}
-                    </td>
-                    <BilanCell ambiant={b.stockTheoriqueAmbiant} v15={b.stockTheorique} bold />
-                    <BilanCell ambiant={b.stockFinAmbiant} v15={b.stockFin15} bold />
-                    <BilanCell ambiant={b.ecartAmbiant} v15={b.ecart} bold color={b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub} sign />
-                    <td>
-                      {b.photoUrls?.length > 0 ? (
-                        <div style={{ display: "flex", gap: 3 }}>
-                          {b.photoUrls.slice(0, 3).map((url, i) => (
-                            <a key={i} href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt="" style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} /></a>
-                          ))}
-                          {b.photoUrls.length > 3 && <span style={{ fontSize: 11, color: C.sub }}>+{b.photoUrls.length - 3}</span>}
-                        </div>
-                      ) : <span style={{ color: C.sub, fontSize: 11 }}>—</span>}
-                    </td>
-                    {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteBilan(b)} /></td>}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {history.length > 0 && (
-            <div style={{ height: 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={history.map((b) => ({ periode: b.periodKey, Réception: b.reception15, Ventes: b.ventes15, "Stock fin": b.stockFin15 }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
-                  <XAxis dataKey="periode" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
-                  <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="Réception" fill={C.success} radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Ventes" fill={C.orange} radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Stock fin" fill={C.blue} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="somip-panel" style={{ padding: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Tous les sites — export combiné</h3>
-          {allSitesRows.length > 0 && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="somip-btn somip-btn-primary" onClick={doAllSitesPdf}><Download size={14} /> Export PDF</button>
-              <button className="somip-btn somip-btn-primary" onClick={doAllSitesPptx}><Download size={14} /> Export PowerPoint</button>
-            </div>
-          )}
-        </div>
-        <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className={`somip-tab ${allPeriodType === "mensuel" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("mensuel")}>Mensuel</button>
-            <button className={`somip-tab ${allPeriodType === "decadaire" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("decadaire")}>Décadaire</button>
-            <button className={`somip-tab ${allPeriodType === "trimestriel" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("trimestriel")}>Trimestriel</button>
-          </div>
-          {allPeriodType === "mensuel" && <Field label="Mois"><input type="month" className="somip-input" value={allMonthKey} onChange={(e) => setAllMonthKey(e.target.value)} /></Field>}
-          {allPeriodType === "decadaire" && (
-            <>
-              <Field label="Mois"><input type="month" className="somip-input" value={allDecadeMonth} onChange={(e) => setAllDecadeMonth(e.target.value)} /></Field>
-              <Field label="Décade">
-                <select className="somip-select" value={allDecadeNum} onChange={(e) => setAllDecadeNum(Number(e.target.value))}>
-                  <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
-                </select>
-              </Field>
-            </>
-          )}
-          {allPeriodType === "trimestriel" && (
-            <>
-              <Field label="Année"><input type="number" className="somip-input" style={{ maxWidth: 110 }} value={allYear} onChange={(e) => setAllYear(Number(e.target.value))} /></Field>
-              <Field label="Trimestre">
-                <select className="somip-select" value={allQuarter} onChange={(e) => setAllQuarter(Number(e.target.value))}>
-                  <option value={1}>T1</option><option value={2}>T2</option><option value={3}>T3</option><option value={4}>T4</option>
-                </select>
-              </Field>
-            </>
-          )}
-        </div>
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th></tr></thead>
-            <tbody>
-              {allSitesRows.length === 0 && <EmptyRow colSpan={8} text="Aucun site n'a de Bilan Matières saisi pour cette période." />}
-              {allSitesRows.map((r) => (
-                <tr key={r.site.id}>
-                  <td style={{ fontWeight: 600 }}>{r.site.name}</td>
-                  <BilanCell ambiant={r.stockDebutAmbiant} v15={r.stockDebut} bold />
-                  <BilanCell ambiant={r.receptionAmbiant} v15={r.reception15} color={C.success} sign />
-                  <BilanCell ambiant={r.ventesAmbiant} v15={r.ventes15} />
-                  <BilanCell ambiant={r.transfertsAmbiant} v15={r.transferts15} sign />
-                  <BilanCell ambiant={r.stockTheoriqueAmbiant} v15={r.stockTheorique} bold />
-                  <BilanCell ambiant={r.stockFinAmbiant} v15={r.stockFin15} bold />
-                  <BilanCell ambiant={r.ecartAmbiant} v15={r.ecart} bold color={r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub} sign />
-                </tr>
-              ))}
-              {allSitesRows.length > 0 && (
-                <tr>
-                  <td style={{ fontWeight: 700 }}>TOTAL</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockDebut, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(allSitesRows.reduce((a, r) => a + r.reception15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.ventes15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.transferts15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockTheorique, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockFin15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.ecart, 0))} L</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Rassemble la saisie de chaque site pour la période choisie ci-dessus (indépendante de celle du panneau de saisie). Un site sans saisie pour cette période n'apparaît pas dans le tableau. Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts.
+    <div className="somip-panel somip-no-print" style={{ padding: 18, marginTop: 18 }} data-panel="presentation">
+      <h3 style={{ margin: "0 0 4px", fontSize: 14 }}>Présentation PowerPoint — {labels.short}</h3>
+      <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>
+        Les chiffres (stocks, écarts, taux en ‰, entrées/sorties, répartition) viennent des Bilans saisis. Complète ci-dessous ce qui ne se calcule pas, puis génère la présentation au format SOMIP.
+      </p>
+      {status === "unavailable" && (
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.warning, fontWeight: 600 }}>
+          Les textes ne peuvent pas encore être enregistrés : exécute une fois le script « supabase_bilan_presentation.sql » dans Supabase. Tu peux déjà générer la présentation avec ce que tu saisis ici.
         </p>
+      )}
+      {status === "error" && (
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.warning, fontWeight: 600 }}>
+          Les textes déjà enregistrés n'ont pas pu être chargés (connexion ?). Recharge la page avant de les modifier : l'enregistrement est bloqué pour ne pas les écraser. Tu peux quand même générer la présentation.
+        </p>
+      )}
+      {(status === "idle" || status === "loading") && (
+        <p style={{ margin: "0 0 14px", fontSize: 12, color: C.sub }}>Chargement des textes enregistrés…</p>
+      )}
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Par site</h4>
+      <div style={{ overflowX: "auto", marginBottom: 6 }}>
+        <table className="somip-table">
+          <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Écart</th><th style={{ textAlign: "right" }}>Taux</th><th>Autonomie (jours)</th><th>Nature de l'écart</th></tr></thead>
+          <tbody>
+            {rows.map((r) => {
+              const taux = r.ventes15 > 0 ? (r.ecart / r.ventes15) * 1000 : null;
+              return (
+                <tr key={r.site.id}>
+                  <td style={{ fontWeight: 600 }}>{r.site.name}<div style={{ fontSize: 11, color: C.sub, fontWeight: 400, maxWidth: 260 }}>{(r.commentaire || "").trim() || "RAS."}</div></td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>{deckSigned(r.ecart)} L</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: taux !== null && Math.abs(taux) > seuil ? C.danger : C.sub }}>{taux === null ? "—" : `${deckTaux(taux)}‰`}</td>
+                  <td><input type="number" min="0" className="somip-input" style={{ ...small, width: 90 }} placeholder="N/D" value={autonomies[r.site.id] ?? ""} onChange={(e) => setAutonomies({ ...autonomies, [r.site.id]: e.target.value })} aria-label={`Autonomie ${r.site.name}`} /></td>
+                  <td><input list="bilan-natures" className="somip-input" style={{ ...small, minWidth: 200 }} placeholder="Auto" value={natures[r.site.id] ?? ""} onChange={(e) => setNatures({ ...natures, [r.site.id]: e.target.value })} aria-label={`Nature de l'écart ${r.site.name}`} /></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <datalist id="bilan-natures">{NATURE_SUGGESTIONS.map((n) => <option key={n} value={n} />)}</datalist>
+      </div>
+      <p style={{ margin: "0 0 16px", fontSize: 11, color: C.sub }}>
+        Autonomie : laisse vide si elle n'est pas calculée (affichée « N/D »). Nature de l'écart : laissée vide, elle devient « Aucune cause identifiée » si l'observation est « RAS », sinon « À qualifier ». L'observation de chaque site est le Commentaire de sa saisie de Bilan Matières.
+      </p>
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Justificatifs chiffrés (optionnel)</h4>
+      {justificatifs.map((j, i) => {
+        const row = rows.find((r) => r.site.id === j.siteId);
+        const lignes = (j.lignes || []);
+        const total = lignes.reduce((a, l) => a + (deckNumOrNull(l.montant) || 0), 0);
+        return (
+          <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <select className="somip-select" style={{ ...small, maxWidth: 220 }} value={j.siteId} onChange={(e) => setJ(i, { siteId: e.target.value })} aria-label="Site du justificatif">
+                {rows.map((r) => <option key={r.site.id} value={r.site.id}>{r.site.name}</option>)}
+              </select>
+              <input className="somip-input" style={{ ...small, flex: "1 1 200px" }} placeholder="Sujet (ex. camions laitiers)" value={j.sujet} onChange={(e) => setJ(i, { sujet: e.target.value })} />
+              <button className="somip-btn somip-btn-ghost" onClick={() => setJustificatifs((prev) => prev.filter((_, k) => k !== i))} title="Supprimer ce justificatif"><X size={14} /> Supprimer</button>
+            </div>
+            <input className="somip-input" style={{ ...small, width: "100%", marginBottom: 8 }} placeholder="Phrase sous le titre (ex. L'écart brut du site s'explique par…)" value={j.accroche} onChange={(e) => setJ(i, { accroche: e.target.value })} />
+            {lignes.map((l, li) => (
+              <div key={li} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <input className="somip-input" style={{ ...small, flex: "1 1 200px" }} placeholder="Libellé (ex. Camion laitier FK254AA)" value={l.libelle} onChange={(e) => setLigne(i, li, { libelle: e.target.value })} />
+                <input type="number" className="somip-input" style={{ ...small, width: 130 }} placeholder="Litres (+ ou −)" value={l.montant} onChange={(e) => setLigne(i, li, { montant: e.target.value })} />
+                <button className="somip-btn somip-btn-ghost" style={{ padding: "4px 8px" }} onClick={() => setJ(i, { lignes: lignes.filter((_, m) => m !== li) })} title="Retirer la ligne"><X size={13} /></button>
+              </div>
+            ))}
+            <button className="somip-btn somip-btn-ghost" style={{ marginBottom: 8 }} onClick={() => setJ(i, { lignes: [...lignes, { libelle: "", montant: "" }] })}><Plus size={13} /> Ajouter une ligne</button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <input className="somip-input" style={{ ...small, flex: "1 1 220px" }} placeholder="Libellé du total (ex. Total pertes imputées aux camions)" value={j.totalLibelle} onChange={(e) => setJ(i, { totalLibelle: e.target.value })} />
+              <input className="somip-input" style={{ ...small, flex: "1 1 220px" }} placeholder="Libellé du solde (ex. Solde net résiduel)" value={j.soldeLibelle} onChange={(e) => setJ(i, { soldeLibelle: e.target.value })} />
+            </div>
+            {row && <p className="somip-mono" style={{ margin: "0 0 8px", fontSize: 11.5, color: C.sub }}>Écart brut {deckSigned(row.ecart)} L − imputations {deckSigned(total)} L = solde {deckSigned(row.ecart - total)} L (calculé automatiquement)</p>}
+            <textarea className="somip-input" style={{ ...small, width: "100%", minHeight: 70 }} placeholder="Explication (encadré orange sous le tableau)" value={j.texte} onChange={(e) => setJ(i, { texte: e.target.value })} />
+          </div>
+        );
+      })}
+      <button className="somip-btn somip-btn-ghost" style={{ marginBottom: 16 }} onClick={() => setJustificatifs((prev) => [...prev, newJustif()])}><Plus size={14} /> Ajouter un justificatif</button>
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Conclusion de la synthèse</h4>
+      <textarea className="somip-input" style={{ ...small, width: "100%", minHeight: 90, marginBottom: 6 }} placeholder="Ex. les écarts du mois restent dominés par des causes instrumentales…" value={conclusion} onChange={(e) => setConclusion(e.target.value)} />
+      <button className="somip-btn somip-btn-ghost" style={{ marginBottom: 16 }} onClick={proposeConclusion}>Proposer un brouillon (chiffres seulement)</button>
+
+      <h4 style={{ margin: "0 0 6px", fontSize: 12.5 }}>Recommandations & prochaines étapes</h4>
+      <textarea className="somip-input" style={{ ...small, width: "100%", minHeight: 90, marginBottom: 4 }} placeholder="Une recommandation par ligne" value={recoText} onChange={(e) => setRecoText(e.target.value)} />
+      <p style={{ margin: "0 0 16px", fontSize: 11, color: C.sub }}>Une recommandation par ligne. Sans recommandation, la dernière diapositive n'est pas créée.</p>
+
+      <Field label="Préparé par (page de titre)"><input className="somip-input" value={preparePar} onChange={(e) => setPreparePar(e.target.value)} placeholder="Ex. LONGA Jérôme Albain — Superviseur Sites Externalisés" /></Field>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
+        <button className="somip-btn somip-btn-primary" disabled={busy} onClick={generate}><Download size={14} /> {busy ? "Génération…" : "Générer la présentation (PowerPoint)"}</button>
+        <button className="somip-btn somip-btn-ghost" disabled={busy || !canSave} onClick={saveOnly}>Enregistrer les textes</button>
+        {msg && <span style={{ fontSize: 12, color: C.sub, fontWeight: 600 }} role="status">{msg}</span>}
       </div>
     </div>
   );
@@ -9048,28 +9366,10 @@ function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) 
   const [month, setMonth] = useState(currentMonth());
   const monthStartD = `${month}-01`;
   const [endDate, setEndDate] = useState(todayStr());
-  const scopedSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
-
-  const ecartRows = scopedSites.map((s) => {
-    let cur = new Date(monthStartD);
-    const end = new Date(endDate);
-    let ecartCumule = 0, daysWithJauge = 0;
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
-      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]);
-      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
-      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
-      cur.setDate(cur.getDate() + 1);
-    }
-    return { site: s, ecartCumule, daysWithJauge };
-  }).sort((a, b) => a.ecartCumule - b.ecartCumule);
-  const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  // Sites fixes et camions ACTIFS (un site ou camion désactivé n'est plus compté) ; même fonction unique que les Tableaux de bord.
+  const scopedSites = (assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites).filter((s) => s.active !== false);
+  const ecartRows = scopedSites.map((s) => ({ site: s, ...gainPerteMois(s, movements, inventaires, endDate, monthStartD) })).sort((a, b) => a.ecartCumule - b.ecartCumule);
+  const ecartReseauTotal = ecartRows.reduce((a, r) => a + r.ecartCumule, 0); // sites + camions
 
   const doExcel = () => exportToExcel(`SOMIP_Gain_Perte_${month}.xlsx`, [{
     name: "Gain-Perte", rows: ecartRows.map((r) => ({
@@ -9083,7 +9383,7 @@ function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) 
     period: `Du ${monthStartD} au ${endDate}`,
     columns: ["Type", "Nom", "Gain/Perte cumulé", "Jours jaugés"],
     rows: ecartRows.map((r) => [r.site.isMobile ? "Camion" : "Site", r.site.name, r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—", String(r.daysWithJauge)]),
-    totalsRow: ["", "Total réseau (sites)", `${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)} L`, ""],
+    totalsRow: ["", "Total réseau (sites + camions)", `${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)} L`, ""],
   });
 
   return (
@@ -9095,7 +9395,7 @@ function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) 
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
         <ReportHeader title="Gain/Perte du mois — sites et camions" period={`Du ${monthStartD} au ${endDate}`} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
-        <StatCard label="Gain/Perte réseau (sites)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
+        <StatCard label="Gain/Perte réseau (sites + camions)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
         <div style={{ overflowX: "auto", marginTop: 16 }}>
           <table className="somip-table">
             <thead><tr><th>Type</th><th>Nom</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
@@ -9286,11 +9586,23 @@ function RetoursChargementsReport({ sites, movements, assignedSiteIds }) {
   );
 }
 
-function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
+function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, editMovementTempDensite }) {
   const [filterSite, setFilterSite] = useState("all");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [search, setSearch] = useState("");
+  // Ajout / correction de la température et de la densité d'un bon (Superviseur uniquement : même
+  // règle que dans la Saisie journalière, contrôlée aussi par la base de données).
+  const [editingId, setEditingId] = useState(null);
+  const [form, setForm] = useState({ temperatureC: "", densiteObservee: "" });
+  const startEdit = (m) => {
+    setEditingId(m.id);
+    setForm({ temperatureC: m.temperatureSite !== undefined && m.temperatureSite !== null ? String(m.temperatureSite) : "", densiteObservee: m.densiteSite !== undefined && m.densiteSite !== null ? String(m.densiteSite) : "" });
+  };
+  const saveEdit = () => {
+    editMovementTempDensite({ id: editingId, temperatureC: form.temperatureC, densiteObservee: form.densiteObservee });
+    setEditingId(null);
+  };
   // Un bon de livraison concerne la réception de carburant d'un SITE ; les camions n'en ont pas
   // (leur « réception » est un simple chargement à une station), ils sont donc exclus ici.
   const fixedSiteIds = new Set(sites.filter((s) => !s.isMobile).map((s) => s.id));
@@ -9309,12 +9621,16 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
   const hasVal = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
   const fmtTemp = (v) => (hasVal(v) ? `${Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} °C` : "—");
   const fmtDens = (v) => (hasVal(v) ? Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 4 }) : "—");
+  // Mesure prélevée sur site (saisie à la réception) / mesure de fin de journée (ancienne saisie, copiée du jour) / laquelle sert au calcul à 15°C.
+  const finJournee = (m) => (!aMesureSite(m) && (hasVal(m.temperatureC) || hasVal(m.densiteObservee)) ? `${fmtTemp(m.temperatureC)} · ${fmtDens(m.densiteObservee)}` : "—");
+  const mesureUtilisee = (m) => (aMesureSite(m) ? "Mesure site" : (hasVal(m.temperatureC) && hasVal(m.densiteObservee) && m.volumeCorrige15 ? "Fin de journée" : "—"));
 
   const doExcel = () => exportToExcel(`SOMIP_Bons_Livraison.xlsx`, [{
     name: "Bons de livraison", rows: rows.map((m) => ({
       Date: m.date, Site: sites.find((s) => s.id === m.siteId)?.name || m.siteId, Produit: productLabel(m),
       "N° Bon": m.ref || "", "Quantité (L)": Math.round(m.quantity), "Quantité 15°C (L)": m.volumeCorrige15 ? Math.round(m.volumeCorrige15) : "",
-      "Température (°C)": hasVal(m.temperatureC) ? Number(m.temperatureC) : "", "Densité observée": hasVal(m.densiteObservee) ? Number(m.densiteObservee) : "",
+      "Température site (°C)": hasVal(m.temperatureSite) ? Number(m.temperatureSite) : "", "Densité site": hasVal(m.densiteSite) ? Number(m.densiteSite) : "",
+"Mesure de fin de journée (°C · densité)": finJournee(m) === "—" ? "" : finJournee(m), "Mesure utilisée pour le 15°C": mesureUtilisee(m), "Mesure site manquante": receptionSansMesureSite(m) ? "oui" : "",
     })),
   }]);
 
@@ -9322,11 +9638,11 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
     filename: "SOMIP_Bons_Livraison.pdf",
     title: "Registre des bons de livraison",
     period: start || end ? `Du ${start || "…"} au ${end || "…"}` : "Toutes les réceptions",
-    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C", "Température", "Densité observée"],
+    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C", "Temp. site", "Densité site", "Fin de journée", "Utilisée 15°C"],
     rows: rows.map((m) => [
       m.date, sites.find((s) => s.id === m.siteId)?.name || m.siteId, productLabel(m),
       m.ref || "—", `+${fmt(m.quantity)} L`, m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—",
-      fmtTemp(m.temperatureC), fmtDens(m.densiteObservee),
+      fmtTemp(m.temperatureSite), fmtDens(m.densiteSite), finJournee(m), `${mesureUtilisee(m)}${receptionSansMesureSite(m) ? " (mesure site manquante)" : ""}`,
     ]),
   });
 
@@ -9348,10 +9664,16 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température</th><th style={{ textAlign: "right" }}>Densité observée</th></tr></thead>
+            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température site</th><th style={{ textAlign: "right" }}>Densité site</th><th>Mesure de fin de journée</th><th>Utilisée pour le 15°C</th>{canManage && <th className="somip-no-print" />}</tr></thead>
             <tbody>
-              {rows.length === 0 && <EmptyRow colSpan={8} text="Aucune réception trouvée." />}
-              {rows.map((m) => (
+              {rows.length === 0 && <EmptyRow colSpan={canManage ? 11 : 10} text="Aucune réception trouvée." />}
+              {rows.map((m) => {
+                // Température et densité n'existent que pour le gasoil (pas pour les lubrifiants).
+                const editable = canManage && !!editMovementTempDensite && (m.product || "gasoil") === "gasoil";
+                const editing = editable && editingId === m.id;
+                const densNum = Number(form.densiteObservee);
+                const densOutOfRange = editing && form.densiteObservee !== "" && Number.isFinite(densNum) && (densNum < VCF_MIN_DENSITY || densNum > VCF_MAX_DENSITY);
+                return (
                 <tr key={m.id}>
                   <td className="somip-mono">{m.date}</td>
                   <td style={{ fontWeight: 600 }}>{sites.find((s) => s.id === m.siteId)?.name || m.siteId}</td>
@@ -9359,15 +9681,43 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds }) {
                   <td className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{m.ref || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+{fmt(m.quantity)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmtTemp(m.temperatureC)}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmtDens(m.densiteObservee)}</td>
+<td className="somip-mono" style={{ textAlign: "right" }} data-testid={`bl-temp-${m.id}`}>
+{editing
+? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 80, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="°C site" value={form.temperatureC} onChange={(e) => setForm({ ...form, temperatureC: e.target.value })} />
+: fmtTemp(m.temperatureSite)}
+</td>
+<td className="somip-mono" style={{ textAlign: "right" }} data-testid={`bl-dens-${m.id}`}>
+{editing
+? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 110, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="kg/m³ site" value={form.densiteObservee} onChange={(e) => setForm({ ...form, densiteObservee: e.target.value })} />
+: fmtDens(m.densiteSite)}
+{editing && densOutOfRange && <span className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600 }}>Hors plage ({VCF_MIN_DENSITY}–{VCF_MAX_DENSITY} kg/m³) : pas de correction à 15°C</span>}
+{editing && avertissementsMesureSite(form.temperatureC, form.densiteObservee).map((w, k) => <span key={k} className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600, maxWidth: 220, whiteSpace: "normal", textAlign: "right" }}>⚠ {w}</span>)}
+</td>
+<td className="somip-mono" style={{ color: C.sub, fontSize: 11.5 }} data-testid={`bl-fin-${m.id}`}>{finJournee(m)}</td>
+<td style={{ fontSize: 11.5 }} data-testid={`bl-mesure-${m.id}`}>{mesureUtilisee(m)}{receptionSansMesureSite(m) && <> <PastilleMesureManquante /></>}</td>
+                  {canManage && (
+                    <td className="somip-no-print" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      {editing && (
+                        <>
+                          <button onClick={saveEdit} style={{ border: "none", background: C.blue, color: "#fff", borderRadius: 5, padding: "4px 8px", fontSize: 11, cursor: "pointer", marginRight: 6 }}>OK</button>
+                          <button onClick={() => setEditingId(null)} style={{ border: "none", background: "none", color: C.sub, cursor: "pointer", fontSize: 11 }}>Annuler</button>
+                        </>
+                      )}
+                      {!editing && editable && (
+                        <button onClick={() => startEdit(m)} title="Ajouter ou corriger la température et la densité" style={{ border: "none", background: "none", cursor: "pointer", padding: 4, display: "inline-flex" }}>
+                          <Pencil size={13} color={C.blue} />
+                        </button>
+                      )}
+                    </td>
+                  )}
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : celles saisies avec la réception ; « — » si elles n'ont pas été renseignées.
+          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). « Mesure site » : température et densité prélevées sur site à chaque réception ; elles servent au calcul de la quantité à 15°C. « Fin de journée » : ancienne mesure du jour (réceptions saisies avant cette règle), utilisée seulement à défaut de mesure site. Une pastille orange signale un bon sans mesure site : il reste valable.{canManage && " Pour compléter ou corriger la mesure site, utilise le crayon à droite de la ligne : la quantité à 15°C est recalculée."}
         </p>
       </div>
     </div>
