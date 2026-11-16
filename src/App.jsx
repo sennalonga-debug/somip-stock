@@ -119,6 +119,7 @@ const TYPE_META = {
   retour_cuve_camion: { label: "Retour cuve (camion)", color: C.danger, sign: "−" },
   ajustement: { label: "Ajustement d'inventaire", color: C.blue, sign: "±" },
   transfert: { label: "Transfert entre sites", color: C.blue, sign: "±" },
+  transfert_camion: { label: "Transfert entre camions", color: C.blue, sign: "±" },
 };
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -270,6 +271,33 @@ function tempDensiteUpdateRow(quantity, temperatureC, densiteObservee) {
   return { temperature_c: hasTemp ? Number(temperatureC) : null, densite_observee: hasDens ? Number(densiteObservee) : null, densite15: null, vcf: null, volume_corrige15: null };
 }
 
+// ---- Mesure prélevée SUR SITE à chaque réception (température + densité) ----
+// Plages de cohérence (avertissement seulement, jamais bloquant) : gasoil, densité en kg/m³.
+const MESURE_TEMP_MIN = 15, MESURE_TEMP_MAX = 45, MESURE_DENS_MIN = 800, MESURE_DENS_MAX = 860;
+const nombreSaisi = (v) => v !== "" && v !== null && v !== undefined && Number.isFinite(Number(v));
+function avertissementsMesureSite(temp, dens) {
+  const w = [];
+  if (nombreSaisi(temp) && (Number(temp) < MESURE_TEMP_MIN || Number(temp) > MESURE_TEMP_MAX)) w.push(`Température de ${Number(temp)} °C inhabituelle (attendu : entre ${MESURE_TEMP_MIN} et ${MESURE_TEMP_MAX} °C) — vérifie la valeur.`);
+  if (nombreSaisi(dens) && (Number(dens) < MESURE_DENS_MIN || Number(dens) > MESURE_DENS_MAX)) w.push(`Densité de ${Number(dens)} anormale pour du gasoil (attendu : ${MESURE_DENS_MIN} à ${MESURE_DENS_MAX} kg/m³, par exemple 845 et non 0,845) — vérifie la valeur.`);
+  return w;
+}
+// Champs d'un mouvement « réception » avec mesure site complète : la mesure site est enregistrée ET sert au calcul à 15°C
+// (température/densité/volume corrigé = ceux que lisent déjà le registre, le Bilan matières et les autres modules).
+function receptionMesureSiteFields(quantity, temp, dens) {
+  const corr = correctVolumeTo15({ volumeAmbiant: quantity, tempC: Number(temp), densiteObservee: Number(dens) });
+  return { temperatureSite: Number(temp), densiteSite: Number(dens), temperatureC: Number(temp), densiteObservee: Number(dens), ...(corr ? { densite15: corr.densite15, vcf: corr.vcf, volumeCorrige15: corr.volume15 } : {}) };
+}
+// Colonnes à écrire quand on AJOUTE, CORRIGE ou EFFACE la mesure site d'une réception déjà enregistrée.
+function mesureSiteUpdateRow(quantity, temp, dens) {
+  return { ...tempDensiteUpdateRow(quantity, temp, dens), temperature_site: nombreSaisi(temp) ? Number(temp) : null, densite_site: nombreSaisi(dens) ? Number(dens) : null };
+}
+const aMesureSite = (m) => nombreSaisi(m.temperatureSite) && nombreSaisi(m.densiteSite);
+// Réception de gasoil avec un N° de bon de livraison mais sans mesure site (anciennes saisies) : valable, simplement signalée.
+const receptionSansMesureSite = (m) => m.type === "reception" && (m.product || "gasoil") === "gasoil" && String(m.ref || "").trim() !== "" && !aMesureSite(m);
+function PastilleMesureManquante() {
+  return <span title="Température et densité prélevées sur site non saisies pour ce bon : la réception reste valable, à compléter." style={{ display: "inline-block", background: "#FDEBD3", color: "#B45309", borderRadius: 10, padding: "1px 8px", fontSize: 10.5, fontWeight: 700, whiteSpace: "nowrap" }}>mesure site manquante</span>;
+}
+
 /* ------------------------------------------------------------------ */
 /* Rapports — fonctions de calcul par période                          */
 /* ------------------------------------------------------------------ */
@@ -353,14 +381,16 @@ function pickLatestInv(list) {
 function sumQty(list, types) {
   return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + m.quantity, 0);
 }
+// Somme des variations de stock (delta, signées) de certains types — ex. transfert entre camions laitiers (−envoyé / +reçu).
+function sumDelta(list, types) { return list.filter((m) => types.includes(m.type)).reduce((a, m) => a + (Number(m.delta) || 0), 0); }
 function pad2(n) { return String(n).padStart(2, "0"); }
 // Gain/Perte cumulé du mois (gasoil, à l'ambiance) d'UN site fixe OU d'UN camion laitier, du 1er du mois de `viewDate` jusqu'à `viewDate`.
 // UNE SEULE fonction, utilisée par le Tableau de bord général (total réseau) ET par le Tableau de bord par site : les deux ne peuvent plus différer.
 // Jour par jour : écart = dernière jauge du jour − stock théorique (stock de départ ancré sur la dernière jauge connue + réceptions + retours camions − ventes − chargements camions).
-function gainPerteMois(site, movements, inventaires, viewDate) {
+function gainPerteMois(site, movements, inventaires, viewDate, startDate) {
   const month = viewDate.slice(0, 7);
   let ecartCumule = 0, daysWithJauge = 0;
-  let cur = new Date(`${month}-01`);
+  let cur = new Date(startDate || `${month}-01`);
   const end = new Date(viewDate);
   while (cur <= end) {
     const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
@@ -370,7 +400,7 @@ function gainPerteMois(site, movements, inventaires, viewDate) {
     const ventes = sumQty(dayMovs, ["sortie"]); // camion : flux brut du compteur (retour cuve inclus, cf. théorique)
     const chargementLaitiers = site.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
     const retourCamions = site.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-    const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+    const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers + sumDelta(dayMovs, ["transfert_camion"]);
     const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
     if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
     cur.setDate(cur.getDate() + 1);
@@ -1534,159 +1564,6 @@ function PhotoPicker({ files, setFiles, existingUrls, onRemoveExisting }) {
   );
 }
 
-// Export PowerPoint du Bilan Matières : titre, tableau, diagramme natif (modifiable dans
-// PowerPoint), et une diapositive photos pour chaque période qui en possède.
-async function exportBilanToPptx(history, periodType, siteName) {
-  const pptx = new pptxgen();
-  pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
-  pptx.layout = "SOMIP";
-  const BLUE = C.blue.replace("#", ""), ORANGE = C.orange.replace("#", ""), INK = "1A2733", SUB = "5A6470";
-  const PERIOD_LABEL = { mensuel: "Synthèse mensuelle", trimestriel: "Synthèse trimestrielle", decadaire: "Synthèse décadaire" };
-
-  // Diapositive de titre.
-  const s1 = pptx.addSlide();
-  s1.background = { color: "FFFFFF" };
-  s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
-  s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
-  if (CURRENT_LOGO_URL) {
-    try { s1.addImage({ path: CURRENT_LOGO_URL, x: 0.5, y: 0.5, w: 1, h: 1, sizing: { type: "contain", w: 1, h: 1 } }); } catch (e) { /* logo indisponible : on continue sans */ }
-  }
-  s1.addText(`SOMIP — Bilan Matières${siteName ? ` — ${siteName}` : ""}`, { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 26, bold: true, color: BLUE });
-  s1.addText(PERIOD_LABEL[periodType] || "Synthèse", { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
-
-  // Diapositive tableau.
-  const s2 = pptx.addSlide();
-  s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-  s2.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-  s2.addText("Historique des périodes", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-  const header = ["Période", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"].map((t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: BLUE }, fontSize: 9 } }));
-  const rows = [header, ...history.map((b) => [
-    String(b.periodKey), `${fmt(b.stockDebut)} L`, `+${fmt(b.reception15)} L`, `${fmt(b.ventes15)} L`,
-    `${b.transferts15 >= 0 ? "+" : ""}${fmt(b.transferts15)} L`, `${fmt(b.stockTheorique)} L`, `${fmt(b.stockFin15)} L`,
-    { text: `${b.ecart >= 0 ? "+" : ""}${fmt(b.ecart)} L`, options: { color: b.ecart < 0 ? "D64545" : b.ecart > 0 ? "2E9B5C" : INK, bold: true } },
-  ].map((c) => (typeof c === "string" ? { text: c, options: { fontSize: 9, color: INK } } : c)))];
-  s2.addTable(rows, { x: 0.4, y: 0.8, w: 9.2, autoPage: true, border: { type: "solid", color: "E2E6E9", pt: 0.5 }, fontFace: "Arial" });
-
-  // Diapositive diagramme (natif PowerPoint, modifiable).
-  if (history.length > 0) {
-    const s3 = pptx.addSlide();
-    s3.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-    s3.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-    s3.addText("Évolution des volumes", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-    const labels = history.map((b) => String(b.periodKey));
-    const chartData = [
-      { name: "Réception", labels, values: history.map((b) => b.reception15) },
-      { name: "Ventes", labels, values: history.map((b) => b.ventes15) },
-      { name: "Stock fin", labels, values: history.map((b) => b.stockFin15) },
-    ];
-    s3.addChart(pptx.ChartType.bar, chartData, {
-      x: 0.4, y: 0.9, w: 9.2, h: 4.3, barDir: "col",
-      chartColors: [BLUE, ORANGE, "2E9B5C"], showLegend: true, legendPos: "b",
-      showValue: false, catAxisLabelFontSize: 9, valAxisLabelFontSize: 9,
-    });
-  }
-
-  // Diapositives photos, pour chaque période qui en possède.
-  for (const b of history) {
-    if (!b.photoUrls || b.photoUrls.length === 0) continue;
-    const s = pptx.addSlide();
-    s.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-    s.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-    s.addText(`Photos justificatives — ${b.periodKey}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 16, bold: true, color: INK });
-    if (b.commentaire) s.addText(b.commentaire, { x: 0.4, y: 0.65, w: 9.2, h: 0.35, fontSize: 10, color: SUB, italic: true });
-    const positions = [{ x: 0.4, y: 1.1 }, { x: 3.55, y: 1.1 }, { x: 6.7, y: 1.1 }, { x: 0.4, y: 3.4 }, { x: 3.55, y: 3.4 }, { x: 6.7, y: 3.4 }];
-    for (let i = 0; i < Math.min(b.photoUrls.length, 6); i++) {
-      try {
-        s.addImage({ path: b.photoUrls[i], x: positions[i].x, y: positions[i].y, w: 3, h: 2.1, sizing: { type: "cover", w: 3, h: 2.1 } });
-      } catch (e) { /* une image indisponible ne doit pas bloquer tout l'export */ }
-    }
-  }
-
-  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_${siteName ? siteName.replace(/\s+/g, "") + "_" : ""}${periodType}_${new Date().toISOString().slice(0, 10)}.pptx` });
-}
-
-// Export combiné "Tous les sites" pour une période donnée : un seul document (PDF ou
-// PowerPoint) rassemblant la ligne de chaque site, plutôt que par site séparément.
-async function exportBilanAllSitesToPptx(rows, periodType, periodKey) {
-  const pptx = new pptxgen();
-  pptx.defineLayout({ name: "SOMIP", width: 10, height: 5.63 });
-  pptx.layout = "SOMIP";
-  const BLUE = C.blue.replace("#", ""), ORANGE = C.orange.replace("#", ""), INK = "1A2733", SUB = "5A6470";
-
-  const s1 = pptx.addSlide();
-  s1.background = { color: "FFFFFF" };
-  s1.addShape("rect", { x: 0, y: 0, w: 6, h: 0.12, fill: { color: BLUE } });
-  s1.addShape("rect", { x: 6, y: 0, w: 4, h: 0.12, fill: { color: ORANGE } });
-  if (CURRENT_LOGO_URL) {
-    try { s1.addImage({ path: CURRENT_LOGO_URL, x: 0.5, y: 0.5, w: 1, h: 1, sizing: { type: "contain", w: 1, h: 1 } }); } catch (e) { /* logo indisponible : on continue sans */ }
-  }
-  s1.addText("SOMIP — Bilan Matières — Tous les sites", { x: 0.5, y: 2.0, w: 9, h: 0.7, fontSize: 24, bold: true, color: BLUE });
-  s1.addText(`${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`, { x: 0.5, y: 2.7, w: 9, h: 0.5, fontSize: 16, color: ORANGE, bold: true });
-
-  const s2 = pptx.addSlide();
-  s2.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-  s2.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-  s2.addText(`Détail par site — ${periodKey}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-  const header = ["Site", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"].map((t) => ({ text: t, options: { bold: true, color: "FFFFFF", fill: { color: BLUE }, fontSize: 9 } }));
-  const dataRows = rows.map((r) => [
-    { text: r.site?.name || "?", options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.stockDebut)} L`, options: { fontSize: 9, color: INK } },
-    { text: `+${fmt(r.reception15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.ventes15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${r.transferts15 >= 0 ? "+" : ""}${fmt(r.transferts15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.stockTheorique)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${fmt(r.stockFin15)} L`, options: { fontSize: 9, color: INK } },
-    { text: `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L`, options: { fontSize: 9, bold: true, color: r.ecart < 0 ? "D64545" : r.ecart > 0 ? "2E9B5C" : INK } },
-  ]);
-  const totalStockDebut = rows.reduce((a, r) => a + r.stockDebut, 0), totalReception = rows.reduce((a, r) => a + r.reception15, 0);
-  const totalVentes = rows.reduce((a, r) => a + r.ventes15, 0), totalTransferts = rows.reduce((a, r) => a + r.transferts15, 0);
-  const totalTheorique = rows.reduce((a, r) => a + r.stockTheorique, 0), totalStockFin = rows.reduce((a, r) => a + r.stockFin15, 0);
-  const totalEcart = rows.reduce((a, r) => a + r.ecart, 0);
-  const totalRow = [
-    { text: "TOTAL", options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalStockDebut)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `+${fmt(totalReception)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalVentes)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${totalTransferts >= 0 ? "+" : ""}${fmt(totalTransferts)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalTheorique)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${fmt(totalStockFin)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-    { text: `${totalEcart >= 0 ? "+" : ""}${fmt(totalEcart)} L`, options: { fontSize: 9, bold: true, fill: { color: "F4F6F8" } } },
-  ];
-  const tableRows = [header, ...dataRows, totalRow];
-  s2.addTable(tableRows, { x: 0.3, y: 0.8, w: 9.4, autoPage: true, border: { type: "solid", color: "E2E6E9", pt: 0.5 }, fontFace: "Arial" });
-
-  const s3 = pptx.addSlide();
-  s3.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-  s3.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-  s3.addText("Comparaison par site", { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 18, bold: true, color: INK });
-  const labels = rows.map((r) => r.site?.name || "?");
-  const chartData = [
-    { name: "Réception", labels, values: rows.map((r) => r.reception15) },
-    { name: "Ventes", labels, values: rows.map((r) => r.ventes15) },
-    { name: "Stock fin", labels, values: rows.map((r) => r.stockFin15) },
-  ];
-  s3.addChart(pptx.ChartType.bar, chartData, {
-    x: 0.4, y: 0.9, w: 9.2, h: 4.3, barDir: "col",
-    chartColors: [BLUE, ORANGE, "2E9B5C"], showLegend: true, legendPos: "b",
-    showValue: false, catAxisLabelFontSize: 9, valAxisLabelFontSize: 9,
-  });
-
-  for (const r of rows) {
-    if (!r.photoUrls || r.photoUrls.length === 0) continue;
-    const s = pptx.addSlide();
-    s.addShape("rect", { x: 0, y: 0, w: 6, h: 0.08, fill: { color: BLUE } });
-    s.addShape("rect", { x: 6, y: 0, w: 4, h: 0.08, fill: { color: ORANGE } });
-    s.addText(`Photos justificatives — ${r.site?.name || "?"}`, { x: 0.4, y: 0.25, w: 9, h: 0.4, fontSize: 16, bold: true, color: INK });
-    if (r.commentaire) s.addText(r.commentaire, { x: 0.4, y: 0.65, w: 9.2, h: 0.35, fontSize: 10, color: SUB, italic: true });
-    const positions = [{ x: 0.4, y: 1.1 }, { x: 3.55, y: 1.1 }, { x: 6.7, y: 1.1 }, { x: 0.4, y: 3.4 }, { x: 3.55, y: 3.4 }, { x: 6.7, y: 3.4 }];
-    for (let i = 0; i < Math.min(r.photoUrls.length, 6); i++) {
-      try { s.addImage({ path: r.photoUrls[i], x: positions[i].x, y: positions[i].y, w: 3, h: 2.1, sizing: { type: "cover", w: 3, h: 2.1 } }); } catch (e) { /* ignore */ }
-    }
-  }
-
-  await pptx.writeFile({ fileName: `SOMIP_Bilan_Matieres_TousSites_${periodType}_${periodKey}.pptx` });
-}
-
 /* ------------------------------------------------------------------ */
 /* Présentation PowerPoint du Bilan matière — format SOMIP             */
 /* (chiffres calculés depuis les Bilans saisis + textes rédigés)       */
@@ -2148,6 +2025,8 @@ const rowToMovement = (r) => ({
   relatedSiteId: r.related_site_id || undefined,
   temperatureC: numOrUndef(r.temperature_c), densiteObservee: numOrUndef(r.densite_observee),
   densite15: numOrUndef(r.densite15), vcf: numOrUndef(r.vcf), volumeCorrige15: numOrUndef(r.volume_corrige15),
+  temperatureSite: numOrUndef(r.temperature_site), densiteSite: numOrUndef(r.densite_site),
+  mesureUtilisee: numOrUndef(r.temperature_site) !== undefined && numOrUndef(r.densite_site) !== undefined ? "site" : undefined,
   indexAvant: numOrUndef(r.index_avant), indexApres: numOrUndef(r.index_apres),
   createdBy: r.created_by, createdAt: r.created_at,
 });
@@ -2159,6 +2038,8 @@ const movementToRow = (m) => ({
   related_site_id: m.relatedSiteId ?? null,
   temperature_c: m.temperatureC ?? null, densite_observee: m.densiteObservee ?? null,
   densite15: m.densite15 ?? null, vcf: m.vcf ?? null, volume_corrige15: m.volumeCorrige15 ?? null,
+  // Colonnes « mesure site » : envoyées seulement si renseignées (une saisie ordinaire reste identique à avant).
+  ...(m.temperatureSite !== undefined ? { temperature_site: m.temperatureSite } : {}), ...(m.densiteSite !== undefined ? { densite_site: m.densiteSite } : {}),
   index_avant: m.indexAvant ?? null, index_apres: m.indexApres ?? null,
   created_by: m.createdBy ?? null,
 });
@@ -2275,22 +2156,6 @@ function lubBlockFromRecord(inv, productStocks) {
 const rowToSiteMeter = (r) => ({ id: r.id, siteId: r.site_id, name: r.name });
 const siteMeterToRow = (m) => ({ site_id: m.siteId, name: m.name });
 
-const rowToBilan = (r) => ({
-  id: r.id, siteId: r.site_id, periodType: r.period_type, periodKey: r.period_key,
-  reception15: Number(r.reception15), ventes15: Number(r.ventes15), transferts15: Number(r.transferts15), stockFin15: Number(r.stock_fin15),
-  receptionAmbiant: numOrUndef(r.reception_ambiant), ventesAmbiant: numOrUndef(r.ventes_ambiant),
-  transfertsAmbiant: numOrUndef(r.transferts_ambiant), stockFinAmbiant: numOrUndef(r.stock_fin_ambiant),
-  transfertSiteId: r.transfert_site_id || null,
-  commentaire: r.commentaire || "", photoUrls: r.photo_urls || [], createdBy: r.created_by, createdAt: r.created_at,
-});
-const bilanToRow = (b) => ({
-  site_id: b.siteId, period_type: b.periodType, period_key: b.periodKey,
-  reception15: b.reception15, ventes15: b.ventes15, transferts15: b.transferts15, stock_fin15: b.stockFin15,
-  reception_ambiant: b.receptionAmbiant ?? null, ventes_ambiant: b.ventesAmbiant ?? null,
-  transferts_ambiant: b.transfertsAmbiant ?? null, stock_fin_ambiant: b.stockFinAmbiant ?? null,
-  transfert_site_id: b.transfertSiteId || null,
-  commentaire: b.commentaire ?? null, photo_urls: b.photoUrls || [], created_by: b.createdBy ?? null,
-});
 
 // Textes rédigés de la présentation PowerPoint du bilan, par période (table réservée au Superviseur).
 const COLS_BILAN_PRESENTATIONS = "id, period_type, period_key, autonomies, natures, justificatifs, conclusion, recommandations, prepare_par, updated_at";
@@ -2442,14 +2307,24 @@ function mergeSiteDate(prevArray, fresh, siteId, date, product) {
 // en a besoin, ce champ reviendrait simplement "undefined" côté application : aucune erreur
 // bruyante, donc à vérifier soigneusement à chaque modification d'un mapper.
 const COLS_SITES = "id, code, name, capacity, stock_initial, is_mobile, active, engins_enabled, engins_source_id, photo_url";
-const COLS_MOVEMENTS = "id, site_id, type, date, quantity, delta, product, ref, commentaire, destinataire, camion, destination, compteur, is_demo, related_site_id, temperature_c, densite_observee, densite15, vcf, volume_corrige15, index_avant, index_apres, created_by, created_at";
+const COLS_MOVEMENTS_BASE = "id, site_id, type, date, quantity, delta, product, ref, commentaire, destinataire, camion, destination, compteur, is_demo, related_site_id, temperature_c, densite_observee, densite15, vcf, volume_corrige15, index_avant, index_apres, created_by, created_at";
+const COLS_MOVEMENTS = COLS_MOVEMENTS_BASE + ", temperature_site, densite_site";
+// Garde de sécurité : tant que le script SQL « mesure site » n'est pas exécuté dans Supabase, on lit les mouvements sans ces deux colonnes
+// (l'application continue de fonctionner normalement au lieu d'afficher des données vides).
+let movementsColsAnciennes = false;
+async function avecColsMovements(appel) {
+  try { return await appel(movementsColsAnciennes ? COLS_MOVEMENTS_BASE : COLS_MOVEMENTS); }
+  catch (e) {
+    if (!movementsColsAnciennes && /temperature_site|densite_site/i.test(`${e?.message || ""} ${e?.details || ""}`)) { movementsColsAnciennes = true; return await appel(COLS_MOVEMENTS_BASE); }
+    throw e;
+  }
+}
 const COLS_INVENTAIRES = "id, site_id, date, stock_physique, commentaire, product, basis_ecart, stock_theorique_ambiant, stock_theorique15, stock_theorique, stock_physique_used, ecart, ecart_permille, nature, taux_freinte, objectif_utilise, conformite, adjustment_id, temperature_c, densite_observee, densite15, vcf, stock_physique15, photo_urls, created_by, created_at";
 const COLS_PROFILES = "id, full_name, role, last_seen_at, assigned_site_id, assigned_site_ids, active, is_admin";
 const COLS_AUDIT = "id, ts, user_name, action, detail";
 const COLS_PRODUCT_STOCKS = "id, site_id, product, capacity, stock_initial, label";
 const COLS_TRUCK_ASSIGNMENTS = "id, truck_id, station_id, start_date, end_date";
 const COLS_SITE_METERS = "id, site_id, name";
-const COLS_BILAN_MATIERES = "id, site_id, period_type, period_key, reception15, ventes15, transferts15, stock_fin15, reception_ambiant, ventes_ambiant, transferts_ambiant, stock_fin_ambiant, transfert_site_id, commentaire, photo_urls, created_by, created_at";
 const COLS_INVENTAIRES_OFFICIELS = "id, site_id, date, type, produit, inventoriste, operateur, cuves, depotage, index_compteurs, stock_ambiant, stock15, commentaire, signature_somip_url, signature_somip_by, signature_somip_at, signature_operateur_url, signature_operateur_by, signature_operateur_at, signature_total_url, signature_total_by, signature_total_at, created_by, created_at";
 const COLS_SITE_TANKS = "id, site_id, name";
 const COLS_SITE_DEPOTAGE_METERS = "id, site_id, name";
@@ -2837,7 +2712,6 @@ export default function App() {
   const [inventaires, setInventaires] = useState([]);
   const [productStocks, setProductStocks] = useState([]);
   const [siteMeters, setSiteMeters] = useState([]);
-  const [bilans, setBilans] = useState([]);
   // Textes de la présentation du bilan : chargés à la demande (Superviseur, page Bilans matières), table à part.
   const [bilanPresentations, setBilanPresentations] = useState([]);
   const [bilanPresStatus, setBilanPresStatus] = useState("idle"); // idle | loading | ready | unavailable | error
@@ -3008,7 +2882,7 @@ export default function App() {
   const currentRole = profile?.role || "lecture";
   const perms = permsFor(currentRole);
   useEffect(() => {
-    if ((view !== "doc_bilans" && view !== "doc_bilan_sap") || !perms.canManage || bilanPresStatus !== "idle") return;
+    if (view !== "doc_bilan_sap" || !perms.canManage || bilanPresStatus !== "idle") return;
     setBilanPresStatus("loading");
     fetchTable("bilan_presentations", rowToBilanPresentation, null, false, COLS_BILAN_PRESENTATIONS)
       .then((rows) => { setBilanPresentations(rows); setBilanPresStatus("ready"); })
@@ -3047,7 +2921,6 @@ export default function App() {
           setProductStocks(cached.productStocksData || []);
           setTruckAssignments(cached.assignmentsData || []);
           setSiteMeters(cached.siteMetersData || []);
-          setBilans(cached.bilansData || []);
           setInventairesOfficiels(cached.invOffData || []);
           setSiteTanks(cached.siteTanksData || []);
           setSiteDepotageMeters(cached.siteDepotageMetersData || []);
@@ -3085,17 +2958,16 @@ export default function App() {
           }
         };
         const load = (async () => {
-          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
+          const [sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData] = await Promise.all([
             loadTableSafe(fetchTable("sites", rowToSite, null, false, COLS_SITES), "sites"),
-            loadTableSafe(fetchTable("movements", rowToMovement, "date", true, COLS_MOVEMENTS), "movements"),
+            loadTableSafe(avecColsMovements((cols) => fetchTable("movements", rowToMovement, "date", true, cols)), "movements"),
             loadTableSafe(fetchTable("inventaires", rowToInventaire, "date", true, COLS_INVENTAIRES), "inventaires"),
             loadTableSafe(fetchTable("profiles", rowToProfile, null, false, COLS_PROFILES), "profiles"),
             loadTableSafe(fetchTable("audit", rowToAudit, "ts", false, COLS_AUDIT), "audit"),
             loadTableSafe(fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS), "product_stocks"),
             loadTableSafe(fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS), "truck_assignments"),
             loadTableSafe(fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS), "site_meters"),
-            loadTableSafe(fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES), "bilan_matieres"),
-            loadTableSafe(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), "inventaires_officiels"),
+                loadTableSafe(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), "inventaires_officiels"),
             loadTableSafe(fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS), "site_tanks"),
             loadTableSafe(fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS), "site_depotage_meters"),
             loadTableSafe(fetchTable("site_engins", rowToSiteEngin, "name", true, COLS_SITE_ENGINS), "site_engins"),
@@ -3106,7 +2978,7 @@ export default function App() {
             const res = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
             settingsRow = res.data;
           } catch (e) { /* réglages optionnels : on garde la valeur par défaut si ça échoue */ }
-          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, bilansData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData, settingsRow };
+          return { sitesData, movementsData, inventairesData, profilesData, auditData, productStocksData, assignmentsData, siteMetersData, invOffData, siteTanksData, siteDepotageMetersData, siteEnginsData, enginEntriesData, settingsRow };
         })();
         const result = await Promise.race([load, timeout(15000)]);
         if (cancelled) return;
@@ -3119,7 +2991,6 @@ export default function App() {
         setProductStocks(result.productStocksData);
         setTruckAssignments(result.assignmentsData);
         setSiteMeters(result.siteMetersData);
-        setBilans(result.bilansData);
         setInventairesOfficiels(result.invOffData);
         setSiteTanks(result.siteTanksData);
         setSiteDepotageMeters(result.siteDepotageMetersData);
@@ -3157,7 +3028,6 @@ export default function App() {
             setProductStocks(cached.productStocksData || []);
             setTruckAssignments(cached.assignmentsData || []);
             setSiteMeters(cached.siteMetersData || []);
-            setBilans(cached.bilansData || []);
             setInventairesOfficiels(cached.invOffData || []);
             setSiteTanks(cached.siteTanksData || []);
             setSiteDepotageMeters(cached.siteDepotageMetersData || []);
@@ -3213,10 +3083,10 @@ export default function App() {
         const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
         const wm = serverWatermarkRef.current;
         const [mRecent, iRecent, eeRecent, mNew, iNew] = await Promise.all([
-          fetchRecent("movements", rowToMovement, COLS_MOVEMENTS, recentCutoff),
+          avecColsMovements((cols) => fetchRecent("movements", rowToMovement, cols, recentCutoff)),
           fetchRecent("inventaires", rowToInventaire, COLS_INVENTAIRES, recentCutoff),
           fetchRecent("engin_entries", rowToEnginEntry, COLS_ENGIN_ENTRIES, recentCutoff),
-          wm.movements ? fetchCreatedSince("movements", rowToMovement, COLS_MOVEMENTS, wm.movements - wm.margin) : [],
+          wm.movements ? avecColsMovements((cols) => fetchCreatedSince("movements", rowToMovement, cols, wm.movements - wm.margin)) : [],
           wm.inventaires ? fetchCreatedSince("inventaires", rowToInventaire, COLS_INVENTAIRES, wm.inventaires - wm.margin) : [],
         ]);
         let mergedMovements, mergedInventaires, mergedEnginEntries;
@@ -3274,7 +3144,6 @@ export default function App() {
           tryUpdate(fetchTable("product_stocks", rowToProductStock, null, false, COLS_PRODUCT_STOCKS), setProductStocks, "productStocks"),
           tryUpdate(fetchTable("truck_assignments", rowToAssignment, "start_date", true, COLS_TRUCK_ASSIGNMENTS), setTruckAssignments, "assignments"),
           tryUpdate(fetchTable("site_meters", rowToSiteMeter, "name", true, COLS_SITE_METERS), setSiteMeters, "siteMeters"),
-          tryUpdate(fetchTable("bilan_matieres", rowToBilan, "period_key", true, COLS_BILAN_MATIERES), setBilans, "bilans"),
           tryUpdate(fetchTable("inventaires_officiels", rowToInventaireOfficiel, "date", true, COLS_INVENTAIRES_OFFICIELS), setInventairesOfficiels, "invOff"),
           tryUpdate(fetchTable("site_tanks", rowToSiteTank, "name", true, COLS_SITE_TANKS), setSiteTanks, "siteTanks"),
           tryUpdate(fetchTable("site_depotage_meters", rowToSiteDepotageMeter, "name", true, COLS_SITE_DEPOTAGE_METERS), setSiteDepotageMeters, "siteDepotageMeters"),
@@ -3282,7 +3151,7 @@ export default function App() {
         ]);
         const { data: se } = await supabase.from("settings").select("*").eq("id", 1).maybeSingle();
         if (se) setSettings(rowToSettings(se));
-        if (Object.keys(captured).length === 10) syncStampsRef.current.slow = Date.now(); // 10 tables, toutes rechargées
+        if (Object.keys(captured).length === 9) syncStampsRef.current.slow = Date.now(); // 9 tables, toutes rechargées
         if (session?.user?.id) {
           const cached = readAppCache(session.user.id) || {};
           writeAppCache(session.user.id, {
@@ -3292,7 +3161,6 @@ export default function App() {
             productStocksData: captured.productStocks ?? cached.productStocksData,
             assignmentsData: captured.assignments ?? cached.assignmentsData,
             siteMetersData: captured.siteMeters ?? cached.siteMetersData,
-            bilansData: captured.bilans ?? cached.bilansData,
             invOffData: captured.invOff ?? cached.invOffData,
             siteTanksData: captured.siteTanks ?? cached.siteTanksData,
             siteDepotageMetersData: captured.siteDepotageMeters ?? cached.siteDepotageMetersData,
@@ -3482,22 +3350,6 @@ export default function App() {
     flash("Compteur supprimé.");
   });
 
-  /* ---- mutations : Bilan Matières (Superviseur uniquement) ---- */
-  const saveBilan = ({ siteId, periodType, periodKey, reception15, ventes15, transferts15, transfertSiteId, stockFin15, commentaire, photoFiles = [], existingPhotoUrls = [] }) => withSync(async () => {
-    const newUrls = photoFiles.length ? await uploadPhotos(photoFiles, `bilans/${siteId}/${periodType}`) : [];
-    const photoUrls = [...existingPhotoUrls, ...newUrls];
-    const row = bilanToRow({ siteId, periodType, periodKey, reception15: Number(reception15) || 0, ventes15: Number(ventes15) || 0, transferts15: Number(transferts15) || 0, transfertSiteId: transfertSiteId || null, stockFin15: Number(stockFin15) || 0, commentaire, photoUrls, createdBy: currentUserName });
-    const { data, error } = await supabase.from("bilan_matieres").upsert(row, { onConflict: "site_id,period_type,period_key" }).select().maybeSingle();
-    if (error) throw error;
-    if (!data) throw new Error("Le Bilan Matières n'a pas pu être confirmé par le serveur — réessaie.");
-    const saved = rowToBilan(data);
-    setBilans((prev) => {
-      const exists = prev.some((b) => b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey);
-      return exists ? prev.map((b) => (b.siteId === siteId && b.periodType === periodType && b.periodKey === periodKey ? saved : b)) : [...prev, saved];
-    });
-    appendAudit("Bilan Matières", `${sites.find((s) => s.id === siteId)?.name || siteId} — ${PERIOD_TYPE_LABELS[periodType]} ${periodKey}`);
-    flash("Bilan Matières enregistré.");
-  });
   // Enregistre (ou met à jour) les textes de la présentation d'une période. Renvoie true/false (withSync).
   const saveBilanPresentation = ({ periodType, periodKey, patch }) => withSync(async () => {
     const existing = bilanPresentations.find((p) => p.periodType === periodType && p.periodKey === periodKey);
@@ -3510,13 +3362,6 @@ export default function App() {
     setBilanPresStatus("ready");
     appendAudit("Présentation du bilan matière", `${PERIOD_TYPE_LABELS[periodType]} — ${periodKey}`);
     flash("Textes de la présentation enregistrés.");
-  });
-  const deleteBilan = (bilan) => withSync(async () => {
-    const { data, error } = await supabase.from("bilan_matieres").delete().eq("id", bilan.id).select();
-    if (error) throw error;
-    if (!data || data.length === 0) throw new Error("Suppression refusée par la base de données.");
-    setBilans((prev) => prev.filter((b) => b.id !== bilan.id));
-    flash("Bilan supprimé.");
   });
 
   /* ---- mutations : Inventaires officiels (inopinés/mensuels), cuve par cuve ---- */
@@ -3704,6 +3549,7 @@ export default function App() {
       setMovements((prev) => [...prev, saved]);
       appendAudit(TYPE_META[payload.type].label, `${fmt(payload.quantity)} L — ${sites.find((s) => s.id === payload.siteId)?.name || ""}`);
     } catch (e) {
+      if (/temperature_site|densite_site/i.test(`${e?.message || ""}`)) throw new Error("La base de données n\'est pas encore à jour pour la mesure site (script supabase_reception_mesure_site.sql à exécuter dans Supabase). La réception n\'a PAS été enregistrée.");
       if (!isNetworkError(e)) throw e;
       // Pas de réseau : on garde la saisie en local (visible immédiatement) et on la met en
       // file d'attente, synchronisée automatiquement dès le retour de la connexion.
@@ -3733,9 +3579,10 @@ export default function App() {
   const editMovementTempDensite = ({ id, temperatureC, densiteObservee }) => withSync(async () => {
     const m = movements.find((mm) => mm.id === id);
     if (!m) throw new Error("Mouvement introuvable.");
-    const row = tempDensiteUpdateRow(m.quantity, temperatureC, densiteObservee);
+    const row = mesureSiteUpdateRow(m.quantity, temperatureC, densiteObservee);
     const { data, error } = await supabase.from("movements").update(row).eq("id", id).select().maybeSingle();
-    if (error) throw error;
+    if (error && /temperature_site|densite_site/i.test(`${error.message || ""}`)) throw new Error("La base de données n\'est pas encore à jour pour la mesure site (script supabase_reception_mesure_site.sql à exécuter dans Supabase). Rien n\'a été changé.");
+      if (error) throw error;
     if (!data) throw new Error("Modification refusée par la base de données (droits insuffisants) — rien n'a été changé.");
     const saved = rowToMovement(data);
     setMovements((prev) => prev.map((mm) => (mm.id === id ? saved : mm)));
@@ -3819,7 +3666,7 @@ export default function App() {
     if (!siteId || !date || !navigator.onLine) return;
     try {
       const [freshMovs, freshInv] = await Promise.all([
-        fetchForSiteDate("movements", rowToMovement, COLS_MOVEMENTS, siteId, date, product),
+        avecColsMovements((cols) => fetchForSiteDate("movements", rowToMovement, cols, siteId, date, product)),
         fetchForSiteDate("inventaires", rowToInventaire, COLS_INVENTAIRES, siteId, date, product),
       ]);
       setMovements((prev) => mergeSiteDate(prev, freshMovs, siteId, date, product));
@@ -4055,7 +3902,7 @@ export default function App() {
   // classement plus clair : Opérations, Documents & suivis, Rapports, Administration.
   const NAV_GROUPS = [
     { label: "Opérations", ids: ["accueil", "dashboard", "dashboard_site", "dashboard_lub", "saisie", "engins", "inventaires", "vcf"] },
-    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilans", "doc_bilan_sap", "doc_lubrifiants"] },
+    { label: "Documents & suivis", ids: ["doc_expositions", "doc_bons", "doc_transferts", "doc_bilan_sap", "doc_lubrifiants"] },
     { label: null, ids: ["rapports"] },
     { label: null, ids: ["reunions"] },
     { label: null, ids: ["stock_jour"] },
@@ -4370,8 +4217,8 @@ export default function App() {
           {view === "saisie" && <DailyEntryView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} siteMeters={siteMeters} saveProductStock={saveProductStock} addMovement={addMovement} addInventaire={addInventaire} deleteMovement={deleteMovement} editMovementTempDensite={editMovementTempDensite} deleteInventaire={deleteInventaire} refreshSiteDate={refreshSiteDate} settings={settings} canWrite={perms.canWrite} canManage={perms.canManage} assignedSiteIds={profile?.assignedSiteIds} truckAssignments={truckAssignments} />}
           {view === "inventaires" && <InventairesView sites={sites} inventaires={inventaires} movements={movements} truckAssignments={truckAssignments} stockOf={stockOf} stockOf15={stockOf15} addInventaire={addInventaire} addMovement={addMovement} deleteInventaire={deleteInventaire} settings={settings} updateSettings={updateSettings} canWrite={perms.canWrite} canManage={perms.canManage} canInventaireOfficiel={perms.canInventaireOfficiel} inventairesOfficiels={inventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={perms.canSignSomip} canSignOperateur={perms.canSignOperateur} canSignTotal={perms.canSignTotal} isTotalEnergiesOnly={perms.isTotalEnergiesOnly} productStocks={productStocks} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "vcf" && <VcfView />}
-          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={settings.objectifFreinte} presenterName={currentUserName} appendAudit={appendAudit} flash={flash} />}
-          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} bilans={bilans} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
+          {view.startsWith("doc_") && <DocumentsPage key={view} page={view} sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} editMovementTempDensite={editMovementTempDensite} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={settings.objectifFreinte} presenterName={currentUserName} appendAudit={appendAudit} flash={flash} />}
+          {view === "rapports" && <ReportsView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} truckAssignments={truckAssignments} settings={settings} stockOf={stockOf} canManage={perms.canManage} isSiteRestricted={isSiteRestricted} assignedSiteIds={profile?.assignedSiteIds || []} />}
           {view === "utilisateurs" && perms.canManage && <UsersView isAdmin={isAdmin} toggleUserAdmin={toggleUserAdmin} profiles={profiles} updateUserRole={updateUserRole} updateUserSites={updateUserSites} toggleUserActive={toggleUserActive} sites={sites} session={session} />}
           {view === "personnalisation" && perms.canManage && <BrandingView settings={settings} updateTheme={updateTheme} />}
           {view === "historique" && perms.canManage && <HistoryView audit={audit} />}
@@ -4495,7 +4342,7 @@ function SiteHomeView({ sites, movements, inventaires, stockOf, assignedSiteIds,
       const ventes = sumQty(dayMovs, ["sortie"]);
       const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
       const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
+      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers + sumDelta(dayMovs, ["transfert_camion"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       if (inv) {
         const ecart = inv.stockPhysique - theorique;
@@ -6005,14 +5852,14 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [siteId, setSiteId] = useState((hasSiteRestriction ? assignedSiteIds[0] : sites[0]?.id) || "");
   const [product, setProduct] = useState("gasoil");
   const [date, setDate] = useState(todayStr());
-  const [receptions, setReceptions] = useState([{ quantite: "", ref: "" }]);
+  const [receptions, setReceptions] = useState([{ quantite: "", ref: "", tempSite: "", densSite: "" }]);
   // Ajout/correction a posteriori de la température et de la densité d'une réception déjà
   // enregistrée (un opérateur les a parfois oubliées sur le moment) — Superviseur uniquement.
   const [editingTempId, setEditingTempId] = useState(null);
   const [tempEditForm, setTempEditForm] = useState({ temperatureC: "", densiteObservee: "" });
   const startEditTemp = (m) => {
     setEditingTempId(m.id);
-    setTempEditForm({ temperatureC: m.temperatureC !== undefined ? String(m.temperatureC) : "", densiteObservee: m.densiteObservee !== undefined ? String(m.densiteObservee) : "" });
+    setTempEditForm({ temperatureC: m.temperatureSite !== undefined ? String(m.temperatureSite) : "", densiteObservee: m.densiteSite !== undefined ? String(m.densiteSite) : "" });
   };
   const saveEditTemp = () => {
     editMovementTempDensite({ id: editingTempId, temperatureC: tempEditForm.temperatureC, densiteObservee: tempEditForm.densiteObservee });
@@ -6032,6 +5879,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const [retourCamionTruckId, setRetourCamionTruckId] = useState("");
   const [retourCuveTruckQty, setRetourCuveTruckQty] = useState("");
   const [retourCuveTruckNote, setRetourCuveTruckNote] = useState("");
+  // Transfert entre camions laitiers : chaque camion saisit SON côté (envoyé / reçu), comme pour les chargements — pas de miroir automatique.
+  const [tcSens, setTcSens] = useState("envoye");
+  const [tcAutre, setTcAutre] = useState("");
+  const [tcQty, setTcQty] = useState("");
   const [tempC, setTempC] = useState("");
   const [densite, setDensite] = useState("");
   const [stockFinMesure, setStockFinMesure] = useState("");
@@ -6081,6 +5932,10 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const receptionN = receptions.reduce((a, r) => a + (Number(r.quantite) || 0), 0);
   const retourN = (isLub || isMobileSite) ? 0 : (isLubSite ? retoursCuve.reduce((a, r) => a + (Number(r.quantite) || 0), 0) : (Number(retourQty) || 0));
   const retourCuveTruckN = isMobileSite ? (Number(retourCuveTruckQty) || 0) : 0;
+  const autresCamions = truckSites.filter((t) => t.id !== siteId && t.active !== false);
+  const tcN = isMobileSite && !isLub ? (Number(tcQty) || 0) : 0;
+  const tcDelta = tcSens === "recu" ? tcN : -tcN;
+  const tcValide = tcN === 0 || (tcAutre !== "" && autresCamions.some((t) => t.id === tcAutre));
   // Tout site gasoil (fixe ou camion) passe par la liste répétable de compteurs — même avec un
   // seul compteur configuré, ça permet d'en ajouter un second directement depuis la Saisie
   // journalière, sans devoir d'abord le configurer sur la page Sites. Les lubrifiants restent à
@@ -6106,7 +5961,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   // Le retour cuve peut être saisi séparément de l'index (un compteur à la fois) : pas de
   // comparaison avec sortieQty de cette session précise, qui pourrait être vide ce jour-là.
   const venteTruck = isMobileSite ? Math.max(0, sortieQty - retourCuveTruckN) : sortieQty;
-  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty;
+  const stockTheoriqueAmbiant = stockDebutEffective + receptionN + retourN - sortieQty + (tcN > 0 ? tcDelta : 0);
   const stockTheorique15 = !skipVcf && site ? stockBeforeDate15(site, movements, date, inventaires) : 0;
 
   // Chaque produit (gasoil, chaque lubrifiant) et chaque camion a son propre compteur de sortie.
@@ -6123,6 +5978,24 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   };
   const vcfPreview = skipVcf ? null : vcfFor(receptionN || sortieQty || retourN || retourCuveTruckN || 1);
 
+  // Mesure prélevée SUR SITE à chaque réception de gasoil d'un site : obligatoire (température ET densité) dès qu'un N° de bon de livraison est saisi.
+
+  const mesureSiteActive = !isMobileSite && !isLub;
+
+  const receptionLignes = receptions.map((r) => {
+
+    const qty = Number(r.quantite) || 0, tOk = nombreSaisi(r.tempSite), dOk = nombreSaisi(r.densSite);
+
+    const exigeMesure = mesureSiteActive && qty > 0 && String(r.ref || "").trim() !== "";
+
+    return { qty, tOk, dOk, exigeMesure, manque: exigeMesure && !(tOk && dOk), partielle: mesureSiteActive && qty > 0 && !exigeMesure && tOk !== dOk, avertissements: mesureSiteActive ? avertissementsMesureSite(r.tempSite, r.densSite) : [] };
+
+  });
+
+  const receptionsMesureOk = !receptionLignes.some((l) => l.manque);
+
+  const receptionExtra = (r, qty) => (mesureSiteActive && nombreSaisi(r.tempSite) && nombreSaisi(r.densSite) ? receptionMesureSiteFields(qty, r.tempSite, r.densSite) : vcfExtra(qty));
+
   const stockFinN = Number(stockFinMesure) || 0;
   const vcfFin = skipVcf ? null : correctVolumeTo15({ volumeAmbiant: stockFinN, tempC: tempC === "" ? NaN : Number(tempC), densiteObservee: Number(densite) || 0 });
   // Le Gain/Perte "officiel" est toujours en base ambiante (voir addInventaire) : le 15°C est
@@ -6133,17 +6006,17 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   const ecart = stockFinMesure === "" ? null : physiqueUsed - theoriqueUsed;
   const preview = ecart === null ? null : classifyEcart(ecart, theoriqueUsed, settings.objectifFreinte);
 
-  const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || stockFinMesure !== "";
+  const hasSomethingToSave = receptionN > 0 || sortieQty > 0 || retourN > 0 || retourCuveTruckN > 0 || tcN > 0 || stockFinMesure !== "";
   const stockFinConflict = stockFinMesure !== "" && !!existingInv;
   const photosWithoutStockFin = stockFinPhotos.length > 0 && stockFinMesure === "";
-  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && !stockFinConflict && !photosWithoutStockFin && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
+  const canSubmit = sortieValid && chargementsValid && hasSomethingToSave && receptionsMesureOk && tcValide && !stockFinConflict && !photosWithoutStockFin && (!isFirstOfMonth || !hasSomethingToSave || stockDebutConfirm !== "");
 
   const resetDayFields = () => {
-    setReceptions([{ quantite: "", ref: "" }]);
+    setReceptions([{ quantite: "", ref: "", tempSite: "", densSite: "" }]);
     setIndexAvant(""); setIndexApres(""); setDestinataire(""); setChargements([{ camion: "", quantite: "" }]);
     setIndexBloque(false); setSortieDirecte("");
     setCompteurReadings([{ compteur: meters[0] || "Compteur", indexAvant: "", indexApres: "" }]);
-    setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetoursCuve([{ camion: "", quantite: "" }]); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTempC(""); setDensite("");
+    setRetourQty(""); setRetourNote(""); setRetourCamionTruckId(""); setRetoursCuve([{ camion: "", quantite: "" }]); setRetourCuveTruckQty(""); setRetourCuveTruckNote(""); setTcSens("envoye"); setTcAutre(""); setTcQty(""); setTempC(""); setDensite("");
     setStockFinMesure(""); setCommentaireInv(""); setStockFinPhotos([]);
   };
 
@@ -6167,7 +6040,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         for (const r of receptions) {
           const qty = Number(r.quantite) || 0;
           if (qty > 0) {
-            const ok = await addMovement({ siteId, product, type: "reception", date, quantity: qty, delta: qty, ref: r.ref, ...vcfExtra(qty) });
+            const ok = await addMovement({ siteId, product, type: "reception", date, quantity: qty, delta: qty, ref: r.ref, ...receptionExtra(r, qty) });
             if (!ok) return;
           }
         }
@@ -6264,6 +6137,11 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
         const ok = await addMovement({ siteId, product, type: "retour_cuve_camion", date, quantity: retourCuveTruckN, delta: 0, destination: retourCuveTruckNote, ...vcfExtra(retourCuveTruckN) });
         if (!ok) return;
       }
+      if (tcN > 0) {
+        // Variation de stock signée : −quantité si ce camion envoie, +quantité s'il reçoit ; relatedSiteId = l'autre camion.
+        const ok = await addMovement({ siteId, product, type: "transfert_camion", date, quantity: tcN, delta: tcDelta, relatedSiteId: tcAutre });
+        if (!ok) return;
+      }
       if (stockFinMesure !== "") {
         const invExtra = vcfFin
           ? { temperatureC: Number(tempC), densiteObservee: Number(densite), densite15: vcfFin.densite15, vcf: vcfFin.vcf, stockPhysique15: vcfFin.volume15 }
@@ -6283,7 +6161,7 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
   // (qui se vident après l'enregistrement), pour rester juste même après un rechargement.
   const theoriqueDuJourSauve = stockDebutEffective
     + sumQty(dayMovs, ["reception"]) + sumQty(dayMovs, ["retour_camion"])
-    - sumQty(dayMovs, ["sortie"]) - sumQty(dayMovs, ["sortie_camion"]);
+    - sumQty(dayMovs, ["sortie"]) - sumQty(dayMovs, ["sortie_camion"]) + sumDelta(dayMovs, ["transfert_camion"]);
   const gainPerteJour = existingInv ? existingInv.stockPhysique - theoriqueDuJourSauve : null;
   // Pour un camion : la "Sortie terrain" saisie est la sortie GLOBALE de la journée (ce qui a
   // quitté la citerne), qui peut inclure une part revenue en cuve plutôt que distribuée. La vraie
@@ -6363,8 +6241,12 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
           )}
 
           <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>{isMobileSite ? "Chargement" : "Réception"}</p>
-          {receptions.map((r, idx) => (
-            <div key={idx} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
+{receptions.map((r, idx) => {
+const lg = receptionLignes[idx];
+const nomChamp = !lg.tOk && !lg.dOk ? "la température ET la densité" : !lg.tOk ? "la température" : "la densité";
+return (
+<div key={idx} style={{ marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "flex-end" }}>
               <div style={{ flex: 1 }}>
                 <Field label="Quantité reçue (L)">
                   <input type="number" className="somip-input" value={r.quantite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, quantite: e.target.value } : row)))} placeholder="0" />
@@ -6383,8 +6265,27 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                 </button>
               )}
             </div>
-          ))}
-          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setReceptions((prev) => [...prev, { quantite: "", ref: "" }])}>
+{mesureSiteActive && (
+<div style={{ display: "flex", gap: 8, marginBottom: 4 }} data-testid={`mesure-site-${idx}`}>
+<div style={{ flex: 1 }}>
+<Field label={`Température site (°C)${lg.exigeMesure ? " *" : ""}`}>
+<input type="number" step="0.1" className="somip-input" data-testid={`temp-site-${idx}`} style={lg.manque && !lg.tOk ? { borderColor: C.danger } : undefined} value={r.tempSite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, tempSite: e.target.value } : row)))} placeholder="Ex : 28.5" />
+</Field>
+</div>
+<div style={{ flex: 1 }}>
+<Field label={`Densité site (kg/m³)${lg.exigeMesure ? " *" : ""}`}>
+<input type="number" step="0.1" className="somip-input" data-testid={`dens-site-${idx}`} style={lg.manque && !lg.dOk ? { borderColor: C.danger } : undefined} value={r.densSite} onChange={(e) => setReceptions((prev) => prev.map((row, i) => (i === idx ? { ...row, densSite: e.target.value } : row)))} placeholder="Ex : 845" />
+</Field>
+</div>
+</div>
+)}
+{lg.manque && <p data-testid={`mesure-erreur-${idx}`} style={{ margin: "0 0 6px", fontSize: 11.5, color: C.danger, fontWeight: 600 }}>⛔ Réception {idx + 1} (bon {String(r.ref).trim()}) : {nomChamp} prélevée{lg.tOk || lg.dOk ? "" : "s"} sur site {lg.tOk || lg.dOk ? "est obligatoire" : "sont obligatoires"} avec un N° de bon de livraison. Enregistrement bloqué tant que ce n'est pas renseigné.</p>}
+{lg.partielle && <p style={{ margin: "0 0 6px", fontSize: 11.5, color: C.warning }}>⚠ Renseigne la température ET la densité du site (ou aucune des deux) : une seule valeur n'est pas prise en compte.</p>}
+{lg.avertissements.map((w, k) => <p key={k} data-testid={`mesure-avert-${idx}-${k}`} style={{ margin: "0 0 6px", fontSize: 11.5, color: C.warning }}>⚠ {w}</p>)}
+</div>
+);
+})}
+          <button className="somip-btn somip-btn-secondary" style={{ fontSize: 12, padding: "6px 12px", marginBottom: 10 }} onClick={() => setReceptions((prev) => [...prev, { quantite: "", ref: "", tempSite: "", densSite: "" }])}>
             <Plus size={13} /> Ajouter une réception
           </button>
           {receptions.filter((r) => Number(r.quantite) > 0).length > 1 && (
@@ -6674,6 +6575,28 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             </>
           )}
 
+{isMobileSite && !isLub && (
+<>
+<p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Transfert entre camions laitiers</p>
+<div style={{ display: "flex", gap: 8 }}>
+<div style={{ flex: 1 }}><Field label="Sens">
+<select data-testid="tc-sens" className="somip-select" value={tcSens} onChange={(e) => setTcSens(e.target.value)}>
+<option value="envoye">Envoyé à un autre camion</option>
+<option value="recu">Reçu d'un autre camion</option>
+</select>
+</Field></div>
+<div style={{ flex: 1 }}><Field label={tcSens === "recu" ? "Camion donneur" : "Camion destinataire"}>
+<select data-testid="tc-autre" className="somip-select" value={tcAutre} onChange={(e) => setTcAutre(e.target.value)}>
+<option value="">— choisir —</option>
+{autresCamions.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+</select>
+</Field></div>
+<div style={{ flex: 1 }}><Field label="Quantité (L)"><input data-testid="tc-qty" type="number" className="somip-input" value={tcQty} onChange={(e) => setTcQty(e.target.value)} placeholder="0" /></Field></div>
+</div>
+{tcN > 0 && !tcValide && <p data-testid="tc-erreur" style={{ margin: "-4px 0 8px", fontSize: 11.5, color: C.danger, fontWeight: 600 }}>⛔ Choisis le camion {tcSens === "recu" ? "donneur" : "destinataire"} du transfert : enregistrement bloqué tant que ce n'est pas renseigné.</p>}
+{tcN > 0 && tcValide && <p data-testid="tc-resume" style={{ margin: "-4px 0 8px", fontSize: 11.5, color: C.sub }}>Transfert {tcSens === "recu" ? "reçu de" : "envoyé à"} {autresCamions.find((t) => t.id === tcAutre)?.name} : {tcSens === "recu" ? "+" : "−"}{fmt(tcN)} L sur ce camion. À saisir aussi sur l'autre camion ({tcSens === "recu" ? "envoyé" : "reçu"}) — pas de miroir automatique ; le rapport « Transferts entre camions » vérifie que les deux côtés concordent.</p>}
+</>
+)}
           {!isLub && (
             <>
               <p style={{ margin: "10px 0 6px", fontSize: 12, fontWeight: 700, color: C.ink }}>Température &amp; densité (du jour)</p>
@@ -6751,9 +6674,9 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
             {dayMovs.length === 0 && <EmptyRow colSpan={canManage ? 4 : 3} text="Aucune écriture pour ce jour." />}
             {dayMovs.map((m) => {
               const meta = TYPE_META[m.type];
-              const label = m.type === "reception" ? (isMobileSite ? "Chargement" : "Réception") : m.type === "sortie" ? (isMobileSite ? "Sortie terrain" : "Vente") : m.type === "sortie_camion" ? "Camion" : m.type === "retour_camion" ? "Retour" : m.type === "retour_cuve_camion" ? "Retour cuve" : "Ajustement";
+              const label = m.type === "reception" ? (isMobileSite ? "Chargement" : "Réception") : m.type === "sortie" ? (isMobileSite ? "Sortie terrain" : "Vente") : m.type === "sortie_camion" ? "Camion" : m.type === "retour_camion" ? "Retour" : m.type === "retour_cuve_camion" ? "Retour cuve" : m.type === "transfert_camion" ? (m.delta < 0 ? "Transfert envoyé" : "Transfert reçu") : "Ajustement";
               const nameOf = (id) => sites.find((s) => s.id === id)?.name || id;
-              const detail = m.type === "reception" ? (m.ref || "—") : m.type === "sortie" ? (m.destinataire || "—") : m.type === "retour_cuve_camion" ? (m.destination ? nameOf(m.destination) : "—") : m.camion ? `${nameOf(m.camion)} ${m.type === "retour_camion" ? "←" : "→"} ${m.destination || "—"}` : "—";
+              const detail = m.type === "reception" ? (m.ref || "—") : m.type === "sortie" ? (m.destinataire || "—") : m.type === "retour_cuve_camion" ? (m.destination ? nameOf(m.destination) : "—") : m.type === "transfert_camion" ? (m.relatedSiteId ? `${m.delta < 0 ? "→" : "←"} ${nameOf(m.relatedSiteId)}` : "—") : m.camion ? `${nameOf(m.camion)} ${m.type === "retour_camion" ? "←" : "→"} ${m.destination || "—"}` : "—";
               const transfer = m.type === "sortie_camion" && m.camion ? transferLabel(sites, truckAssignments || [], m.camion, siteId, m.date) : "";
               return (
                 <tr key={m.id}>
@@ -6764,19 +6687,23 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                     {m.indexAvant !== undefined && m.indexApres !== undefined && (
                       <div className="somip-mono" style={{ marginTop: 2, fontSize: 11, color: C.sub }}>Index : {fmt(m.indexAvant)} → {fmt(m.indexApres)}</div>
                     )}
-                    {m.type === "reception" && editingTempId !== m.id && (
-                      <div style={{ marginTop: 2, fontSize: 11, color: C.sub, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>
-                          {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
-                          {m.temperatureC === undefined && m.densiteObservee === undefined && "Température/densité non saisies"}
-                        </span>
-                        {canManage && (
-                          <button onClick={() => startEditTemp(m)} title="Ajouter ou corriger la température/densité" style={{ border: "none", background: "none", cursor: "pointer", padding: 2, display: "inline-flex" }}>
-                            <Pencil size={11} color={C.blue} />
-                          </button>
-                        )}
-                      </div>
-                    )}
+{m.type === "reception" && editingTempId !== m.id && (
+<div style={{ marginTop: 2, fontSize: 11, color: C.sub, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+<span data-testid={`recep-mesure-${m.id}`}>
+{aMesureSite(m)
+? `Mesure site : ${m.temperatureSite}°C · densité ${m.densiteSite}`
+: (m.temperatureC !== undefined || m.densiteObservee !== undefined)
+? `Mesure du jour : ${m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}${m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}${m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}`
+: "Température/densité non saisies"}
+</span>
+{receptionSansMesureSite(m) && <span data-testid={`recep-pastille-${m.id}`}><PastilleMesureManquante /></span>}
+{canManage && (
+<button onClick={() => startEditTemp(m)} title="Ajouter ou corriger la température et la densité prélevées sur site" style={{ border: "none", background: "none", cursor: "pointer", padding: 2, display: "inline-flex" }}>
+<Pencil size={11} color={C.blue} />
+</button>
+)}
+</div>
+)}
                     {m.type !== "reception" && (m.temperatureC !== undefined || m.densiteObservee !== undefined) && (
                       <div style={{ marginTop: 2, fontSize: 11, color: C.sub }}>
                         {m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}{m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}{m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}
@@ -6784,8 +6711,8 @@ function DailyEntryView({ sites, movements, inventaires, productStocks, siteMete
                     )}
                     {editingTempId === m.id && (
                       <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }} onClick={(e) => e.stopPropagation()}>
-                        <input type="number" className="somip-input" style={{ width: 70, padding: "4px 6px", fontSize: 11.5 }} placeholder="°C" value={tempEditForm.temperatureC} onChange={(e) => setTempEditForm({ ...tempEditForm, temperatureC: e.target.value })} />
-                        <input type="number" step="0.1" className="somip-input" style={{ width: 95, padding: "4px 6px", fontSize: 11.5 }} placeholder="Densité (kg/m³)" value={tempEditForm.densiteObservee} onChange={(e) => setTempEditForm({ ...tempEditForm, densiteObservee: e.target.value })} />
+                        <input type="number" className="somip-input" style={{ width: 70, padding: "4px 6px", fontSize: 11.5 }} placeholder="°C site" value={tempEditForm.temperatureC} onChange={(e) => setTempEditForm({ ...tempEditForm, temperatureC: e.target.value })} />
+                        <input type="number" step="0.1" className="somip-input" style={{ width: 95, padding: "4px 6px", fontSize: 11.5 }} placeholder="Densité site (kg/m³)" value={tempEditForm.densiteObservee} onChange={(e) => setTempEditForm({ ...tempEditForm, densiteObservee: e.target.value })} />
                         <button onClick={saveEditTemp} style={{ border: "none", background: C.blue, color: "#fff", borderRadius: 5, padding: "4px 8px", fontSize: 11, cursor: "pointer" }}>OK</button>
                         <button onClick={() => setEditingTempId(null)} style={{ border: "none", background: "none", color: C.sub, cursor: "pointer", fontSize: 11 }}>Annuler</button>
                       </div>
@@ -7228,7 +7155,7 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
     const dateMovs = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === date);
     const reception = sumQty(dateMovs, ["reception"]);
     const vente = sumQty(dateMovs, ["sortie"]);
-    const theorique = stockDebut + reception - vente;
+    const theorique = stockDebut + reception - vente + sumDelta(dateMovs, ["transfert_camion"]);
     const jauge = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === date));
     return { truck, stockDebut, reception, vente, theorique, jauge: jauge ? jauge.stockPhysique : null };
   }).filter(Boolean);
@@ -8187,7 +8114,7 @@ function VcfView() {
 /* même contenu, les mêmes filtres et les mêmes exports partout.          */
 /* ------------------------------------------------------------------ */
 function renderReportTab(tab, ctx) {
-  const { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, presenterName, appendAudit, flash } = ctx;
+  const { sites, movements, inventaires, productStocks, truckAssignments, canManage, isSiteRestricted, assignedSiteIds, editMovementTempDensite, bilanPresentations, bilanPresStatus, saveBilanPresentation, objectifFreinte, presenterName, appendAudit, flash } = ctx;
   // Déjà filtré en amont (la page Rapports est ouverte à tous sauf les comptes TotalEnergies,
   // et "Documents & suivis" a son propre contrôle par page) — cette barrière ne doit donc pas
   // exclure en plus un compte Lecture seule sans site attribué, qui doit tout voir comme un
@@ -8195,18 +8122,16 @@ function renderReportTab(tab, ctx) {
   const canSee = true;
   switch (tab) {
     case "synthese_mensuelle_site": return <MonthlySiteLedgerReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
-    case "synthese_mensuelle_site_15": return <MonthlySiteLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} />;
     case "synthese_mensuelle_lub": return <LubricantMonthlyLedgerReport sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} assignedSiteIds={assignedSiteIds} />;
     case "synthese_station_jour": return <StationDailyLedgerReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
-    case "synthese_station_jour_15": return <StationDailyLedgerReport15 sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} assignedSiteIds={assignedSiteIds} />;
     case "exposition": return canManage ? <ExposureReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "exposition_comilog": return canManage ? <ExpositionComilogReport sites={sites} movements={movements} inventaires={inventaires} truckAssignments={truckAssignments} productStocks={productStocks} /> : null;
     case "bons": return canSee ? <DeliveryNotesReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} canManage={canManage} editMovementTempDensite={editMovementTempDensite} /> : null;
     case "bilansap": return canSee ? <BilansMatieresSap sites={sites} movements={movements} canManage={canManage} canEdit={!!(canManage || isSiteRestricted)} assignedSiteIds={assignedSiteIds} userName={presenterName} appendAudit={appendAudit} flash={flash}
       exportToExcel={exportToExcel} exportToPdf={exportToPdf} PresentationPanel={BilanPresentationPanel} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} /> : null;
-    case "bilan": return canSee ? <BilanMatieresView sites={sites} bilans={bilans} movements={movements} saveBilan={saveBilan} deleteBilan={deleteBilan} canManage={canManage} assignedSiteIds={assignedSiteIds} bilanPresentations={bilanPresentations} bilanPresStatus={bilanPresStatus} saveBilanPresentation={saveBilanPresentation} objectifFreinte={objectifFreinte} presenterName={presenterName} /> : null;
     case "ecart_mensuel": return canSee ? <EcartMensuelReport sites={sites} movements={movements} inventaires={inventaires} assignedSiteIds={assignedSiteIds} /> : null;
     case "transferts": return canSee ? <TransfersReport sites={sites} movements={movements} truckAssignments={truckAssignments} /> : null;
+    case "transferts_camions": return canSee ? <TruckTransfersReport sites={sites} movements={movements} /> : null;
     case "retours_chargements": return canSee ? <RetoursChargementsReport sites={sites} movements={movements} assignedSiteIds={assignedSiteIds} /> : null;
     default: return null;
   }
@@ -8227,15 +8152,10 @@ const DOC_PAGES = {
   },
   doc_transferts: {
     label: "Transferts", icon: Truck, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
-    tabs: [{ id: "transferts", label: "Transferts entre sites" }, { id: "retours_chargements", label: "Retours cuve & Chargements" }],
+    tabs: [{ id: "transferts", label: "Transferts entre sites" }, { id: "transferts_camions", label: "Transferts entre camions" }, { id: "retours_chargements", label: "Retours cuve & Chargements" }],
   },
-  doc_bilans: {
-    label: "Bilans matières", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
-    tabs: [{ id: "bilan", label: "Bilan Matières" }],
-  },
-  // Nouveau module style SAP (refonte en cours) : cohabite avec l'ancien jusqu'à son remplacement complet.
   doc_bilan_sap: {
-    label: "Bilan matières (nouveau)", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
+    label: "Bilan matières", icon: Factory, allowed: ({ canManage, isSiteRestricted }) => canManage || isSiteRestricted,
     tabs: [{ id: "bilansap", label: "Bilan matières" }],
   },
   doc_lubrifiants: {
@@ -8268,13 +8188,11 @@ function DocumentsPage({ page, ...ctx }) {
   );
 }
 
-function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds }) {
+function ReportsView({ sites, movements, inventaires, productStocks, truckAssignments, settings, stockOf, canManage, isSiteRestricted, assignedSiteIds }) {
   const CATEGORIES = [
     { id: "synthese_mois", label: "Synthèse journalière du mois", icon: TrendingUp, show: true, tabs: [
         { id: "synthese_mensuelle_site", label: "Gasoil" },
-        { id: "synthese_mensuelle_site_15", label: "Gasoil 15°C" },
         { id: "synthese_station_jour", label: "Station + camion" },
-        { id: "synthese_station_jour_15", label: "Station + camion 15°C" },
       ] },
     { id: "ecart_cat", label: "Gain/Perte du mois", icon: TrendingDown, show: canManage || isSiteRestricted, tabs: [
         { id: "ecart_mensuel", label: "Gain/Perte du mois" },
@@ -8310,7 +8228,7 @@ function ReportsView({ sites, movements, inventaires, productStocks, truckAssign
         </div>
       )}
       {activeCategory && activeCategory.tabs.length === 1 && <div style={{ marginBottom: 4 }} />}
-      {renderReportTab(tab, { sites, movements, inventaires, productStocks, truckAssignments, bilans, saveBilan, deleteBilan, canManage, isSiteRestricted, assignedSiteIds })}
+      {renderReportTab(tab, { sites, movements, inventaires, productStocks, truckAssignments, canManage, isSiteRestricted, assignedSiteIds })}
     </div>
   );
 }
@@ -8339,12 +8257,13 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
       const retourCamions = isTruck ? 0 : sumQty(dayMovs, ["retour_camion"]);
       const retourCuve = isTruck ? sumQty(dayMovs, ["retour_cuve_camion"]) : 0;
       const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw; // affichage : vente terrain nette
-      const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
+      const transfertCamion = isTruck ? sumDelta(dayMovs, ["transfert_camion"]) : 0;
+    const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers + transfertCamion;
       const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
       const tempDensiteLbl = tempDensiteLabel(dayMovs, ["reception"]);
       const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d));
       const stockJauge = inv ? inv.stockPhysique : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, tempDensiteLbl, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
+      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, transfertCamion, indexLabel, tempDensiteLbl, stockTheorique, stockJauge, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
       cur.setDate(cur.getDate() + 1);
     }
   }
@@ -8368,7 +8287,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
     name: "Synthèse", rows: days.map((d) => ({
       Date: d.date, "Stock début (L)": Math.round(d.stockDebut), [`${receptionLabel} (L)`]: Math.round(d.reception), [`${ventesLabel} (L)`]: Math.round(d.ventes),
       ...(isLubSite ? { "Chargement laitiers (L)": Math.round(d.chargementLaitiers) } : {}),
-      ...(isTruck ? { "Retour Cuve (L)": Math.round(d.retourCuve) } : {}),
+      ...(isTruck ? { "Retour Cuve (L)": Math.round(d.retourCuve), "Transfert camion (± L)": Math.round(d.transfertCamion) } : {}),
       "Index (compteurs)": d.indexLabel || "", "Temp./Densité (réception)": d.tempDensiteLbl || "",
       "Stock théorique (L)": Math.round(d.stockTheorique), "Stock jauge (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
       "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
@@ -8381,13 +8300,13 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
     period: `Mois de ${bounds.start} au ${bounds.end}`,
     columns: [
       "Date", "Stock début", receptionLabel, ventesLabel,
-      ...(isLubSite ? ["Chargement laitiers"] : []), ...(isTruck ? ["Retour Cuve"] : []),
+      ...(isLubSite ? ["Chargement laitiers"] : []), ...(isTruck ? ["Retour Cuve", "Transfert camion"] : []),
       "Index (compteurs)", "Temp./Densité", "Stock théorique", "Stock jauge", "Gain/Perte",
     ],
     rows: days.map((d) => [
       d.date, `${fmt(d.stockDebut)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventes ? `${fmt(d.ventes)} L` : "—",
       ...(isLubSite ? [d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"] : []),
-      ...(isTruck ? [d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"] : []),
+      ...(isTruck ? [d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—", d.transfertCamion ? `${d.transfertCamion > 0 ? "+" : "−"}${fmt(Math.abs(d.transfertCamion))} L` : "—"] : []),
       d.indexLabel || "—",
       d.tempDensiteLbl || "—",
       `${fmt(d.stockTheorique)} L`, d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—",
@@ -8434,6 +8353,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
                 <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
                 {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
                 {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
+{isTruck && <th style={{ textAlign: "right" }}>Transfert camion</th>}
                 <th>Index (compteurs)</th>
                 <th>Temp./Densité</th>
                 <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
@@ -8441,7 +8361,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
               </tr>
             </thead>
             <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 9 : 8} text="Sélectionne un site." />}
+              {days.length === 0 && <EmptyRow colSpan={isTruck ? 10 : isLubSite ? 9 : 8} text="Sélectionne un site." />}
               {days.map((d) => (
                 <tr key={d.date}>
                   <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
@@ -8450,6 +8370,7 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
                   <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
                   {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
                   {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
+{isTruck && <td className="somip-mono" data-testid={`ledger-transfert-${d.date}`} style={{ textAlign: "right", color: d.transfertCamion ? C.blue : C.sub, fontWeight: d.transfertCamion ? 600 : 400 }}>{d.transfertCamion ? `${d.transfertCamion > 0 ? "+" : "−"}${fmt(Math.abs(d.transfertCamion))} L` : "—"}</td>}
                   <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
                   <td style={{ fontSize: 12, color: C.sub }}>{d.tempDensiteLbl || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
@@ -8464,141 +8385,10 @@ function MonthlySiteLedgerReport({ sites, movements, inventaires, assignedSiteId
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           {isTruck
-            ? "Stock théorique = Stock début + Chargement − Sortie Fiche Terrain − Retour Cuve (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
+            ? "Stock théorique = Stock début + Chargement − Sortie Fiche Terrain ± Transfert entre camions (calcul pur ; le Retour Cuve est déjà inclus dans la Sortie du compteur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
             : isLubSite
             ? "Stock théorique = Stock début + Réception − Ventes − Chargement laitiers (calcul pur). Le Chargement laitiers crée automatiquement le Chargement correspondant côté camion. Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."
             : "Stock théorique = Stock début + Réception − Ventes (calcul pur). Stock jauge = dernière mesure physique saisie ce jour-là. Gain/Perte = Stock jauge − Stock théorique."}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* ---- Synthèse journalière du mois, par site — Base 15°C ---- */
-function MonthlySiteLedgerReport15({ sites, movements, inventaires, assignedSiteIds }) {
-  const selectableSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
-  const [siteId, setSiteId] = useState(selectableSites[0]?.id || "");
-  const [month, setMonth] = useState(currentMonth());
-  const site = sites.find((s) => s.id === siteId);
-  const isTruck = !!site?.isMobile;
-  const isLubSite = site ? LUBRICANT_SITE_IDS.includes(site.id) : false;
-  const bounds = monthBounds(month);
-
-  const days = [];
-  if (site) {
-    let cur = new Date(bounds.start);
-    const end = new Date(bounds.end);
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate15(site, movements, d, inventaires);
-      const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty15(dayMovs, ["reception"]);
-      const ventesRaw = sumQty15(dayMovs, ["sortie"]);
-      const chargementLaitiers = isTruck ? 0 : sumQty15(dayMovs, ["sortie_camion"]);
-      const retourCamions = isTruck ? 0 : sumQty15(dayMovs, ["retour_camion"]);
-      const retourCuve = isTruck ? sumQty15(dayMovs, ["retour_cuve_camion"]) : 0;
-      const ventes = isTruck ? Math.max(0, ventesRaw - retourCuve) : ventesRaw;
-      const stockTheorique = stockDebut + reception + retourCamions - ventesRaw - chargementLaitiers;
-      const indexLabel = indexPairsLabel(dayMovs, ["sortie", "sortie_camion"]);
-      const tempDensiteLbl = tempDensiteLabel(dayMovs, ["reception"]);
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
-      const stockJauge = inv ? inv.stockPhysique15 : null;
-      days.push({ date: d, stockDebut, reception, ventes, chargementLaitiers, retourCuve, indexLabel, tempDensiteLbl, stockTheorique, stockJauge, hasTemp: !!inv, ecart: stockJauge !== null ? stockJauge - stockTheorique : null });
-      cur.setDate(cur.getDate() + 1);
-    }
-  }
-
-  const totalReception = days.reduce((a, d) => a + d.reception, 0);
-  const totalVentes = days.reduce((a, d) => a + d.ventes, 0);
-  const totalChargementLaitiers = days.reduce((a, d) => a + d.chargementLaitiers, 0);
-  const totalRetourCuve = days.reduce((a, d) => a + d.retourCuve, 0);
-  const daysWithJauge = days.filter((d) => d.stockJauge !== null);
-  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
-  const firstDay = days[0] || null;
-  const lastDay = days[days.length - 1] || null;
-  const ecartCumule = daysWithJauge.reduce((a, d) => a + (d.ecart || 0), 0);
-
-  const receptionLabel = isTruck ? "Chargement" : "Réception";
-  const ventesLabel = isTruck ? "Sortie Fiche Terrain" : "Ventes";
-
-  const doExcel = () => exportToExcel(`SOMIP_Synthese15_${site?.code || ""}_${month}.xlsx`, [{
-    name: "Synthèse 15°C", rows: days.map((d) => ({
-      Date: d.date, "Stock début 15°C (L)": Math.round(d.stockDebut), [`${receptionLabel} 15°C (L)`]: Math.round(d.reception), [`${ventesLabel} 15°C (L)`]: Math.round(d.ventes),
-      ...(isLubSite ? { "Chargement laitiers 15°C (L)": Math.round(d.chargementLaitiers) } : {}),
-      ...(isTruck ? { "Retour Cuve 15°C (L)": Math.round(d.retourCuve) } : {}),
-      "Index (compteurs)": d.indexLabel || "",
-      "Stock théorique 15°C (L)": Math.round(d.stockTheorique), "Stock jauge 15°C (L)": d.stockJauge !== null ? Math.round(d.stockJauge) : "",
-      "Gain/Perte 15°C (L)": d.ecart !== null ? Math.round(d.ecart) : "",
-    })),
-  }]);
-
-  return (
-    <div>
-      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <Field label="Site">
-          <select className="somip-select" style={{ maxWidth: 260 }} value={siteId} onChange={(e) => setSiteId(e.target.value)}>
-            {selectableSites.map((s) => <option key={s.id} value={s.id}>{s.name}{s.isMobile ? " (camion)" : ""}</option>)}
-          </select>
-        </Field>
-        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
-      </div>
-
-      {site && (
-        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {site.name} (15°C)</h4>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <MiniStat label="Stock début (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebut)} L` : "—"} />
-            <MiniStat label={`Total ${receptionLabel}`} value={`+${fmt(totalReception)} L`} color={C.success} />
-            <MiniStat label={`Total ${ventesLabel}`} value={`${fmt(totalVentes)} L`} />
-            {isLubSite && <MiniStat label="Total Chargement laitiers" value={`${fmt(totalChargementLaitiers)} L`} color={C.orange} />}
-            {isTruck && <MiniStat label="Total Retour Cuve" value={`${fmt(totalRetourCuve)} L`} />}
-            <MiniStat label="Stock théorique (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheorique)} L` : "—"} bold />
-            <MiniStat label="Stock jauge (dernière mesure 15°C)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJauge)} L (${lastDayWithJauge.date})` : "—"} bold />
-            <MiniStat label="Gain/Perte cumulé" value={daysWithJauge.length ? `${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L` : "—"} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
-          </div>
-        </div>
-      )}
-
-      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title={`Synthèse journalière — ${site?.name || ""} — Base 15°C`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead>
-              <tr>
-                <th>Date</th><th style={{ textAlign: "right" }}>Stock début</th>
-                <th style={{ textAlign: "right" }}>{receptionLabel}</th><th style={{ textAlign: "right" }}>{ventesLabel}</th>
-                {isLubSite && <th style={{ textAlign: "right" }}>Chargement laitiers</th>}
-                {isTruck && <th style={{ textAlign: "right" }}>Retour Cuve</th>}
-                <th>Index (compteurs)</th>
-                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock jauge</th>
-                <th style={{ textAlign: "right" }}>Gain/Perte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {days.length === 0 && <EmptyRow colSpan={isLubSite || isTruck ? 9 : 8} text="Sélectionne un site." />}
-              {days.map((d) => (
-                <tr key={d.date}>
-                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventes ? C.ink : C.sub, fontWeight: d.ventes ? 600 : 400 }}>{d.ventes ? `${fmt(d.ventes)} L` : "—"}</td>
-                  {isLubSite && <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub, fontWeight: d.chargementLaitiers ? 600 : 400 }}>{d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}</td>}
-                  {isTruck && <td className="somip-mono" style={{ textAlign: "right", color: d.retourCuve ? C.danger : C.sub }}>{d.retourCuve ? `−${fmt(d.retourCuve)} L` : "—"}</td>}
-                  <td className="somip-mono" style={{ fontSize: 12, color: C.sub }}>{d.indexLabel || "—"}</td>
-                  <td style={{ fontSize: 12, color: C.sub }}>{d.tempDensiteLbl || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJauge !== null ? `${fmt(d.stockJauge)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
-                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Toutes les valeurs sont corrigées à 15°C. Stock jauge = dernière mesure avec température/densité renseignées ce mois-ci. Les jours sans température/densité saisie n'affichent pas de Stock jauge ici (voir la version Ambiant).
         </p>
       </div>
     </div>
@@ -8902,89 +8692,6 @@ function StockStatementAmbiant({ sites, movements, inventaires }) {
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
           Base entièrement en volumes ambiants (aucune correction de température). Stock fin = valeur mesurée à la jauge, saisie lors de la Saisie journalière. Gain/Perte = Stock fin − Stock théorique. N'apparaît que pour les sites où un Stock fin a été saisi ce jour-là.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function StockStatement15({ sites, movements, inventaires }) {
-  const [date, setDate] = useState(todayStr());
-
-  const rows = sites.map((s) => {
-    const stockDebut = stockBeforeDate15(s, movements, date, inventaires);
-    const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === date);
-    const daySorties = dayMovs.filter((m) => m.type === "sortie" || m.type === "sortie_camion" || m.type === "retour_camion").sort((a, b) => (a.createdAt || "").localeCompare(b.createdAt || ""));
-    const reception = sumQty15(dayMovs, ["reception"]);
-    const ventes = sumQty15(dayMovs, ["sortie"]);
-    const chargementsCamions = sumQty15(dayMovs, ["sortie_camion"]);
-    const retourCamions = sumQty15(dayMovs, ["retour_camion"]);
-    const sorties = ventes + chargementsCamions;
-    const stockTheorique = stockDebut + reception + retourCamions - sorties;
-    const sortWithIndex = daySorties.filter((m) => m.indexAvant !== undefined && m.indexApres !== undefined);
-    const sortIndexAvant = sortWithIndex.length ? sortWithIndex[0].indexAvant : null;
-    const sortIndexApres = sortWithIndex.length ? sortWithIndex[sortWithIndex.length - 1].indexApres : null;
-    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === date));
-    const stockFin = inv && inv.stockPhysique15 !== undefined ? inv.stockPhysique15 : null;
-    const ecart = stockFin !== null ? stockFin - stockTheorique : null;
-    return { site: s, stockDebut, reception, ventes, chargementsCamions, retourCamions, sortIndexAvant, sortIndexApres, stockTheorique, stockFin, ecart, hasTemp: inv ? inv.stockPhysique15 !== undefined : false };
-  });
-
-  const doExcel = () => exportToExcel(`SOMIP_Etat_Journalier_15C_${date}.xlsx`, [{
-    name: "Etat 15C", rows: rows.map((r) => ({
-      Site: r.site.name, "Stock début 15°C (L)": Math.round(r.stockDebut), "Réception 15°C (L)": Math.round(r.reception),
-      "Ventes 15°C (L)": Math.round(r.ventes), "Chargement camions 15°C (L)": Math.round(r.chargementsCamions), "Retour camions 15°C (L)": Math.round(r.retourCamions),
-      "Index avant": r.sortIndexAvant ?? "", "Index après": r.sortIndexApres ?? "",
-      "Stock théorique 15°C (L)": Math.round(r.stockTheorique),
-      "Stock fin 15°C - jauge (L)": r.stockFin !== null ? Math.round(r.stockFin) : "",
-      "Gain/Perte 15°C (L)": r.ecart !== null ? Math.round(r.ecart) : "",
-    })),
-  }]);
-
-  return (
-    <div>
-      <div className="somip-no-print" style={{ marginBottom: 14 }}>
-        <Field label="Date de l'état journalier"><input type="date" className="somip-input" style={{ maxWidth: 220 }} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-      </div>
-      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title="État journalier des stocks — Base à 15°C" period={`Journée du ${date}`} />
-        <ReportToolbar onExcel={doExcel} onPrint={() => window.print()} />
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead>
-              <tr>
-                <th>Site</th><th style={{ textAlign: "right" }}>Stock début</th>
-                <th style={{ textAlign: "right" }}>Réception</th>
-                <th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Chargement camions</th>
-                <th style={{ textAlign: "right" }}>Retour camions</th>
-                <th style={{ textAlign: "right" }}>Index avant</th><th style={{ textAlign: "right" }}>Index après</th>
-                <th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin (jauge)</th>
-                <th style={{ textAlign: "right" }}>Gain/Perte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r) => (
-                <tr key={r.site.id}>
-                  <td style={{ fontWeight: 600 }}>{r.site.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.site.code})</span></td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(r.stockDebut)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.reception ? C.success : C.sub }}>{r.reception ? `+${fmt(r.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.ventes ? C.ink : C.sub, fontWeight: r.ventes ? 600 : 400 }}>{r.ventes ? `${fmt(r.ventes)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.chargementsCamions ? C.orange : C.sub }}>{r.chargementsCamions ? `−${fmt(r.chargementsCamions)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: r.retourCamions ? C.success : C.sub }}>{r.retourCamions ? `+${fmt(r.retourCamions)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexAvant !== null ? fmt(r.sortIndexAvant) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{r.sortIndexApres !== null ? fmt(r.sortIndexApres) : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(r.stockTheorique)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{r.stockFin !== null ? `${fmt(r.stockFin)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: r.ecart === null ? C.sub : r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub }}>
-                    {r.ecart !== null ? `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Toutes les valeurs sont corrigées à 15°C (ASTM D1250 / API MPMS 11.1). Stock fin = valeur mesurée à la jauge, corrigée avec la température/densité saisies au moment de la mesure. N'apparaît que pour les sites où une température et une densité ont été renseignées avec le Stock fin ce jour-là.
         </p>
       </div>
     </div>
@@ -9404,7 +9111,8 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
         const tSortieTerrainRaw = sumQty(dayMovsTruck, ["sortie"]); // flux total mesuré (vente + retour cuve confondus)
         const tRetourCuve = sumQty(dayMovsTruck, ["retour_cuve_camion"]);
         const tSortieTerrain = Math.max(0, tSortieTerrainRaw - tRetourCuve); // affichage : vente terrain nette
-        const tTheorique = tStockDebut + tChargement - tSortieTerrainRaw;
+        const tTransfert = sumDelta(dayMovsTruck, ["transfert_camion"]); // ± transfert entre camions
+      const tTheorique = tStockDebut + tChargement - tSortieTerrainRaw + tTransfert;
         const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === d));
         trucksStockDebut += tStockDebut;
         trucksTheorique += tTheorique;
@@ -9417,7 +9125,7 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
           if (!truckEcartByTruck[truckId]) truckEcartByTruck[truckId] = { name: truck.name, sum: 0 };
           truckEcartByTruck[truckId].sum += tEcart;
         }
-        truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique : null });
+        truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTransfert, tTheorique, tJauge: tInv ? tInv.stockPhysique : null });
       }
 
       const stockDebutCombine = siteStockDebut + trucksStockDebut;
@@ -9548,203 +9256,12 @@ function StationDailyLedgerReport({ sites, movements, inventaires, truckAssignme
   );
 }
 
-/* ---- Synthèse journalière — Station (site + camion) — 15°C ---- */
-function StationDailyLedgerReport15({ sites, movements, inventaires, truckAssignments, assignedSiteIds }) {
-  const stationsAll = LUBRICANT_SITE_IDS.map((id) => sites.find((s) => s.id === id)).filter(Boolean);
-  const stations = assignedSiteIds?.length ? stationsAll.filter((s) => assignedSiteIds.includes(s.id)) : stationsAll;
-  const [stationId, setStationId] = useState(stations[0]?.id || "");
-  const [month, setMonth] = useState(currentMonth());
-  const station = sites.find((s) => s.id === stationId);
-  const bounds = monthBounds(month);
-
-  const days = [];
-  const truckEcartByTruck = {};
-  if (station) {
-    let cur = new Date(bounds.start);
-    const end = new Date(bounds.end);
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const siteStockDebut = stockBeforeDate15(station, movements, d, inventaires);
-      const dayMovsSite = movements.filter((m) => m.siteId === station.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty15(dayMovsSite, ["reception"]);
-      const ventesDirectes = sumQty15(dayMovsSite, ["sortie"]);
-      const chargementLaitiers = sumQty15(dayMovsSite, ["sortie_camion"]);
-      const chargementTransfers = dayMovsSite.filter((m) => m.type === "sortie_camion" && m.camion)
-        .map((m) => transferLabel(sites, truckAssignments, m.camion, station.id, d)).filter(Boolean);
-      const retourCamions = sumQty15(dayMovsSite, ["retour_camion"]);
-      const siteTheorique = siteStockDebut + reception + retourCamions - ventesDirectes - chargementLaitiers;
-      const siteInv = pickLatestInv(inventaires.filter((i) => i.siteId === station.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
-      const siteEcart = siteInv ? siteInv.stockPhysique15 - siteTheorique : null;
-
-      const truckIdsToday = trucksAssignedAt(truckAssignments, station.id, d);
-      let trucksStockDebut = 0, trucksTheorique = 0, trucksVentesTerrain = 0, trucksJaugeOuTheorique = 0;
-      const truckDetails = [];
-      for (const truckId of truckIdsToday) {
-        const truck = sites.find((s) => s.id === truckId);
-        if (!truck) continue;
-        const tStockDebut = stockBeforeDate15(truck, movements, d, inventaires);
-        const dayMovsTruck = movements.filter((m) => m.siteId === truckId && (m.product || "gasoil") === "gasoil" && m.date === d);
-        const tChargement = sumQty15(dayMovsTruck, ["reception"]);
-        const tSortieTerrainRaw = sumQty15(dayMovsTruck, ["sortie"]);
-        const tRetourCuve = sumQty15(dayMovsTruck, ["retour_cuve_camion"]);
-        const tSortieTerrain = Math.max(0, tSortieTerrainRaw - tRetourCuve);
-        const tTheorique = tStockDebut + tChargement - tSortieTerrainRaw;
-        const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
-        trucksStockDebut += tStockDebut;
-        trucksTheorique += tTheorique;
-        trucksVentesTerrain += tSortieTerrain;
-        trucksJaugeOuTheorique += tInv ? tInv.stockPhysique15 : tTheorique;
-        if (tInv) {
-          const tEcart = tInv.stockPhysique15 - tTheorique;
-          if (!truckEcartByTruck[truckId]) truckEcartByTruck[truckId] = { name: truck.name, sum: 0 };
-          truckEcartByTruck[truckId].sum += tEcart;
-        }
-        truckDetails.push({ truck, tSortieTerrain, tChargement, tRetourCuve, tTheorique, tJauge: tInv ? tInv.stockPhysique15 : null });
-      }
-
-      const stockDebutCombine = siteStockDebut + trucksStockDebut;
-      const ventesCombinees = ventesDirectes + trucksVentesTerrain;
-      const stockTheoriqueCombine = siteTheorique + trucksTheorique;
-      const stockJaugeCombine = siteInv !== null ? siteInv.stockPhysique15 + trucksJaugeOuTheorique : null;
-      const ecart = stockJaugeCombine !== null ? stockJaugeCombine - stockTheoriqueCombine : null;
-
-      days.push({ date: d, stockDebutCombine, reception, ventesCombinees, chargementLaitiers, chargementTransfers, stockTheoriqueCombine, stockJaugeCombine, ecart, siteEcart, truckDetails, nbTrucks: truckIdsToday.length });
-      cur.setDate(cur.getDate() + 1);
-    }
-  }
-
-  const totalReception = days.reduce((a, d) => a + d.reception, 0);
-  const totalVentes = days.reduce((a, d) => a + d.ventesCombinees, 0);
-  const daysWithJauge = days.filter((d) => d.stockJaugeCombine !== null);
-  const lastDayWithJauge = daysWithJauge.length ? daysWithJauge[daysWithJauge.length - 1] : null;
-  const firstDay = days[0] || null;
-  const lastDay = days[days.length - 1] || null;
-  const siteEcartCumule = days.reduce((a, d) => a + (d.siteEcart || 0), 0);
-  const truckEcarts = Object.values(truckEcartByTruck);
-  const trucksEcartCumule = truckEcarts.reduce((a, t) => a + t.sum, 0);
-  const ecartCumule = siteEcartCumule + trucksEcartCumule;
-
-  const doExcel = () => exportToExcel(`SOMIP_Synthese_Station_15C_${station?.code || ""}_${month}.xlsx`, [{
-    name: "Synthèse Station 15°C", rows: days.map((d) => ({
-      Date: d.date, "Stock début combiné (L)": Math.round(d.stockDebutCombine), "Réception (L)": Math.round(d.reception),
-      "Ventes combinées (L)": Math.round(d.ventesCombinees), "Chargement laitiers (L)": Math.round(d.chargementLaitiers),
-      "Camions rattachés": d.nbTrucks, "Stock théorique combiné (L)": Math.round(d.stockTheoriqueCombine),
-      "Stock jauge combiné (L)": d.stockJaugeCombine !== null ? Math.round(d.stockJaugeCombine) : "",
-      "Gain/Perte (L)": d.ecart !== null ? Math.round(d.ecart) : "",
-    })),
-  }]);
-
-  const doPdf = () => exportToPdf({
-    filename: `SOMIP_Synthese_Station_15C_${station?.code || ""}_${month}.pdf`,
-    title: `Synthèse journalière — ${station?.name || ""} (site + camions) — 15°C`,
-    period: `Mois de ${bounds.start} au ${bounds.end}`,
-    columns: ["Date", "Stock début combiné", "Réception", "Ventes combinées", "Chargement laitiers", "Camions", "Stock théorique combiné", "Stock jauge combiné", "Gain/Perte"],
-    rows: days.map((d) => [
-      d.date, `${fmt(d.stockDebutCombine)} L`, d.reception ? `+${fmt(d.reception)} L` : "—", d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—",
-      d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—", String(d.nbTrucks || 0),
-      `${fmt(d.stockTheoriqueCombine)} L`, d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—",
-      d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—",
-    ]),
-  });
-
-  return (
-    <div>
-      <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <Field label="Station">
-          <select className="somip-select" style={{ maxWidth: 240 }} value={stationId} onChange={(e) => setStationId(e.target.value)}>
-            {stations.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
-      </div>
-
-      {station && (
-        <div className="somip-panel" style={{ padding: 18, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 12px", fontSize: 13 }}>Cumul du mois — {station.name} (site + camions rattachés) — base 15°C</h4>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <MiniStat label="Stock début combiné (1er jour)" value={firstDay ? `${fmt(firstDay.stockDebutCombine)} L` : "—"} />
-            <MiniStat label="Total Réceptions (site)" value={`+${fmt(totalReception)} L`} color={C.success} />
-            <MiniStat label="Total Ventes combinées" value={`${fmt(totalVentes)} L`} />
-            <MiniStat label="Stock théorique combiné (dernier jour)" value={lastDay ? `${fmt(lastDay.stockTheoriqueCombine)} L` : "—"} bold />
-            <MiniStat label="Stock jauge combiné (dernière mesure complète)" value={lastDayWithJauge ? `${fmt(lastDayWithJauge.stockJaugeCombine)} L (${lastDayWithJauge.date})` : "—"} bold />
-            <MiniStat label="Gain/Perte cumulé (site + camions)" value={`${ecartCumule >= 0 ? "+" : ""}${fmt(ecartCumule)} L`} color={ecartCumule < 0 ? C.danger : ecartCumule > 0 ? C.success : undefined} />
-          </div>
-          <p style={{ margin: "12px 0 0", fontSize: 12, color: C.sub }}>
-            Détail du cumul : <strong style={{ color: C.ink }}>{station.name}</strong> {siteEcartCumule >= 0 ? "+" : ""}{fmt(siteEcartCumule)} L
-            {truckEcarts.map((t) => <span key={t.name}> · <strong style={{ color: C.ink }}>{t.name}</strong> {t.sum >= 0 ? "+" : ""}{fmt(t.sum)} L</span>)}
-            {truckEcarts.length === 0 && " (aucun camion jaugé ce mois-ci)"}
-          </p>
-        </div>
-      )}
-
-      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
-        <ReportHeader title={`Synthèse journalière — ${station?.name || ""} (site + camions) — 15°C`} period={`Mois de ${bounds.start} au ${bounds.end}`} />
-        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead>
-              <tr>
-                <th>Date</th><th style={{ textAlign: "right" }}>Stock début combiné</th>
-                <th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes combinées</th>
-                <th style={{ textAlign: "right" }}>Chargement laitiers</th><th style={{ textAlign: "right" }}>Camions</th>
-                <th style={{ textAlign: "right" }}>Stock théorique combiné</th><th style={{ textAlign: "right" }}>Stock jauge combiné</th>
-                <th style={{ textAlign: "right" }}>Gain/Perte</th>
-              </tr>
-            </thead>
-            <tbody>
-              {days.length === 0 && <EmptyRow colSpan={9} text="Sélectionne une station." />}
-              {days.map((d) => (
-                <tr key={d.date}>
-                  <td className="somip-mono" style={{ fontWeight: 600 }}>{d.date}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>{fmt(d.stockDebutCombine)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.reception ? C.success : C.sub }}>{d.reception ? `+${fmt(d.reception)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.ventesCombinees ? C.ink : C.sub, fontWeight: d.ventesCombinees ? 600 : 400 }}>{d.ventesCombinees ? `${fmt(d.ventesCombinees)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: d.chargementLaitiers ? C.orange : C.sub }}>
-                    {d.chargementLaitiers ? `${fmt(d.chargementLaitiers)} L` : "—"}
-                    {d.chargementTransfers?.length > 0 && d.chargementTransfers.map((t, i) => (
-                      <div key={i} style={{ fontSize: 10, fontWeight: 600, color: C.warning }}>{t}</div>
-                    ))}
-                  </td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{d.nbTrucks || "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(d.stockTheoriqueCombine)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{d.stockJaugeCombine !== null ? `${fmt(d.stockJaugeCombine)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 600, color: d.ecart === null ? C.sub : d.ecart < 0 ? C.danger : d.ecart > 0 ? C.success : C.sub }}>
-                    {d.ecart !== null ? `${d.ecart >= 0 ? "+" : ""}${fmt(d.ecart)} L` : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Version 15°C — mêmes règles que la synthèse en base ambiante, avec les valeurs corrigées à 15°C (jours sans température/densité renseignées exclus du Stock jauge).
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function MiniStat({ label, value, color, bold }) {
   return (
     <div style={{ background: C.bg, borderRadius: 8, padding: "10px 14px", minWidth: 150 }}>
       <div style={{ fontSize: 11, color: C.sub, fontWeight: 600, marginBottom: 4 }}>{label}</div>
       <div className="somip-mono" style={{ fontSize: 15, fontWeight: bold ? 700 : 600, color: color || C.ink }}>{value}</div>
     </div>
-  );
-}
-
-/* ---- Registre des bons de livraison ---- */
-/* ---- Bilan Matières global (mensuel ou trimestriel), saisie manuelle + historique + diagramme ---- */
-// Une cellule de tableau Bilan Matières : la valeur à 15°C en avant (comme avant), la valeur
-// ambiant juste au-dessus en plus petit — "—" si cette saisie ne porte pas encore de valeur
-// ambiant (anciennes saisies, faites avant l'ajout de ce champ).
-function BilanCell({ ambiant, v15, color, bold, sign }) {
-  const fmtSigned = (v) => `${sign && v >= 0 ? "+" : ""}${fmt(v)} L`;
-  return (
-    <td className="somip-mono" style={{ textAlign: "right" }}>
-      <div style={{ fontSize: 10.5, color: C.sub }}>{ambiant !== null && ambiant !== undefined ? fmtSigned(ambiant) : "—"}</div>
-      <div style={{ fontWeight: bold ? 700 : 400, color: color || "inherit" }}>{fmtSigned(v15)}</div>
-    </td>
   );
 }
 
@@ -9887,463 +9404,15 @@ function BilanPresentationPanel({ rows, periodType, periodKey, saved, status, on
   );
 }
 
-function BilanMatieresView({ sites, bilans, movements, saveBilan, deleteBilan, canManage, assignedSiteIds, bilanPresentations = [], bilanPresStatus = "idle", saveBilanPresentation, objectifFreinte = 3, presenterName = "" }) {
-  const fixedSites = sites.filter((s) => !s.isMobile && (!assignedSiteIds?.length || assignedSiteIds.includes(s.id)));
-  const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
-  const [periodType, setPeriodType] = useState("mensuel");
-  const [monthKey, setMonthKey] = useState(currentMonth());
-  const [year, setYear] = useState(new Date().getFullYear());
-  const [quarter, setQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
-  const [decadeMonth, setDecadeMonth] = useState(currentMonth());
-  const [decadeNum, setDecadeNum] = useState(1);
-  const periodKey = periodType === "mensuel" ? monthKey : periodType === "trimestriel" ? `${year}-Q${quarter}` : `${decadeMonth}-D${decadeNum}`;
-  const site = sites.find((s) => s.id === siteId);
-
-  // reception15/receptionAmbiant ne sont plus des champs du formulaire : la réception est
-  // désormais automatique (voir receptionAuto15/receptionAutoAmbiant), reprise de Saisie journalière.
-  const emptyForm = {
-    ventes15: "", transferts15: "", transfertSiteId: "", stockFin15: "",
-    ventesAmbiant: "", transfertsAmbiant: "", stockFinAmbiant: "",
-    commentaire: "",
-  };
-  const [form, setForm] = useState(emptyForm);
-  const [photoFiles, setPhotoFiles] = useState([]);
-  const [existingPhotoUrls, setExistingPhotoUrls] = useState([]);
-
-  const sorted = [...bilans].filter((b) => b.siteId === siteId && b.periodType === periodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
-  const existing = sorted.find((b) => b.periodKey === periodKey);
-  const idx = sorted.findIndex((b) => b.periodKey === periodKey);
-  const previous = idx > 0 ? sorted[idx - 1] : (idx === -1 ? sorted[sorted.length - 1] : null);
-  // Le Stock début reprend automatiquement le Stock fin de la période précédente pour ce site
-  // (ambiant et 15°C séparément) — comme c'était déjà le cas pour le 15°C.
-  const stockDebut = previous ? previous.stockFin15 : 0;
-  const stockDebutAmbiant = previous?.stockFinAmbiant ?? 0;
-
-  // Réception : automatique, reprise des réceptions déjà saisies dans Saisie journalière pour
-  // ce site sur la période choisie — plus besoin de la retaper, et toujours la même donnée que
-  // partout ailleurs dans l'application.
-  const periodRange = periodType === "mensuel" ? { start: `${periodKey}-01`, end: `${periodKey}-31` }
-    : periodType === "trimestriel" ? (() => {
-        const [y, q] = periodKey.split("-Q").map(Number);
-        const startMonth = (q - 1) * 3 + 1;
-        const endMonth = startMonth + 2;
-        return { start: `${y}-${pad2(startMonth)}-01`, end: `${y}-${pad2(endMonth)}-31` };
-      })()
-    : (() => { const [m, d] = periodKey.split("-D"); return decadeBoundsExplicit(m, Number(d)); })();
-  const receptionMovs = (movements || []).filter((m) => m.siteId === siteId && m.type === "reception" && (m.product || "gasoil") === "gasoil" && m.date >= periodRange.start && m.date <= periodRange.end);
-  const receptionAuto15 = receptionMovs.reduce((a, m) => a + (m.volumeCorrige15 ?? m.quantity), 0);
-  const receptionAutoAmbiant = receptionMovs.reduce((a, m) => a + m.quantity, 0);
-
-  const receptionN = receptionAuto15;
-  const ventesN = Number(form.ventes15) || 0;
-  const transfertsN = Number(form.transferts15) || 0;
-  const stockFinN = Number(form.stockFin15) || 0;
-  const stockTheorique = stockDebut + receptionN - ventesN + transfertsN;
-  const ecart = form.stockFin15 !== "" ? stockFinN - stockTheorique : null;
-
-  const receptionAmbiantN = receptionAutoAmbiant;
-  const ventesAmbiantN = Number(form.ventesAmbiant) || 0;
-  const transfertsAmbiantN = Number(form.transfertsAmbiant) || 0;
-  const stockFinAmbiantN = Number(form.stockFinAmbiant) || 0;
-  const stockTheoriqueAmbiant = stockDebutAmbiant + receptionAmbiantN - ventesAmbiantN + transfertsAmbiantN;
-  const ecartAmbiant = form.stockFinAmbiant !== "" ? stockFinAmbiantN - stockTheoriqueAmbiant : null;
-
-  const resetForm = () => { setForm(emptyForm); setPhotoFiles([]); setExistingPhotoUrls([]); };
-
-  const submit = () => {
-    if (form.stockFin15 === "" || form.stockFinAmbiant === "" || !siteId) return;
-    // La réception n'est plus retapée : on enregistre directement la valeur automatique calculée
-    // à partir des réceptions déjà saisies dans Saisie journalière pour cette période.
-    saveBilan({ siteId, periodType, periodKey, ...form, reception15: receptionAuto15, receptionAmbiant: receptionAutoAmbiant, photoFiles, existingPhotoUrls });
-    resetForm();
-  };
-
-  const loadForEdit = (b) => {
-    // La réception n'est plus rechargée depuis la saisie passée : elle est systématiquement
-    // recalculée en automatique pour la période en cours (voir receptionAuto15/receptionAutoAmbiant).
-    setForm({
-      ventes15: String(b.ventes15), transferts15: String(b.transferts15),
-      transfertSiteId: b.transfertSiteId || "", stockFin15: String(b.stockFin15),
-      ventesAmbiant: b.ventesAmbiant !== undefined ? String(b.ventesAmbiant) : "",
-      transfertsAmbiant: b.transfertsAmbiant !== undefined ? String(b.transfertsAmbiant) : "",
-      stockFinAmbiant: b.stockFinAmbiant !== undefined ? String(b.stockFinAmbiant) : "",
-      commentaire: b.commentaire || "",
-    });
-    setExistingPhotoUrls(b.photoUrls || []);
-    setPhotoFiles([]);
-  };
-
-  // Historique enrichi pour le tableau + le diagramme (ce site uniquement).
-  const history = sorted.map((b, i) => {
-    const prev = i > 0 ? sorted[i - 1] : null;
-    const debut = prev ? prev.stockFin15 : 0;
-    const debutAmbiant = prev?.stockFinAmbiant ?? 0;
-    const theorique = debut + b.reception15 - b.ventes15 + b.transferts15;
-    const ec = b.stockFin15 - theorique;
-    const theoriqueAmbiant = b.receptionAmbiant !== undefined ? debutAmbiant + (b.receptionAmbiant || 0) - (b.ventesAmbiant || 0) + (b.transfertsAmbiant || 0) : null;
-    const ecAmbiant = b.stockFinAmbiant !== undefined && theoriqueAmbiant !== null ? b.stockFinAmbiant - theoriqueAmbiant : null;
-    return { ...b, stockDebut: debut, stockDebutAmbiant: debutAmbiant, stockTheorique: theorique, ecart: ec, stockTheoriqueAmbiant: theoriqueAmbiant, ecartAmbiant: ecAmbiant };
-  });
-
-  const doPptx = () => exportBilanToPptx(history, periodType, site?.name);
-
-  // ---- Vue combinée "Tous les sites", pour une période choisie séparément ----
-  const [allPeriodType, setAllPeriodType] = useState("mensuel");
-  const [allMonthKey, setAllMonthKey] = useState(currentMonth());
-  const [allYear, setAllYear] = useState(new Date().getFullYear());
-  const [allQuarter, setAllQuarter] = useState(Math.floor(new Date().getMonth() / 3) + 1);
-  const [allDecadeMonth, setAllDecadeMonth] = useState(currentMonth());
-  const [allDecadeNum, setAllDecadeNum] = useState(1);
-  const allPeriodKey = allPeriodType === "mensuel" ? allMonthKey : allPeriodType === "trimestriel" ? `${allYear}-Q${allQuarter}` : `${allDecadeMonth}-D${allDecadeNum}`;
-
-  const allSitesRows = fixedSites.map((s) => {
-    const siteSorted = [...bilans].filter((b) => b.siteId === s.id && b.periodType === allPeriodType).sort((a, b) => (a.periodKey < b.periodKey ? -1 : 1));
-    const entry = siteSorted.find((b) => b.periodKey === allPeriodKey);
-    if (!entry) return null;
-    const i = siteSorted.findIndex((b) => b.periodKey === allPeriodKey);
-    const prev = i > 0 ? siteSorted[i - 1] : null;
-    const debut = prev ? prev.stockFin15 : 0;
-    const debutAmbiant = prev?.stockFinAmbiant ?? 0;
-    const theorique = debut + entry.reception15 - entry.ventes15 + entry.transferts15;
-    const theoriqueAmbiant = entry.receptionAmbiant !== undefined ? debutAmbiant + (entry.receptionAmbiant || 0) - (entry.ventesAmbiant || 0) + (entry.transfertsAmbiant || 0) : null;
-    const ecartAmbiant = entry.stockFinAmbiant !== undefined && theoriqueAmbiant !== null ? entry.stockFinAmbiant - theoriqueAmbiant : null;
-    return {
-      site: s, ...entry, stockDebut: debut, stockDebutAmbiant: debutAmbiant, stockTheorique: theorique, ecart: entry.stockFin15 - theorique,
-      stockTheoriqueAmbiant: theoriqueAmbiant, ecartAmbiant, photoUrls: entry.photoUrls,
-    };
-  }).filter(Boolean);
-
-  const doAllSitesPdf = () => exportToPdf({
-    filename: `SOMIP_Bilan_Matieres_TousSites_${allPeriodType}_${allPeriodKey}.pdf`,
-    title: "Bilan Matières — Tous les sites",
-    period: `${PERIOD_TYPE_LABELS[allPeriodType]} — ${allPeriodKey}`,
-    columns: ["Site", "Stock début", "Réception", "Ventes", "Transferts", "Théorique", "Stock fin", "Gain/Perte"],
-    rows: allSitesRows.map((r) => [
-      r.site.name, `${fmt(r.stockDebut)} L`, `+${fmt(r.reception15)} L`, `${fmt(r.ventes15)} L`,
-      `${r.transferts15 >= 0 ? "+" : ""}${fmt(r.transferts15)} L`, `${fmt(r.stockTheorique)} L`, `${fmt(r.stockFin15)} L`,
-      `${r.ecart >= 0 ? "+" : ""}${fmt(r.ecart)} L`,
-    ]),
-    totalsRow: ["TOTAL",
-      `${fmt(allSitesRows.reduce((a, r) => a + r.stockDebut, 0))} L`, `+${fmt(allSitesRows.reduce((a, r) => a + r.reception15, 0))} L`,
-      `${fmt(allSitesRows.reduce((a, r) => a + r.ventes15, 0))} L`, `${fmt(allSitesRows.reduce((a, r) => a + r.transferts15, 0))} L`,
-      `${fmt(allSitesRows.reduce((a, r) => a + r.stockTheorique, 0))} L`, `${fmt(allSitesRows.reduce((a, r) => a + r.stockFin15, 0))} L`,
-      `${fmt(allSitesRows.reduce((a, r) => a + r.ecart, 0))} L`,
-    ],
-  });
-  const doAllSitesPptx = () => exportBilanAllSitesToPptx(allSitesRows, allPeriodType, allPeriodKey);
-
-  return (
-    <div className="somip-fade">
-      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 24 }}>
-        {canManage && (
-          <div className="somip-panel" style={{ flex: "1 1 320px", padding: 18 }}>
-            <h3 style={{ margin: "0 0 14px", fontSize: 14 }}>Saisie du Bilan Matières</h3>
-            <Field label="Site">
-              <select className="somip-select" value={siteId} onChange={(e) => { setSiteId(e.target.value); resetForm(); }}>
-                {fixedSites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </Field>
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <button className={`somip-tab ${periodType === "mensuel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("mensuel")}>Mensuel</button>
-              <button className={`somip-tab ${periodType === "decadaire" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("decadaire")}>Décadaire</button>
-              <button className={`somip-tab ${periodType === "trimestriel" ? "active" : ""}`} style={{ flex: 1, textAlign: "center", fontSize: 12.5 }} onClick={() => setPeriodType("trimestriel")}>Trimestriel</button>
-            </div>
-            {periodType === "mensuel" && (
-              <Field label="Mois"><input type="month" className="somip-input" value={monthKey} onChange={(e) => setMonthKey(e.target.value)} /></Field>
-            )}
-            {periodType === "decadaire" && (
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Mois"><input type="month" className="somip-input" value={decadeMonth} onChange={(e) => setDecadeMonth(e.target.value)} /></Field></div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Décade">
-                    <select className="somip-select" value={decadeNum} onChange={(e) => setDecadeNum(Number(e.target.value))}>
-                      <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
-                    </select>
-                  </Field>
-                </div>
-              </div>
-            )}
-            {periodType === "trimestriel" && (
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}><Field label="Année"><input type="number" className="somip-input" value={year} onChange={(e) => setYear(Number(e.target.value))} /></Field></div>
-                <div style={{ flex: 1 }}>
-                  <Field label="Trimestre">
-                    <select className="somip-select" value={quarter} onChange={(e) => setQuarter(Number(e.target.value))}>
-                      <option value={1}>T1 (Jan-Mars)</option><option value={2}>T2 (Avr-Juin)</option>
-                      <option value={3}>T3 (Juil-Sept)</option><option value={4}>T4 (Oct-Déc)</option>
-                    </select>
-                  </Field>
-                </div>
-              </div>
-            )}
-
-            {existing && (
-              <p style={{ margin: "-4px 0 10px", fontSize: 11.5, color: C.warning }}>
-                Une saisie existe déjà pour cette période — enregistrer à nouveau la remplace. <button onClick={() => loadForEdit(existing)} style={{ border: "none", background: "none", color: C.blue, cursor: "pointer", textDecoration: "underline", padding: 0 }}>Charger pour modifier</button>
-              </p>
-            )}
-
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600, display: "block", marginBottom: 6 }}>Stock début (période précédente — {site?.name})</span>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>Ambiant</span>
-                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebutAmbiant)} L</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>À 15°C</span>
-                <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockDebut)} L</span>
-              </div>
-            </div>
-
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", marginBottom: 12 }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600, display: "block", marginBottom: 6 }}>Réception (automatique — reprise de Saisie journalière)</span>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>Ambiant</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: C.success }}>+{fmt(receptionAutoAmbiant)} L</span>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ fontSize: 11.5, color: C.sub }}>À 15°C</span>
-                <span className="somip-mono" style={{ fontWeight: 700, color: C.success }}>+{fmt(receptionAuto15)} L</span>
-              </div>
-              {receptionMovs.length === 0 && <p style={{ margin: "6px 0 0", fontSize: 10.5, color: C.warning }}>Aucune réception trouvée dans Saisie journalière pour cette période.</p>}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Ventes ambiant (L)"><input type="number" className="somip-input" value={form.ventesAmbiant} onChange={(e) => setForm({ ...form, ventesAmbiant: e.target.value })} placeholder="0" /></Field></div>
-              <div style={{ flex: 1 }}><Field label="Ventes à 15°C (L)"><input type="number" className="somip-input" value={form.ventes15} onChange={(e) => setForm({ ...form, ventes15: e.target.value })} placeholder="0" /></Field></div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Transferts ambiant (L, net)"><input type="number" className="somip-input" value={form.transfertsAmbiant} onChange={(e) => setForm({ ...form, transfertsAmbiant: e.target.value })} placeholder="0" /></Field></div>
-              <div style={{ flex: 1 }}><Field label="Transferts à 15°C (L, net)"><input type="number" className="somip-input" value={form.transferts15} onChange={(e) => setForm({ ...form, transferts15: e.target.value })} placeholder="0 (+ reçu, − envoyé)" /></Field></div>
-            </div>
-            {Number(form.transferts15) !== 0 && (
-              <Field label={Number(form.transferts15) > 0 ? "Reçu depuis quel site ?" : "Envoyé vers quel site ?"}>
-                <select className="somip-select" value={form.transfertSiteId} onChange={(e) => setForm({ ...form, transfertSiteId: e.target.value })}>
-                  <option value="">— Choisir un site —</option>
-                  {fixedSites.filter((s) => s.id !== siteId).map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-                  {sites.filter((s) => s.isMobile).map((s) => <option key={s.id} value={s.id}>{s.name} (camion)</option>)}
-                </select>
-              </Field>
-            )}
-
-            <div style={{ background: C.bg, borderRadius: 8, padding: "9px 12px", margin: "4px 0 12px", display: "flex", justifyContent: "space-between" }}>
-              <span style={{ fontSize: 12.5, color: C.sub, fontWeight: 600 }}>Stock théorique (calculé)</span>
-              <span className="somip-mono" style={{ fontWeight: 700 }}>{fmt(stockTheorique)} L</span>
-            </div>
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <div style={{ flex: 1 }}><Field label="Stock fin ambiant (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFinAmbiant} onChange={(e) => setForm({ ...form, stockFinAmbiant: e.target.value })} placeholder="Jauge du site" /></Field></div>
-              <div style={{ flex: 1 }}><Field label="Stock fin à 15°C (L, obligatoire)"><input type="number" className="somip-input" value={form.stockFin15} onChange={(e) => setForm({ ...form, stockFin15: e.target.value })} placeholder="Jauge du site" /></Field></div>
-            </div>
-            <Field label="Commentaire (optionnel)"><textarea className="somip-textarea" rows={2} value={form.commentaire} onChange={(e) => setForm({ ...form, commentaire: e.target.value })} /></Field>
-            <Field label="Photos justificatives (optionnel)">
-              <PhotoPicker files={photoFiles} setFiles={setPhotoFiles} existingUrls={existingPhotoUrls} onRemoveExisting={(i) => setExistingPhotoUrls((prev) => prev.filter((_, idx) => idx !== i))} />
-            </Field>
-
-            {(ecart !== null || ecartAmbiant !== null) && (
-              <div style={{ background: C.bg, borderRadius: 8, padding: 12, margin: "4px 0 14px", fontSize: 12.5 }}>
-                {ecartAmbiant !== null && (
-                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte ambiant</span>
-                    <span className="somip-mono" style={{ fontWeight: 700, color: ecartAmbiant < 0 ? C.danger : ecartAmbiant > 0 ? C.success : C.ink }}>{ecartAmbiant >= 0 ? "+" : ""}{fmt(ecartAmbiant)} L</span>
-                  </div>
-                )}
-                {ecart !== null && (
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ color: C.sub, fontWeight: 600 }}>Gain/Perte à 15°C</span>
-                    <span className="somip-mono" style={{ fontWeight: 700, color: ecart < 0 ? C.danger : ecart > 0 ? C.success : C.ink }}>{ecart >= 0 ? "+" : ""}{fmt(ecart)} L</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="somip-btn somip-btn-primary" style={{ flex: 1, justifyContent: "center" }} onClick={submit} disabled={form.stockFin15 === "" || form.stockFinAmbiant === ""}>
-                <Plus size={15} /> Enregistrer
-              </button>
-              <button className="somip-btn somip-btn-secondary" onClick={resetForm}><X size={15} /> Annuler</button>
-            </div>
-          </div>
-        )}
-
-        <div className="somip-panel" style={{ flex: "2 1 560px", padding: 18 }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-            <h3 style={{ margin: 0, fontSize: 14 }}>Historique — {site?.name} — {PERIOD_TYPE_LABELS[periodType]}</h3>
-            {history.length > 0 && (
-              <button className="somip-btn somip-btn-primary" onClick={doPptx}><Download size={14} /> Export PowerPoint (ce site)</button>
-            )}
-          </div>
-          <div style={{ overflowX: "auto", marginBottom: 20 }}>
-            <table className="somip-table">
-              <thead><tr><th>Période</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Stock théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th><th>Photos</th>{canManage && <th></th>}</tr></thead>
-              <tbody>
-                {history.length === 0 && <EmptyRow colSpan={canManage ? 10 : 9} text="Aucun Bilan Matières enregistré pour ce site." />}
-                {history.map((b) => (
-                  <tr key={b.id}>
-                    <td style={{ fontWeight: 700 }}>{b.periodKey}</td>
-                    <BilanCell ambiant={b.stockDebutAmbiant} v15={b.stockDebut} bold />
-                    <BilanCell ambiant={b.receptionAmbiant} v15={b.reception15} color={C.success} sign />
-                    <BilanCell ambiant={b.ventesAmbiant} v15={b.ventes15} />
-                    <td className="somip-mono" style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 10.5, color: C.sub }}>{b.transfertsAmbiant !== undefined ? `${b.transfertsAmbiant >= 0 ? "+" : ""}${fmt(b.transfertsAmbiant)} L` : "—"}</div>
-                      <div>{b.transferts15 >= 0 ? "+" : ""}{fmt(b.transferts15)} L</div>
-                      {b.transfertSiteId && (
-                        <div style={{ fontSize: 10.5, fontWeight: 600, color: C.orange }}>
-                          {b.transferts15 >= 0 ? "← " : "→ "}{sites.find((s) => s.id === b.transfertSiteId)?.name || b.transfertSiteId}
-                        </div>
-                      )}
-                    </td>
-                    <BilanCell ambiant={b.stockTheoriqueAmbiant} v15={b.stockTheorique} bold />
-                    <BilanCell ambiant={b.stockFinAmbiant} v15={b.stockFin15} bold />
-                    <BilanCell ambiant={b.ecartAmbiant} v15={b.ecart} bold color={b.ecart < 0 ? C.danger : b.ecart > 0 ? C.success : C.sub} sign />
-                    <td>
-                      {b.photoUrls?.length > 0 ? (
-                        <div style={{ display: "flex", gap: 3 }}>
-                          {b.photoUrls.slice(0, 3).map((url, i) => (
-                            <a key={i} href={url} target="_blank" rel="noopener noreferrer"><img src={url} alt="" style={{ width: 24, height: 24, objectFit: "cover", borderRadius: 4, border: `1px solid ${C.border}` }} /></a>
-                          ))}
-                          {b.photoUrls.length > 3 && <span style={{ fontSize: 11, color: C.sub }}>+{b.photoUrls.length - 3}</span>}
-                        </div>
-                      ) : <span style={{ color: C.sub, fontSize: 11 }}>—</span>}
-                    </td>
-                    {canManage && <td style={{ textAlign: "right" }}><ConfirmIconButton onConfirm={() => deleteBilan(b)} /></td>}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {history.length > 0 && (
-            <div style={{ height: 260 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={history.map((b) => ({ periode: b.periodKey, Réception: b.reception15, Ventes: b.ventes15, "Stock fin": b.stockFin15 }))} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
-                  <XAxis dataKey="periode" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
-                  <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
-                  <Tooltip formatter={(v) => `${fmt(v)} L`} contentStyle={{ fontSize: 12, borderRadius: 8, border: `1px solid ${C.border}` }} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  <Bar dataKey="Réception" fill={C.success} radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Ventes" fill={C.orange} radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Stock fin" fill={C.blue} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="somip-panel" style={{ padding: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
-          <h3 style={{ margin: 0, fontSize: 14 }}>Tous les sites — export combiné</h3>
-          {allSitesRows.length > 0 && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="somip-btn somip-btn-primary" onClick={doAllSitesPdf}><Download size={14} /> Export PDF</button>
-              <button className="somip-btn somip-btn-primary" onClick={doAllSitesPptx}><Download size={14} /> Export PowerPoint</button>
-            </div>
-          )}
-        </div>
-        <div className="somip-no-print" style={{ marginBottom: 14, display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button className={`somip-tab ${allPeriodType === "mensuel" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("mensuel")}>Mensuel</button>
-            <button className={`somip-tab ${allPeriodType === "decadaire" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("decadaire")}>Décadaire</button>
-            <button className={`somip-tab ${allPeriodType === "trimestriel" ? "active" : ""}`} style={{ fontSize: 12.5 }} onClick={() => setAllPeriodType("trimestriel")}>Trimestriel</button>
-          </div>
-          {allPeriodType === "mensuel" && <Field label="Mois"><input type="month" className="somip-input" value={allMonthKey} onChange={(e) => setAllMonthKey(e.target.value)} /></Field>}
-          {allPeriodType === "decadaire" && (
-            <>
-              <Field label="Mois"><input type="month" className="somip-input" value={allDecadeMonth} onChange={(e) => setAllDecadeMonth(e.target.value)} /></Field>
-              <Field label="Décade">
-                <select className="somip-select" value={allDecadeNum} onChange={(e) => setAllDecadeNum(Number(e.target.value))}>
-                  <option value={1}>1ère (1 au 10)</option><option value={2}>2e (11 au 20)</option><option value={3}>3e (21 à la fin)</option>
-                </select>
-              </Field>
-            </>
-          )}
-          {allPeriodType === "trimestriel" && (
-            <>
-              <Field label="Année"><input type="number" className="somip-input" style={{ maxWidth: 110 }} value={allYear} onChange={(e) => setAllYear(Number(e.target.value))} /></Field>
-              <Field label="Trimestre">
-                <select className="somip-select" value={allQuarter} onChange={(e) => setAllQuarter(Number(e.target.value))}>
-                  <option value={1}>T1</option><option value={2}>T2</option><option value={3}>T3</option><option value={4}>T4</option>
-                </select>
-              </Field>
-            </>
-          )}
-        </div>
-        <div style={{ overflowX: "auto" }}>
-          <table className="somip-table">
-            <thead><tr><th>Site</th><th style={{ textAlign: "right" }}>Stock début</th><th style={{ textAlign: "right" }}>Réception</th><th style={{ textAlign: "right" }}>Ventes</th><th style={{ textAlign: "right" }}>Transferts</th><th style={{ textAlign: "right" }}>Théorique</th><th style={{ textAlign: "right" }}>Stock fin</th><th style={{ textAlign: "right" }}>Gain/Perte</th></tr></thead>
-            <tbody>
-              {allSitesRows.length === 0 && <EmptyRow colSpan={8} text="Aucun site n'a de Bilan Matières saisi pour cette période." />}
-              {allSitesRows.map((r) => (
-                <tr key={r.site.id}>
-                  <td style={{ fontWeight: 600 }}>{r.site.name}</td>
-                  <BilanCell ambiant={r.stockDebutAmbiant} v15={r.stockDebut} bold />
-                  <BilanCell ambiant={r.receptionAmbiant} v15={r.reception15} color={C.success} sign />
-                  <BilanCell ambiant={r.ventesAmbiant} v15={r.ventes15} />
-                  <BilanCell ambiant={r.transfertsAmbiant} v15={r.transferts15} sign />
-                  <BilanCell ambiant={r.stockTheoriqueAmbiant} v15={r.stockTheorique} bold />
-                  <BilanCell ambiant={r.stockFinAmbiant} v15={r.stockFin15} bold />
-                  <BilanCell ambiant={r.ecartAmbiant} v15={r.ecart} bold color={r.ecart < 0 ? C.danger : r.ecart > 0 ? C.success : C.sub} sign />
-                </tr>
-              ))}
-              {allSitesRows.length > 0 && (
-                <tr>
-                  <td style={{ fontWeight: 700 }}>TOTAL</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockDebut, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700, color: C.success }}>+{fmt(allSitesRows.reduce((a, r) => a + r.reception15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.ventes15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.transferts15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockTheorique, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.stockFin15, 0))} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(allSitesRows.reduce((a, r) => a + r.ecart, 0))} L</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-        <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          Rassemble la saisie de chaque site pour la période choisie ci-dessus (indépendante de celle du panneau de saisie). Un site sans saisie pour cette période n'apparaît pas dans le tableau. Stock théorique = Stock début (= Stock fin de la période précédente, pour ce site) + Réception − Ventes ± Transferts.
-        </p>
-      </div>
-      {canManage && allSitesRows.length > 0 && (
-        <BilanPresentationPanel
-          key={`${allPeriodType}|${allPeriodKey}|${bilanPresStatus === "ready" || bilanPresStatus === "unavailable" || bilanPresStatus === "error" ? "loaded" : "loading"}`}
-          rows={allSitesRows} periodType={allPeriodType} periodKey={allPeriodKey}
-          saved={bilanPresentations.find((p) => p.periodType === allPeriodType && p.periodKey === allPeriodKey)}
-          status={bilanPresStatus} onSave={saveBilanPresentation}
-          defaultPreparePar={presenterName ? `${presenterName} — Superviseur Sites Externalisés` : "Superviseur Sites Externalisés"} seuil={objectifFreinte} />
-      )}
-    </div>
-  );
-}
-
 /* ---- Gain/Perte du mois — sites et camions (ex-Tableau de bord) ---- */
 function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) {
   const [month, setMonth] = useState(currentMonth());
   const monthStartD = `${month}-01`;
   const [endDate, setEndDate] = useState(todayStr());
-  const scopedSites = assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites;
-
-  const ecartRows = scopedSites.map((s) => {
-    let cur = new Date(monthStartD);
-    const end = new Date(endDate);
-    let ecartCumule = 0, daysWithJauge = 0;
-    while (cur <= end) {
-      const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
-      const stockDebut = stockBeforeDate(s, movements, d, inventaires);
-      const dayMovs = movements.filter((m) => m.siteId === s.id && (m.product || "gasoil") === "gasoil" && m.date === d);
-      const reception = sumQty(dayMovs, ["reception"]);
-      const ventes = sumQty(dayMovs, ["sortie"]);
-      const chargementLaitiers = s.isMobile ? 0 : sumQty(dayMovs, ["sortie_camion"]);
-      const retourCamions = s.isMobile ? 0 : sumQty(dayMovs, ["retour_camion"]);
-      const theorique = stockDebut + reception + retourCamions - ventes - chargementLaitiers;
-      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === s.id && (i.product || "gasoil") === "gasoil" && i.date === d));
-      if (inv) { ecartCumule += inv.stockPhysique - theorique; daysWithJauge++; }
-      cur.setDate(cur.getDate() + 1);
-    }
-    return { site: s, ecartCumule, daysWithJauge };
-  }).sort((a, b) => a.ecartCumule - b.ecartCumule);
-  const ecartReseauTotal = ecartRows.filter((r) => !r.site.isMobile).reduce((a, r) => a + r.ecartCumule, 0);
+  // Sites fixes et camions ACTIFS (un site ou camion désactivé n'est plus compté) ; même fonction unique que les Tableaux de bord.
+  const scopedSites = (assignedSiteIds?.length ? sites.filter((s) => assignedSiteIds.includes(s.id)) : sites).filter((s) => s.active !== false);
+  const ecartRows = scopedSites.map((s) => ({ site: s, ...gainPerteMois(s, movements, inventaires, endDate, monthStartD) })).sort((a, b) => a.ecartCumule - b.ecartCumule);
+  const ecartReseauTotal = ecartRows.reduce((a, r) => a + r.ecartCumule, 0); // sites + camions
 
   const doExcel = () => exportToExcel(`SOMIP_Gain_Perte_${month}.xlsx`, [{
     name: "Gain-Perte", rows: ecartRows.map((r) => ({
@@ -10357,7 +9426,7 @@ function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) 
     period: `Du ${monthStartD} au ${endDate}`,
     columns: ["Type", "Nom", "Gain/Perte cumulé", "Jours jaugés"],
     rows: ecartRows.map((r) => [r.site.isMobile ? "Camion" : "Site", r.site.name, r.daysWithJauge > 0 ? `${r.ecartCumule >= 0 ? "+" : ""}${fmt(r.ecartCumule)} L` : "—", String(r.daysWithJauge)]),
-    totalsRow: ["", "Total réseau (sites)", `${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)} L`, ""],
+    totalsRow: ["", "Total réseau (sites + camions)", `${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)} L`, ""],
   });
 
   return (
@@ -10369,7 +9438,7 @@ function EcartMensuelReport({ sites, movements, inventaires, assignedSiteIds }) 
       <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
         <ReportHeader title="Gain/Perte du mois — sites et camions" period={`Du ${monthStartD} au ${endDate}`} />
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
-        <StatCard label="Gain/Perte réseau (sites)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
+        <StatCard label="Gain/Perte réseau (sites + camions)" value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
         <div style={{ overflowX: "auto", marginTop: 16 }}>
           <table className="somip-table">
             <thead><tr><th>Type</th><th>Nom</th><th style={{ textAlign: "right" }}>Gain/Perte cumulé</th><th style={{ textAlign: "right" }}>Jours jaugés</th></tr></thead>
@@ -10480,6 +9549,74 @@ function TransfersReport({ sites, movements, truckAssignments }) {
   );
 }
 
+/* ---- Transferts entre camions laitiers : contrôle « envoyé » / « reçu » ---- */
+// Chaque camion saisit son côté du transfert (envoyé : stock −, reçu : stock +). Ce rapport rapproche les deux côtés
+// (même date, même couple de camions) et signale tout écart ou côté manquant, avant qu'il ne fausse le gain/perte d'un camion.
+function TruckTransfersReport({ sites, movements }) {
+  const [month, setMonth] = useState(currentMonth());
+  const monthStartD = `${month}-01`;
+  const monthEndD = (() => { const d = new Date(month + "-01"); d.setMonth(d.getMonth() + 1); d.setDate(d.getDate() - 1); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; })();
+  const nom = (id) => sites.find((s) => s.id === id)?.name || id;
+  const lignesMap = {};
+  movements.filter((m) => m.type === "transfert_camion" && m.relatedSiteId && m.date >= monthStartD && m.date <= monthEndD).forEach((m) => {
+    const envoi = m.delta < 0; // ce camion envoie
+    const de = envoi ? m.siteId : m.relatedSiteId, vers = envoi ? m.relatedSiteId : m.siteId;
+    const key = `${m.date}|${de}|${vers}`;
+    if (!lignesMap[key]) lignesMap[key] = { date: m.date, de, vers, envoye: 0, recu: 0, aEnvoi: false, aRecu: false };
+    if (envoi) { lignesMap[key].envoye += m.quantity; lignesMap[key].aEnvoi = true; } else { lignesMap[key].recu += m.quantity; lignesMap[key].aRecu = true; }
+  });
+  const lignes = Object.values(lignesMap).map((l) => ({
+    ...l,
+    controle: !l.aEnvoi ? "Envoi non saisi" : !l.aRecu ? "Réception non saisie" : Math.abs(l.envoye - l.recu) < 0.5 ? "OK" : `Écart ${l.recu - l.envoye > 0 ? "+" : "−"}${fmt(Math.abs(l.recu - l.envoye))} L`,
+    ok: l.aEnvoi && l.aRecu && Math.abs(l.envoye - l.recu) < 0.5,
+  })).sort((a, b) => (a.date < b.date ? 1 : -1));
+  const totalEnvoye = lignes.reduce((a, l) => a + l.envoye, 0), totalRecu = lignes.reduce((a, l) => a + l.recu, 0);
+  const aVerifier = lignes.filter((l) => !l.ok).length;
+  const doExcel = () => exportToExcel(`SOMIP_Transferts_camions_${month}.xlsx`, [{ name: "Transferts camions", rows: lignes.map((l) => ({ Date: l.date, "Camion donneur": nom(l.de), "Camion receveur": nom(l.vers), "Envoyé (L)": Math.round(l.envoye), "Reçu (L)": Math.round(l.recu), Contrôle: l.controle })) }]);
+  const doPdf = () => exportToPdf({
+    filename: `SOMIP_Transferts_camions_${month}.pdf`, title: "Transferts entre camions laitiers", period: `${PERIOD_TYPE_LABELS.mensuel} — ${month}`,
+    columns: ["Date", "Camion donneur", "Camion receveur", "Envoyé", "Reçu", "Contrôle"],
+    rows: lignes.map((l) => [l.date, nom(l.de), nom(l.vers), `${fmt(l.envoye)} L`, `${fmt(l.recu)} L`, l.controle]),
+    totalsRow: ["", "", "Total", `${fmt(totalEnvoye)} L`, `${fmt(totalRecu)} L`, aVerifier ? `${aVerifier} à vérifier` : "OK"],
+  });
+  return (
+    <div>
+      <div className="somip-no-print" style={{ marginBottom: 14 }}>
+        <Field label="Mois"><input type="month" className="somip-input" style={{ maxWidth: 200 }} value={month} onChange={(e) => setMonth(e.target.value)} /></Field>
+      </div>
+      <div className="somip-print-area somip-panel" style={{ padding: 18 }}>
+        <ReportHeader title="Transferts entre camions laitiers" period={`${PERIOD_TYPE_LABELS.mensuel} — ${month}`} />
+        <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <StatCard label="Total envoyé" value={fmt(totalEnvoye)} unit="L" accent={C.orange} icon={Truck} />
+          <StatCard label="Total reçu" value={fmt(totalRecu)} unit="L" accent={C.success} icon={Truck} />
+          <StatCard label="Transferts à vérifier" value={String(aVerifier)} accent={aVerifier ? C.danger : C.success} icon={Truck} />
+        </div>
+        <p style={{ margin: "14px 0 0", fontSize: 12, color: C.sub }}>Chaque camion saisit son côté du transfert dans la Saisie journalière (« Envoyé à » ou « Reçu de »). Un transfert est conforme quand l'envoi et la réception existent le même jour et portent la même quantité ; sinon il fausse le gain/perte de l'un des deux camions.</p>
+        <div style={{ overflowX: "auto", marginTop: 16 }}>
+          <table className="somip-table" data-testid="tc-table">
+            <thead><tr><th>Date</th><th>Camion donneur</th><th>Camion receveur</th><th style={{ textAlign: "right" }}>Envoyé</th><th style={{ textAlign: "right" }}>Reçu</th><th>Contrôle</th></tr></thead>
+            <tbody>
+              {lignes.length === 0 && <EmptyRow colSpan={6} text="Aucun transfert entre camions ce mois-ci." />}
+              {lignes.map((l, i) => (
+                <tr key={i} data-testid={`tc-ligne-${i}`}>
+                  <td className="somip-mono">{l.date}</td><td style={{ fontWeight: 600 }}>{nom(l.de)}</td><td style={{ fontWeight: 600 }}>{nom(l.vers)}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{l.aEnvoi ? `${fmt(l.envoye)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right" }}>{l.aRecu ? `${fmt(l.recu)} L` : "—"}</td>
+                  <td style={{ fontWeight: 700, color: l.ok ? C.success : C.danger }}>{l.ok ? "✔ OK" : `⚠ ${l.controle}`}</td>
+                </tr>
+              ))}
+              {lignes.length > 0 && (
+                <tr><td colSpan={3} style={{ fontWeight: 700 }}>Total</td><td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalEnvoye)} L</td><td className="somip-mono" style={{ textAlign: "right", fontWeight: 700 }}>{fmt(totalRecu)} L</td><td></td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---- Synthèse des retours cuve et chargements camions, avec recherche ---- */
 function RetoursChargementsReport({ sites, movements, assignedSiteIds }) {
   const monthStart = `${currentMonth()}-01`;
@@ -10571,7 +9708,7 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
   const [form, setForm] = useState({ temperatureC: "", densiteObservee: "" });
   const startEdit = (m) => {
     setEditingId(m.id);
-    setForm({ temperatureC: m.temperatureC !== undefined && m.temperatureC !== null ? String(m.temperatureC) : "", densiteObservee: m.densiteObservee !== undefined && m.densiteObservee !== null ? String(m.densiteObservee) : "" });
+    setForm({ temperatureC: m.temperatureSite !== undefined && m.temperatureSite !== null ? String(m.temperatureSite) : "", densiteObservee: m.densiteSite !== undefined && m.densiteSite !== null ? String(m.densiteSite) : "" });
   };
   const saveEdit = () => {
     editMovementTempDensite({ id: editingId, temperatureC: form.temperatureC, densiteObservee: form.densiteObservee });
@@ -10595,12 +9732,16 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
   const hasVal = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
   const fmtTemp = (v) => (hasVal(v) ? `${Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} °C` : "—");
   const fmtDens = (v) => (hasVal(v) ? Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 4 }) : "—");
+  // Mesure prélevée sur site (saisie à la réception) / mesure de fin de journée (ancienne saisie, copiée du jour) / laquelle sert au calcul à 15°C.
+  const finJournee = (m) => (!aMesureSite(m) && (hasVal(m.temperatureC) || hasVal(m.densiteObservee)) ? `${fmtTemp(m.temperatureC)} · ${fmtDens(m.densiteObservee)}` : "—");
+  const mesureUtilisee = (m) => (aMesureSite(m) ? "Mesure site" : (hasVal(m.temperatureC) && hasVal(m.densiteObservee) && m.volumeCorrige15 ? "Fin de journée" : "—"));
 
   const doExcel = () => exportToExcel(`SOMIP_Bons_Livraison.xlsx`, [{
     name: "Bons de livraison", rows: rows.map((m) => ({
       Date: m.date, Site: sites.find((s) => s.id === m.siteId)?.name || m.siteId, Produit: productLabel(m),
       "N° Bon": m.ref || "", "Quantité (L)": Math.round(m.quantity), "Quantité 15°C (L)": m.volumeCorrige15 ? Math.round(m.volumeCorrige15) : "",
-      "Température (°C)": hasVal(m.temperatureC) ? Number(m.temperatureC) : "", "Densité observée": hasVal(m.densiteObservee) ? Number(m.densiteObservee) : "",
+      "Température site (°C)": hasVal(m.temperatureSite) ? Number(m.temperatureSite) : "", "Densité site": hasVal(m.densiteSite) ? Number(m.densiteSite) : "",
+"Mesure de fin de journée (°C · densité)": finJournee(m) === "—" ? "" : finJournee(m), "Mesure utilisée pour le 15°C": mesureUtilisee(m), "Mesure site manquante": receptionSansMesureSite(m) ? "oui" : "",
     })),
   }]);
 
@@ -10608,11 +9749,11 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
     filename: "SOMIP_Bons_Livraison.pdf",
     title: "Registre des bons de livraison",
     period: start || end ? `Du ${start || "…"} au ${end || "…"}` : "Toutes les réceptions",
-    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C", "Température", "Densité observée"],
+    columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C", "Temp. site", "Densité site", "Fin de journée", "Utilisée 15°C"],
     rows: rows.map((m) => [
       m.date, sites.find((s) => s.id === m.siteId)?.name || m.siteId, productLabel(m),
       m.ref || "—", `+${fmt(m.quantity)} L`, m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—",
-      fmtTemp(m.temperatureC), fmtDens(m.densiteObservee),
+      fmtTemp(m.temperatureSite), fmtDens(m.densiteSite), finJournee(m), `${mesureUtilisee(m)}${receptionSansMesureSite(m) ? " (mesure site manquante)" : ""}`,
     ]),
   });
 
@@ -10634,9 +9775,9 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
         <ReportToolbar onExcel={doExcel} onPdf={doPdf} onPrint={() => window.print()} />
         <div style={{ overflowX: "auto" }}>
           <table className="somip-table">
-            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température</th><th style={{ textAlign: "right" }}>Densité observée</th>{canManage && <th className="somip-no-print" />}</tr></thead>
+            <thead><tr><th>Date</th><th>Site</th><th>Produit</th><th>N° Bon</th><th style={{ textAlign: "right" }}>Quantité</th><th style={{ textAlign: "right" }}>Quantité 15°C</th><th style={{ textAlign: "right" }}>Température site</th><th style={{ textAlign: "right" }}>Densité site</th><th>Mesure de fin de journée</th><th>Utilisée pour le 15°C</th>{canManage && <th className="somip-no-print" />}</tr></thead>
             <tbody>
-              {rows.length === 0 && <EmptyRow colSpan={canManage ? 9 : 8} text="Aucune réception trouvée." />}
+              {rows.length === 0 && <EmptyRow colSpan={canManage ? 11 : 10} text="Aucune réception trouvée." />}
               {rows.map((m) => {
                 // Température et densité n'existent que pour le gasoil (pas pour les lubrifiants).
                 const editable = canManage && !!editMovementTempDensite && (m.product || "gasoil") === "gasoil";
@@ -10651,17 +9792,20 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
                   <td className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{m.ref || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+{fmt(m.quantity)} L</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.sub }}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>
-                    {editing
-                      ? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 80, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="°C" value={form.temperatureC} onChange={(e) => setForm({ ...form, temperatureC: e.target.value })} />
-                      : fmtTemp(m.temperatureC)}
-                  </td>
-                  <td className="somip-mono" style={{ textAlign: "right" }}>
-                    {editing
-                      ? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 110, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="kg/m³" value={form.densiteObservee} onChange={(e) => setForm({ ...form, densiteObservee: e.target.value })} />
-                      : fmtDens(m.densiteObservee)}
-                    {densOutOfRange && <span className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600 }}>Hors plage ({VCF_MIN_DENSITY}–{VCF_MAX_DENSITY} kg/m³) : pas de correction à 15°C</span>}
-                  </td>
+<td className="somip-mono" style={{ textAlign: "right" }} data-testid={`bl-temp-${m.id}`}>
+{editing
+? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 80, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="°C site" value={form.temperatureC} onChange={(e) => setForm({ ...form, temperatureC: e.target.value })} />
+: fmtTemp(m.temperatureSite)}
+</td>
+<td className="somip-mono" style={{ textAlign: "right" }} data-testid={`bl-dens-${m.id}`}>
+{editing
+? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 110, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="kg/m³ site" value={form.densiteObservee} onChange={(e) => setForm({ ...form, densiteObservee: e.target.value })} />
+: fmtDens(m.densiteSite)}
+{editing && densOutOfRange && <span className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600 }}>Hors plage ({VCF_MIN_DENSITY}–{VCF_MAX_DENSITY} kg/m³) : pas de correction à 15°C</span>}
+{editing && avertissementsMesureSite(form.temperatureC, form.densiteObservee).map((w, k) => <span key={k} className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600, maxWidth: 220, whiteSpace: "normal", textAlign: "right" }}>⚠ {w}</span>)}
+</td>
+<td className="somip-mono" style={{ color: C.sub, fontSize: 11.5 }} data-testid={`bl-fin-${m.id}`}>{finJournee(m)}</td>
+<td style={{ fontSize: 11.5 }} data-testid={`bl-mesure-${m.id}`}>{mesureUtilisee(m)}{receptionSansMesureSite(m) && <> <PastilleMesureManquante /></>}</td>
                   {canManage && (
                     <td className="somip-no-print" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       {editing && (
@@ -10684,7 +9828,7 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : celles saisies avec la réception ; « — » si elles n'ont pas été renseignées.{canManage && " Pour les ajouter ou les corriger (gasoil), utilise le crayon à droite de la ligne : la quantité à 15°C est recalculée."}
+          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). « Mesure site » : température et densité prélevées sur site à chaque réception ; elles servent au calcul de la quantité à 15°C. « Fin de journée » : ancienne mesure du jour (réceptions saisies avant cette règle), utilisée seulement à défaut de mesure site. Une pastille orange signale un bon sans mesure site : il reste valable.{canManage && " Pour compléter ou corriger la mesure site, utilise le crayon à droite de la ligne : la quantité à 15°C est recalculée."}
         </p>
       </div>
     </div>
