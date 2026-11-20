@@ -6693,7 +6693,7 @@ return (
 {aMesureSite(m)
 ? `Mesure site : ${m.temperatureSite}°C · densité ${m.densiteSite}`
 : (m.temperatureC !== undefined || m.densiteObservee !== undefined)
-? "Température/densité du bon non saisies"
+? `Ancienne saisie : ${m.temperatureC !== undefined ? `${m.temperatureC}°C` : ""}${m.temperatureC !== undefined && m.densiteObservee !== undefined ? " · " : ""}${m.densiteObservee !== undefined ? `densité ${m.densiteObservee}` : ""}`
 : "Température/densité non saisies"}
 </span>
 {receptionSansMesureSite(m) && <span data-testid={`recep-pastille-${m.id}`}><PastilleMesureManquante /></span>}
@@ -9732,13 +9732,16 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
   const hasVal = (v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v));
   const fmtTemp = (v) => (hasVal(v) ? `${Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 1 })} °C` : "—");
   const fmtDens = (v) => (hasVal(v) ? Number(v).toLocaleString("fr-FR", { maximumFractionDigits: 4 }) : "—");
-  // Seules la température et la densité saisies AVEC le bon (mesure prélevée sur site) sont affichées et utilisées : jamais la mesure du jour.
+  // Mesure affichée et utilisée pour le 15°C : celle saisie AVEC le bon (prélevée sur site) quand elle existe ; sinon l'ANCIENNE température/densité
+  // enregistrée avec la réception (mesure du jour, valable à la fois pour les bons et les mouvements du jour), conservée telle quelle.
+  const mesureEff = (m) => (aMesureSite(m) ? { t: m.temperatureSite, d: m.densiteSite, origine: "site" } : (hasVal(m.temperatureC) || hasVal(m.densiteObservee)) ? { t: m.temperatureC, d: m.densiteObservee, origine: "ancienne" } : { t: undefined, d: undefined, origine: null });
+  const origineLabel = (m) => { const o = mesureEff(m).origine; return o === "site" ? "Saisie avec le bon" : o === "ancienne" ? "Ancienne saisie (mesure du jour)" : "—"; };
 
   const doExcel = () => exportToExcel(`SOMIP_Bons_Livraison.xlsx`, [{
     name: "Bons de livraison", rows: rows.map((m) => ({
       Date: m.date, Site: sites.find((s) => s.id === m.siteId)?.name || m.siteId, Produit: productLabel(m),
-      "N° Bon": m.ref || "", "Quantité (L)": Math.round(m.quantity), "Quantité 15°C (L)": aMesureSite(m) && m.volumeCorrige15 ? Math.round(m.volumeCorrige15) : "",
-      "Température (°C)": hasVal(m.temperatureSite) ? Number(m.temperatureSite) : "", "Densité": hasVal(m.densiteSite) ? Number(m.densiteSite) : "", "Mesure site manquante": receptionSansMesureSite(m) ? "oui" : "",
+      "N° Bon": m.ref || "", "Quantité (L)": Math.round(m.quantity), "Quantité 15°C (L)": m.volumeCorrige15 ? Math.round(m.volumeCorrige15) : "",
+      "Température (°C)": hasVal(mesureEff(m).t) ? Number(mesureEff(m).t) : "", "Densité": hasVal(mesureEff(m).d) ? Number(mesureEff(m).d) : "", "Origine de la mesure": origineLabel(m), "Mesure site manquante": receptionSansMesureSite(m) ? "oui" : "",
     })),
   }]);
 
@@ -9749,8 +9752,8 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
     columns: ["Date", "Site", "Produit", "N° Bon", "Quantité", "Quantité 15°C", "Température", "Densité", "Mesure"],
     rows: rows.map((m) => [
       m.date, sites.find((s) => s.id === m.siteId)?.name || m.siteId, productLabel(m),
-      m.ref || "—", `+${fmt(m.quantity)} L`, aMesureSite(m) && m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—",
-      fmtTemp(m.temperatureSite), fmtDens(m.densiteSite), receptionSansMesureSite(m) ? "mesure site manquante" : (aMesureSite(m) ? "saisie avec le bon" : "—"),
+      m.ref || "—", `+${fmt(m.quantity)} L`, m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—",
+      fmtTemp(mesureEff(m).t), fmtDens(mesureEff(m).d), `${origineLabel(m)}${receptionSansMesureSite(m) ? " — mesure site manquante" : ""}`,
     ]),
   });
 
@@ -9788,20 +9791,20 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
                   <td>{productLabel(m)}</td>
                   <td className="somip-mono" style={{ fontWeight: 700, color: C.blue }}>{m.ref || "—"}</td>
                   <td className="somip-mono" style={{ textAlign: "right", color: C.success, fontWeight: 600 }}>+{fmt(m.quantity)} L</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }} data-testid={`bl-q15-${m.id}`}>{aMesureSite(m) && m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
+                  <td className="somip-mono" style={{ textAlign: "right", color: C.sub }} data-testid={`bl-q15-${m.id}`}>{m.volumeCorrige15 ? `${fmt(m.volumeCorrige15)} L` : "—"}</td>
 <td className="somip-mono" style={{ textAlign: "right" }} data-testid={`bl-temp-${m.id}`}>
 {editing
 ? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 80, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="°C site" value={form.temperatureC} onChange={(e) => setForm({ ...form, temperatureC: e.target.value })} />
-: fmtTemp(m.temperatureSite)}
+: fmtTemp(mesureEff(m).t)}
 </td>
 <td className="somip-mono" style={{ textAlign: "right" }} data-testid={`bl-dens-${m.id}`}>
 {editing
 ? <input type="number" step="0.1" className="somip-input somip-no-print" style={{ width: 110, padding: "4px 6px", fontSize: 12, textAlign: "right" }} placeholder="kg/m³ site" value={form.densiteObservee} onChange={(e) => setForm({ ...form, densiteObservee: e.target.value })} />
-: fmtDens(m.densiteSite)}
+: fmtDens(mesureEff(m).d)}
 {editing && densOutOfRange && <span className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600 }}>Hors plage ({VCF_MIN_DENSITY}–{VCF_MAX_DENSITY} kg/m³) : pas de correction à 15°C</span>}
 {editing && avertissementsMesureSite(form.temperatureC, form.densiteObservee).map((w, k) => <span key={k} className="somip-no-print" style={{ display: "block", fontSize: 10.5, color: C.warning, fontWeight: 600, maxWidth: 220, whiteSpace: "normal", textAlign: "right" }}>⚠ {w}</span>)}
 </td>
-<td style={{ fontSize: 11.5 }} data-testid={`bl-mesure-${m.id}`}>{receptionSansMesureSite(m) ? <PastilleMesureManquante /> : aMesureSite(m) ? "✔ saisie avec le bon" : "—"}</td>
+<td style={{ fontSize: 11.5 }} data-testid={`bl-mesure-${m.id}`}>{origineLabel(m)}{receptionSansMesureSite(m) && <> <PastilleMesureManquante /></>}</td>
                   {canManage && (
                     <td className="somip-no-print" style={{ textAlign: "right", whiteSpace: "nowrap" }}>
                       {editing && (
@@ -9824,7 +9827,7 @@ function DeliveryNotesReport({ sites, movements, assignedSiteIds, canManage, edi
           </table>
         </div>
         <p style={{ marginTop: 14, fontSize: 11, color: C.sub }}>
-          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : uniquement celles prélevées sur site et saisies avec le bon de livraison ; elles servent au calcul de la quantité à 15°C (sans elles, aucune quantité à 15°C n'est calculée). Une pastille orange signale un bon sans mesure : il reste valable.{canManage && " Pour compléter ou corriger la mesure site, utilise le crayon à droite de la ligne : la quantité à 15°C est recalculée."}
+          {rows.length} bon(s) listé(s) — réceptions des sites uniquement (les camions n'ont pas de bon de livraison). Température et densité : celles prélevées sur site et saisies avec le bon quand elles existent (« Saisie avec le bon »), sinon l'ancienne température/densité enregistrée avec la réception (« Ancienne saisie »), conservée telle quelle ; elles servent au calcul de la quantité à 15°C. Une pastille orange signale un bon sans mesure saisie avec le bon : il reste valable.{canManage && " Pour compléter ou corriger la mesure site, utilise le crayon à droite de la ligne : la quantité à 15°C est recalculée."}
         </p>
       </div>
     </div>
