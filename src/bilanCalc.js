@@ -140,16 +140,10 @@ export function receptionsDuMois(movements, siteId, periodKey) {
   const lignes = movements
     .filter((m) => m.type === "reception" && m.siteId === siteId && estGasoil(m) && String(m.date).startsWith(`${periodKey}-`))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || "").localeCompare(b.createdAt || "")))
-    .map((m) => {
-      // Seules la température et la densité PRÉLEVÉES SUR SITE et saisies avec le bon de livraison comptent : jamais la mesure du jour.
-      const mesureSite = [m.temperatureSite, m.densiteSite].every((v) => v !== undefined && v !== null && v !== "" && Number.isFinite(Number(v)));
-      const converti = mesureSite && m.volumeCorrige15 !== undefined && m.volumeCorrige15 !== null;
-      return {
-        id: m.id, date: m.date, ref: m.ref || "", quantity: m.quantity,
-        temperatureC: mesureSite ? Number(m.temperatureSite) : undefined, densiteObservee: mesureSite ? Number(m.densiteSite) : undefined,
-        volume15: converti ? m.volumeCorrige15 : m.quantity, converti,
-      };
-    });
+    .map((m) => ({
+      id: m.id, date: m.date, ref: m.ref || "", quantity: m.quantity, temperatureC: m.temperatureC, densiteObservee: m.densiteObservee,
+      volume15: volume15Mouvement(m), converti: m.volumeCorrige15 !== undefined && m.volumeCorrige15 !== null,
+    }));
   return { lignes, total15: lignes.reduce((a, l) => a + l.volume15, 0), totalAmbiant: lignes.reduce((a, l) => a + l.quantity, 0), nbSansMesure: lignes.filter((l) => !l.converti).length };
 }
 
