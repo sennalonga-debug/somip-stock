@@ -407,6 +407,22 @@ function gainPerteMois(site, movements, inventaires, viewDate, startDate) {
   }
   return { ecartCumule, daysWithJauge };
 }
+// Même calcul que gainPerteMois, mais à 15°C (volumes corrigés des réceptions, jauges à 15°C) — jours sans jauge à 15°C ignorés.
+function gainPerteMois15(site, movements, inventaires, viewDate) {
+  const month = viewDate.slice(0, 7);
+  let ecartCumule = 0, daysWithJauge = 0;
+  let cur = new Date(`${month}-01`);
+  const end = new Date(viewDate);
+  while (cur <= end) {
+    const d = `${cur.getFullYear()}-${pad2(cur.getMonth() + 1)}-${pad2(cur.getDate())}`;
+    const dayMovs = movements.filter((m) => m.siteId === site.id && (m.product || "gasoil") === "gasoil" && m.date === d);
+    const theorique = stockBeforeDate15(site, movements, d, inventaires) + sumQty15(dayMovs, ["reception"]) + sumQty15(dayMovs, ["retour_camion"]) - sumQty15(dayMovs, ["sortie"]) - sumQty15(dayMovs, ["sortie_camion"]);
+    const inv = pickLatestInv(inventaires.filter((i) => i.siteId === site.id && (i.product || "gasoil") === "gasoil" && i.date === d && i.stockPhysique15 !== undefined));
+    if (inv) { ecartCumule += inv.stockPhysique15 - theorique; daysWithJauge++; }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return { ecartCumule, daysWithJauge };
+}
 function decadeBounds(dateStr) {
   const [y, m, d] = dateStr.split("-").map(Number);
   let startDay, endDay, label;
@@ -1013,7 +1029,8 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks, extra) {
     doc.text(value2 || "—", marginX + colW, y + 15);
     y += 34;
   };
-  infoRow("Inventoriste", inv.inventoriste, "Opérateur", inv.operateur);
+  if (extra && extra.sansOperateur) infoRow("Inventoriste", inv.inventoriste, "", "");
+  else infoRow("Inventoriste", inv.inventoriste, "Opérateur", inv.operateur);
   doc.setDrawColor(226, 230, 234);
   doc.line(marginX, y - 14, pageWidth - marginX, y - 14);
   y += 6;
@@ -7512,6 +7529,19 @@ function situationSiteDate(site, movements, inventaires, date, inventairesOffici
   cumul.joursAvecJauge = gp.daysWithJauge;
   cumul.entrees = cumul.receptions + cumul.retours + (cumul.autres > 0 ? cumul.autres : 0);
   cumul.sorties = cumul.ventes + cumul.chargements + (cumul.autres < 0 ? -cumul.autres : 0);
+  const cumul15 = {
+    stockDebut: stockBeforeDate15(site, movements, debutMois, inventaires),
+    receptions: sumQty15(mois, ["reception"]),
+    retours: sumQty15(mois, ["retour_camion"]),
+    ventes: sumQty15(mois, ["sortie"]),
+    chargements: sumQty15(mois, ["sortie_camion"]),
+  };
+  cumul15.entrees = cumul15.receptions + cumul15.retours;
+  cumul15.sorties = cumul15.ventes + cumul15.chargements;
+  cumul15.stockFin = anchoredStock15(site.id, site.stockInitial, movements, inventaires, "gasoil", date, true);
+  const gp15 = gainPerteMois15(site, movements, inventaires, date);
+  cumul15.ecart = gp15.ecartCumule;
+  cumul15.joursAvecJauge = gp15.daysWithJauge;
   // Inventaire officiel enregistré ce jour-là (gasoil) : comparaison avec le stock de l'application
   const off = (inventairesOfficiels || []).filter((i) => i.siteId === site.id && i.date === date && (!i.produit || i.produit === "gasoil"));
   const offInopine = off.find((i) => i.type === "inopine") || off[0] || null;
@@ -7526,43 +7556,27 @@ function situationSiteDate(site, movements, inventaires, date, inventairesOffici
     }
   }
   const stockLaitiers = laitiers.reduce((a, t) => a + t.stock, 0);
-  return { jour, cumul, offInopine, laitiers, stockLaitiers };
+  return { jour, cumul, cumul15, offInopine, laitiers, stockLaitiers };
 }
 async function exportSituationSiteDatePdf(site, date, sit, productStocks, noms) {
   const sg = (n) => `${n > 0 ? "+" : ""}${fmt(n)} L`;
-  const { jour, cumul, offInopine, laitiers, stockLaitiers } = sit;
+  const { jour, cumul15, offInopine, laitiers, stockLaitiers } = sit;
+  const L15 = (n) => `${fmt(n)} L`;
   const sections = [
     {
-      heading: `SITUATION DE STOCK AU ${formatDateShort(date)} — JOURNÉE`,
-      columns: ["Rubrique", "Litres (ambiant)"],
+      heading: `CUMUL DU MOIS À DATE — À 15°C (${formatDateShort(`${date.slice(0, 7)}-01`)} AU ${formatDateShort(date)})`,
+      columns: ["Rubrique", "Litres à 15°C"],
       rows: [
-        ["Stock début de journée", `${fmt(jour.stockDebut)} L`],
-        ["Entrées — réceptions", `${fmt(jour.receptions)} L`],
-        ...(jour.retours ? [["Entrées — retours camions laitiers", `${fmt(jour.retours)} L`]] : []),
-        ["Sorties — ventes", `${fmt(jour.ventes)} L`],
-        ...(jour.chargements ? [["Sorties — chargements camions laitiers", `${fmt(jour.chargements)} L`]] : []),
-        ...(jour.autres ? [["Transferts entre camions", sg(jour.autres)]] : []),
-        ["Stock théorique fin de journée", `${fmt(jour.theorique)} L`],
-        ["Jauge mesurée (stock physique)", jour.jauge !== null ? `${fmt(jour.jauge)} L` : "Pas de jauge saisie ce jour"],
+        ["Stock début du mois", L15(cumul15.stockDebut)],
+        ["Entrées — réceptions", L15(cumul15.receptions)],
+        ...(cumul15.retours ? [["Entrées — retours camions laitiers", L15(cumul15.retours)]] : []),
+        ["Sorties — ventes", L15(cumul15.ventes)],
+        ...(cumul15.chargements ? [["Sorties — chargements camions laitiers", L15(cumul15.chargements)]] : []),
+        ["Total entrées", L15(cumul15.entrees)],
+        ["Total sorties", L15(cumul15.sorties)],
+        [`Stock fin au ${formatDateShort(date)}`, L15(cumul15.stockFin)],
       ],
-      totalsRow: ["Gain / Perte du jour", jour.ecart !== null ? sg(jour.ecart) : "—"],
-    },
-    {
-      heading: `CUMUL DU MOIS À DATE (${formatDateShort(cumul.debutMois)} AU ${formatDateShort(date)})`,
-      columns: ["Rubrique", "Litres (ambiant)"],
-      rows: [
-        ["Stock début du mois", `${fmt(cumul.stockDebut)} L`],
-        ["Entrées — réceptions", `${fmt(cumul.receptions)} L`],
-        ...(cumul.retours ? [["Entrées — retours camions laitiers", `${fmt(cumul.retours)} L`]] : []),
-        ["Sorties — ventes", `${fmt(cumul.ventes)} L`],
-        ...(cumul.chargements ? [["Sorties — chargements camions laitiers", `${fmt(cumul.chargements)} L`]] : []),
-        ...(cumul.autres ? [["Transferts entre camions", sg(cumul.autres)]] : []),
-        ["Total entrées", `${fmt(cumul.entrees)} L`],
-        ["Total sorties", `${fmt(cumul.sorties)} L`],
-        [`Stock fin du site au ${formatDateShort(date)} (${jour.jauge !== null ? "jauge" : "théorique"})`, `${fmt(jour.stockFin)} L`],
-        ["Jours avec jauge dans le mois", String(cumul.joursAvecJauge)],
-      ],
-      totalsRow: ["Gain / Perte cumulé du mois", sg(cumul.ecart)],
+      totalsRow: ["Gain / Perte cumulé du mois", sg(cumul15.ecart)],
     },
   ];
   const siteStock = offInopine ? offInopine.stockAmbiant : jour.stockFin;
@@ -7578,30 +7592,18 @@ async function exportSituationSiteDatePdf(site, date, sit, productStocks, noms) 
       totalsRow: ["Stock cumulé site + laitiers", `${fmt(siteStock + stockLaitiers)} L`],
     });
   }
-  if (offInopine) {
-    sections.push({
-      heading: "INVENTAIRE OFFICIEL COMPARÉ À L'APPLICATION",
-      columns: ["Rubrique", "Litres (ambiant)"],
-      rows: [
-        ["Stock fin du site selon l'application", `${fmt(jour.stockFin)} L`],
-        ["Stock constaté à l'inventaire officiel", `${fmt(offInopine.stockAmbiant)} L`],
-      ],
-      totalsRow: ["Écart inventaire − application", sg(offInopine.stockAmbiant - jour.stockFin)],
-    });
-  }
   // Même modèle que l'inventaire mensuel : si un inventaire officiel existe ce jour-là, on reprend
   // ses cuves, index, dépotage et signatures ; sinon, la situation est tirée des seules données de l'application.
   const inv = offInopine
-    ? { ...offInopine, type: "inopine", inventoriste: noms.inventoriste || offInopine.inventoriste, operateur: noms.operateur || offInopine.operateur }
-    : { siteId: site.id, date, type: "inopine", produit: "gasoil", inventoriste: noms.inventoriste, operateur: noms.operateur, cuves: [], indexCompteurs: [], depotage: [], stockAmbiant: jour.stockFin, commentaire: "Situation établie à partir des données de l'application (stock fin, entrées, sorties, gains/pertes)." };
-  await exportInventaireOfficielToPdf(inv, site, productStocks, { sections, ...(combine ? { totalAmbiant: siteStock + stockLaitiers } : {}) });
+    ? { ...offInopine, commentaire: "", type: "inopine", inventoriste: noms.inventoriste || offInopine.inventoriste, operateur: "" }
+    : { siteId: site.id, date, type: "inopine", produit: "gasoil", inventoriste: noms.inventoriste, operateur: "", cuves: [], indexCompteurs: [], depotage: [], stockAmbiant: jour.stockFin };
+  await exportInventaireOfficielToPdf(inv, site, productStocks, { sections, sansOperateur: true, ...(combine ? { totalAmbiant: siteStock + stockLaitiers } : {}) });
 }
 function SituationAppPanel({ sites, allSites, truckAssignments, productStocks, movements, inventaires, inventairesOfficiels }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [busy, setBusy] = useState(false);
-  const [inventoriste, setInventoriste] = useState("");
-  const [operateur, setOperateur] = useState("");
+  const [inventoriste, setInventoriste] = useState("Albain LONGA et André Xavier ADECHAINT");
   const site = sites.find((s) => s.id === siteId) || sites[0];
   if (!site) return null;
   const sit = situationSiteDate(site, movements, inventaires, date, inventairesOfficiels, allSites, truckAssignments);
@@ -7622,28 +7624,19 @@ function SituationAppPanel({ sites, allSites, truckAssignments, productStocks, m
           <Field label="Site"><select className="somip-select" value={site.id} onChange={(e) => setSiteId(e.target.value)}>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
         </div>
         <div style={{ width: 160 }}><Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field></div>
-        <div style={{ width: 150 }}><Field label="Inventoriste"><input className="somip-input" value={inventoriste} onChange={(e) => setInventoriste(e.target.value)} placeholder="Nom" /></Field></div>
-        <div style={{ width: 150 }}><Field label="Opérateur"><input className="somip-input" value={operateur} onChange={(e) => setOperateur(e.target.value)} placeholder="Nom" /></Field></div>
-        <button className="somip-btn somip-btn-primary" style={{ marginBottom: 12 }} disabled={busy || !date} onClick={async () => { setBusy(true); try { await exportSituationSiteDatePdf(site, date, sit, productStocks, { inventoriste, operateur }); } finally { setBusy(false); } }}>
+        <div style={{ width: 300 }}><Field label="Inventoriste"><input className="somip-input" value={inventoriste} onChange={(e) => setInventoriste(e.target.value)} placeholder="Nom" /></Field></div>
+        <button className="somip-btn somip-btn-primary" style={{ marginBottom: 12 }} disabled={busy || !date} onClick={async () => { setBusy(true); try { await exportSituationSiteDatePdf(site, date, sit, productStocks, { inventoriste }); } finally { setBusy(false); } }}>
           <Download size={14} /> {busy ? "Création…" : "Imprimer en PDF"}
         </button>
       </div>
-      <p style={{ margin: "0 0 10px", fontSize: 11.5, color: C.sub }}>Les chiffres viennent des saisies de l'application pour ce site et cette date : rien à retaper.</p>
-      <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 280px", background: C.bg, borderRadius: 8, padding: 12 }}>
-          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700 }}>Journée du {formatDateShort(date)}</p>
-          <Ligne label="Stock début" value={`${fmt(jour.stockDebut)} L`} />
-          <Ligne label="Entrées (réceptions + retours)" value={`${fmt(jour.receptions + jour.retours)} L`} />
-          <Ligne label="Sorties (ventes + chargements)" value={`${fmt(jour.ventes + jour.chargements)} L`} />
-          <Ligne label="Stock fin" value={`${fmt(jour.stockFin)} L`} bold />
-          <Ligne label="Gain / Perte du jour" value={jour.ecart !== null ? sg(jour.ecart) : "pas de jauge"} bold color={colorEcart(jour.ecart)} />
-        </div>
-        <div style={{ flex: "1 1 280px", background: C.bg, borderRadius: 8, padding: 12 }}>
-          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700 }}>Cumul du mois à date</p>
-          <Ligne label="Stock début du mois" value={`${fmt(cumul.stockDebut)} L`} />
-          <Ligne label="Total entrées" value={`${fmt(cumul.entrees)} L`} />
-          <Ligne label="Total sorties" value={`${fmt(cumul.sorties)} L`} />
-          <Ligne label="Gain / Perte cumulé" value={sg(cumul.ecart)} bold color={colorEcart(cumul.ecart)} />
+          <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700 }}>Cumul du mois à date — à 15°C</p>
+          <Ligne label="Stock début du mois" value={`${fmt(sit.cumul15.stockDebut)} L`} />
+          <Ligne label="Total entrées" value={`${fmt(sit.cumul15.entrees)} L`} />
+          <Ligne label="Total sorties" value={`${fmt(sit.cumul15.sorties)} L`} />
+          <Ligne label="Stock fin" value={`${fmt(sit.cumul15.stockFin)} L`} bold />
+          <Ligne label="Gain / Perte cumulé" value={sg(sit.cumul15.ecart)} bold color={colorEcart(sit.cumul15.ecart)} />
         </div>
         {LUBRICANT_SITE_IDS.includes(site.id) && (
           <div style={{ flex: "1 1 280px", background: C.bg, borderRadius: 8, padding: 12 }}>
