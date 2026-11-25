@@ -7589,8 +7589,8 @@ async function exportSituationSiteDatePdf(site, date, sit, productStocks, noms) 
   const sections = [
     ...((indexCompteurs.length && !(offInopine && (offInopine.indexCompteurs || []).length)) ? [{
       heading: "INDEX — RELEVÉ COMPTEUR",
-      columns: ["Compteur", "Index début du mois", `Index fin au ${formatDateShort(date)}`, "Volume écoulé"],
-      rows: indexCompteurs.map((c) => [c.compteur, fmt(c.debut), fmt(c.fin), L15(c.fin - c.debut)]),
+      columns: ["Compteur", "Index fin"],
+      rows: indexCompteurs.map((c) => [c.compteur, fmt(c.fin)]),
     }] : []),
     {
       heading: `CUMUL DU MOIS À DATE (${formatDateShort(`${date.slice(0, 7)}-01`)} AU ${formatDateShort(date)})`,
