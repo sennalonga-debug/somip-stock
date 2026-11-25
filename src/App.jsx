@@ -940,7 +940,7 @@ function InventaireRapidePrintPanel({ sites, inventaires }) {
   );
 }
 
-async function exportInventaireOfficielToPdf(inv, site, productStocks) {
+async function exportInventaireOfficielToPdf(inv, site, productStocks, extra) {
   const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -1029,6 +1029,7 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   };
 
   // Tableau 1 — Cuves : hauteur, densité, température, présence d'eau, volumes ambiant et 15°C.
+  if ((inv.cuves || []).length > 0) {
   drawBanner("CUVES — RELEVÉ DÉTAILLÉ");
   autoTable(doc, {
     startY: y,
@@ -1057,6 +1058,7 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
     },
   });
   y = doc.lastAutoTable.finalY + 20;
+  }
 
   // Tableau 2 — Index, indépendant des cuves (les compteurs de vente habituels du site).
   if (inv.indexCompteurs && inv.indexCompteurs.length > 0) {
@@ -1096,6 +1098,30 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
     y = doc.lastAutoTable.finalY + 20;
   }
 
+  // Sections supplémentaires (situation issue de l'application : journée, cumul du mois, laitiers rattachés...).
+  if (extra && extra.sections) {
+    for (const sec of extra.sections) {
+      if (y > pageHeight - 190) { doc.addPage(); y = 50; }
+      drawBanner(sec.heading);
+      autoTable(doc, {
+        startY: y,
+        head: [sec.columns],
+        body: sec.rows,
+        foot: sec.totalsRow ? [sec.totalsRow] : undefined,
+        theme: "grid",
+        headStyles: { fillColor: [pR, pG, pB], textColor: 255, fontStyle: "bold", fontSize: 10, cellPadding: 7 },
+        footStyles: { fillColor: [246, 248, 249], textColor: [20, 30, 40], fontStyle: "bold", fontSize: 10, cellPadding: 7, lineWidth: { top: 1.2 }, lineColor: [aR, aG, aB] },
+        bodyStyles: { fontSize: 10, cellPadding: 6, textColor: [40, 48, 56] },
+        alternateRowStyles: { fillColor: [249, 250, 251] },
+        styles: { font: "helvetica", lineColor: [226, 230, 234], lineWidth: 0.5, halign: "right" },
+        columnStyles: { 0: { halign: "left", fontStyle: "bold" } },
+        margin: { left: marginX, right: marginX },
+      });
+      y = doc.lastAutoTable.finalY + 20;
+    }
+  }
+  if (y > pageHeight - 90) { doc.addPage(); y = 50; }
+
   // Totaux : stock ambiant et à 15°C, côte à côte.
   const halfW = (fullWidth - 16) / 2;
   const boxH = 46;
@@ -1105,12 +1131,12 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
   doc.setTextColor(110, 120, 130);
-  doc.text("STOCK TOTAL — BASE AMBIANTE", marginX + 12, y + 17);
-  doc.text("STOCK TOTAL — BASE 15°C", marginX + halfW + 28, y + 17);
+  doc.text(extra && extra.totalAmbiant !== undefined ? "STOCK TOTAL — SITE + LAITIERS (AMBIANT)" : "STOCK TOTAL — BASE AMBIANTE", marginX + 12, y + 17);
+  doc.text(extra && extra.totalAmbiant !== undefined ? "STOCK SITE SEUL — BASE 15°C" : "STOCK TOTAL — BASE 15°C", marginX + halfW + 28, y + 17);
   doc.setFont("helvetica", "bold");
   doc.setFontSize(15);
   doc.setTextColor(pR, pG, pB);
-  doc.text(`${fmt(inv.stockAmbiant)} L`, marginX + 12, y + 36);
+  doc.text(`${fmt(extra && extra.totalAmbiant !== undefined ? extra.totalAmbiant : inv.stockAmbiant)} L`, marginX + 12, y + 36);
   doc.setTextColor(inv.stock15 !== undefined ? aR : 170, inv.stock15 !== undefined ? aG : 175, inv.stock15 !== undefined ? aB : 180);
   doc.text(inv.stock15 !== undefined ? `${fmt(inv.stock15)} L` : "Non calculé", marginX + halfW + 28, y + 36);
   y += boxH + 24;
@@ -1127,7 +1153,8 @@ async function exportInventaireOfficielToPdf(inv, site, productStocks) {
   // Cases de signature, en bas de page (fixe, pas juste après le contenu, pour un rendu
   // toujours propre même si le tableau des cuves est court ou long). Si une signature
   // numérique a déjà été apposée, son image remplace la case vide.
-  const sigY = Math.max(y + 20, pageHeight - 150);
+  let sigY = Math.max(y + 20, pageHeight - 150);
+  if (sigY + 100 > pageHeight - 10) { doc.addPage(); sigY = 60; }
   const sigW = (fullWidth - 16) / 2;
   const sigSlots = inventaireSignatureSlots(inv);
   for (let i = 0; i < sigSlots.length; i++) {
@@ -7443,14 +7470,14 @@ function InventairesView({ sites, inventaires, movements, truckAssignments, stoc
       )}
 
       {mainTab === "officiel" && (
-        <InventaireOfficielTab movements={movements} inventaires={inventaires} sites={scopedSites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={scopedInventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
+        <InventaireOfficielTab movements={movements} inventaires={inventaires} allSites={sites} truckAssignments={truckAssignments} sites={scopedSites} siteTanks={siteTanks} siteDepotageMeters={siteDepotageMeters} siteMeters={siteMeters} inventairesOfficiels={scopedInventairesOfficiels} addInventaireOfficiel={addInventaireOfficiel} editInventaireOfficiel={editInventaireOfficiel} deleteInventaireOfficiel={deleteInventaireOfficiel} canWrite={canInventaireOfficiel} canManage={canManage} signInventaireOfficiel={signInventaireOfficiel} canSignSomip={canSignSomip} canSignOperateur={canSignOperateur} canSignTotal={canSignTotal} isTotalEnergiesOnly={isTotalEnergiesOnly} productStocks={productStocks} />
       )}
     </div>
   );
 }
 
 /* ---- Situation de stock d'un site à une date, calculée depuis l'application (pour le PDF d'inventaire inopiné) ---- */
-function situationSiteDate(site, movements, inventaires, date, inventairesOfficiels) {
+function situationSiteDate(site, movements, inventaires, date, inventairesOfficiels, allSites, truckAssignments) {
   const debutMois = `${date.slice(0, 7)}-01`;
   const gj = (list, types) => sumQty(list, types);
   // Jour choisi
@@ -7488,14 +7515,25 @@ function situationSiteDate(site, movements, inventaires, date, inventairesOffici
   // Inventaire officiel enregistré ce jour-là (gasoil) : comparaison avec le stock de l'application
   const off = (inventairesOfficiels || []).filter((i) => i.siteId === site.id && i.date === date && (!i.produit || i.produit === "gasoil"));
   const offInopine = off.find((i) => i.type === "inopine") || off[0] || null;
-  return { jour, cumul, offInopine };
+  // Prehomo / Okouma : stock des camions laitiers rattachés à cette date, à cumuler avec celui du site (même règle que l'Exposition).
+  const laitiers = [];
+  if (LUBRICANT_SITE_IDS.includes(site.id)) {
+    for (const truckId of trucksAssignedAt(truckAssignments || [], site.id, date)) {
+      const truck = (allSites || []).find((x) => x.id === truckId);
+      if (!truck) continue;
+      const tInv = pickLatestInv(inventaires.filter((i) => i.siteId === truckId && (i.product || "gasoil") === "gasoil" && i.date <= date));
+      laitiers.push({ nom: truck.name, stock: tInv ? tInv.stockPhysique : stockThroughDate(truck, movements, date, inventaires), source: tInv ? `jauge du ${formatDateShort(tInv.date)}` : "théorique" });
+    }
+  }
+  const stockLaitiers = laitiers.reduce((a, t) => a + t.stock, 0);
+  return { jour, cumul, offInopine, laitiers, stockLaitiers };
 }
-async function exportSituationSiteDatePdf(site, date, sit) {
+async function exportSituationSiteDatePdf(site, date, sit, productStocks, noms) {
   const sg = (n) => `${n > 0 ? "+" : ""}${fmt(n)} L`;
-  const { jour, cumul, offInopine } = sit;
+  const { jour, cumul, offInopine, laitiers, stockLaitiers } = sit;
   const sections = [
     {
-      heading: `Journée du ${formatDateShort(date)}`,
+      heading: `SITUATION DE STOCK AU ${formatDateShort(date)} — JOURNÉE`,
       columns: ["Rubrique", "Litres (ambiant)"],
       rows: [
         ["Stock début de journée", `${fmt(jour.stockDebut)} L`],
@@ -7510,7 +7548,7 @@ async function exportSituationSiteDatePdf(site, date, sit) {
       totalsRow: ["Gain / Perte du jour", jour.ecart !== null ? sg(jour.ecart) : "—"],
     },
     {
-      heading: `Cumul du mois à date (du ${formatDateShort(cumul.debutMois)} au ${formatDateShort(date)})`,
+      heading: `CUMUL DU MOIS À DATE (${formatDateShort(cumul.debutMois)} AU ${formatDateShort(date)})`,
       columns: ["Rubrique", "Litres (ambiant)"],
       rows: [
         ["Stock début du mois", `${fmt(cumul.stockDebut)} L`],
@@ -7521,40 +7559,52 @@ async function exportSituationSiteDatePdf(site, date, sit) {
         ...(cumul.autres ? [["Transferts entre camions", sg(cumul.autres)]] : []),
         ["Total entrées", `${fmt(cumul.entrees)} L`],
         ["Total sorties", `${fmt(cumul.sorties)} L`],
-        [`Stock fin au ${formatDateShort(date)} (${jour.jauge !== null ? "jauge" : "théorique"})`, `${fmt(jour.stockFin)} L`],
+        [`Stock fin du site au ${formatDateShort(date)} (${jour.jauge !== null ? "jauge" : "théorique"})`, `${fmt(jour.stockFin)} L`],
         ["Jours avec jauge dans le mois", String(cumul.joursAvecJauge)],
       ],
       totalsRow: ["Gain / Perte cumulé du mois", sg(cumul.ecart)],
     },
   ];
-  if (offInopine) {
-    const ecartOff = offInopine.stockAmbiant - jour.stockFin;
+  const siteStock = offInopine ? offInopine.stockAmbiant : jour.stockFin;
+  const combine = LUBRICANT_SITE_IDS.includes(site.id);
+  if (combine) {
     sections.push({
-      heading: `Inventaire officiel (${TYPE_INVENTAIRE_LABELS[offInopine.type] || offInopine.type}) comparé à l'application`,
-      columns: ["Rubrique", "Litres (ambiant)"],
+      heading: "STOCK SITE + CAMIONS LAITIERS RATTACHÉS",
+      columns: ["Désignation", "Litres (ambiant)"],
       rows: [
-        ["Stock fin selon l'application", `${fmt(jour.stockFin)} L`],
-        ["Stock constaté à l'inventaire officiel", `${fmt(offInopine.stockAmbiant)} L`],
+        [`${site.name} (site)${offInopine ? " — inventaire" : ""}`, `${fmt(siteStock)} L`],
+        ...(laitiers.length ? laitiers.map((t) => [`${t.nom} (laitier, ${t.source})`, `${fmt(t.stock)} L`]) : [["Aucun camion laitier rattaché à cette date", "0 L"]]),
       ],
-      totalsRow: ["Écart inventaire − application", sg(ecartOff)],
+      totalsRow: ["Stock cumulé site + laitiers", `${fmt(siteStock + stockLaitiers)} L`],
     });
   }
-  await exportToPdf({
-    filename: `Situation_${String(site.name).replace(/[^A-Za-z0-9]+/g, "_")}_${date}.pdf`,
-    title: "Situation de stock — Inventaire inopiné",
-    subtitle: site.name,
-    period: `Au ${formatDateLong(date)}`,
-    centerTitle: true,
-    sections,
-  });
+  if (offInopine) {
+    sections.push({
+      heading: "INVENTAIRE OFFICIEL COMPARÉ À L'APPLICATION",
+      columns: ["Rubrique", "Litres (ambiant)"],
+      rows: [
+        ["Stock fin du site selon l'application", `${fmt(jour.stockFin)} L`],
+        ["Stock constaté à l'inventaire officiel", `${fmt(offInopine.stockAmbiant)} L`],
+      ],
+      totalsRow: ["Écart inventaire − application", sg(offInopine.stockAmbiant - jour.stockFin)],
+    });
+  }
+  // Même modèle que l'inventaire mensuel : si un inventaire officiel existe ce jour-là, on reprend
+  // ses cuves, index, dépotage et signatures ; sinon, la situation est tirée des seules données de l'application.
+  const inv = offInopine
+    ? { ...offInopine, type: "inopine", inventoriste: noms.inventoriste || offInopine.inventoriste, operateur: noms.operateur || offInopine.operateur }
+    : { siteId: site.id, date, type: "inopine", produit: "gasoil", inventoriste: noms.inventoriste, operateur: noms.operateur, cuves: [], indexCompteurs: [], depotage: [], stockAmbiant: jour.stockFin, commentaire: "Situation établie à partir des données de l'application (stock fin, entrées, sorties, gains/pertes)." };
+  await exportInventaireOfficielToPdf(inv, site, productStocks, { sections, ...(combine ? { totalAmbiant: siteStock + stockLaitiers } : {}) });
 }
-function SituationAppPanel({ sites, movements, inventaires, inventairesOfficiels }) {
+function SituationAppPanel({ sites, allSites, truckAssignments, productStocks, movements, inventaires, inventairesOfficiels }) {
   const [siteId, setSiteId] = useState(sites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
   const [busy, setBusy] = useState(false);
+  const [inventoriste, setInventoriste] = useState("");
+  const [operateur, setOperateur] = useState("");
   const site = sites.find((s) => s.id === siteId) || sites[0];
   if (!site) return null;
-  const sit = situationSiteDate(site, movements, inventaires, date, inventairesOfficiels);
+  const sit = situationSiteDate(site, movements, inventaires, date, inventairesOfficiels, allSites, truckAssignments);
   const { jour, cumul } = sit;
   const sg = (n) => `${n > 0 ? "+" : ""}${fmt(n)} L`;
   const colorEcart = (n) => (n === null ? C.sub : n < 0 ? C.danger : n > 0 ? C.success : C.sub);
@@ -7572,7 +7622,9 @@ function SituationAppPanel({ sites, movements, inventaires, inventairesOfficiels
           <Field label="Site"><select className="somip-select" value={site.id} onChange={(e) => setSiteId(e.target.value)}>{sites.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
         </div>
         <div style={{ width: 160 }}><Field label="Date"><input type="date" className="somip-input" value={date} onChange={(e) => setDate(e.target.value)} /></Field></div>
-        <button className="somip-btn somip-btn-primary" style={{ marginBottom: 12 }} disabled={busy || !date} onClick={async () => { setBusy(true); try { await exportSituationSiteDatePdf(site, date, sit); } finally { setBusy(false); } }}>
+        <div style={{ width: 150 }}><Field label="Inventoriste"><input className="somip-input" value={inventoriste} onChange={(e) => setInventoriste(e.target.value)} placeholder="Nom" /></Field></div>
+        <div style={{ width: 150 }}><Field label="Opérateur"><input className="somip-input" value={operateur} onChange={(e) => setOperateur(e.target.value)} placeholder="Nom" /></Field></div>
+        <button className="somip-btn somip-btn-primary" style={{ marginBottom: 12 }} disabled={busy || !date} onClick={async () => { setBusy(true); try { await exportSituationSiteDatePdf(site, date, sit, productStocks, { inventoriste, operateur }); } finally { setBusy(false); } }}>
           <Download size={14} /> {busy ? "Création…" : "Imprimer en PDF"}
         </button>
       </div>
@@ -7593,13 +7645,22 @@ function SituationAppPanel({ sites, movements, inventaires, inventairesOfficiels
           <Ligne label="Total sorties" value={`${fmt(cumul.sorties)} L`} />
           <Ligne label="Gain / Perte cumulé" value={sg(cumul.ecart)} bold color={colorEcart(cumul.ecart)} />
         </div>
+        {LUBRICANT_SITE_IDS.includes(site.id) && (
+          <div style={{ flex: "1 1 280px", background: C.bg, borderRadius: 8, padding: 12 }}>
+            <p style={{ margin: "0 0 6px", fontSize: 12, fontWeight: 700 }}>Site + laitiers rattachés</p>
+            <Ligne label={`${site.name} (site)`} value={`${fmt(sit.offInopine ? sit.offInopine.stockAmbiant : jour.stockFin)} L`} />
+            {sit.laitiers.map((t) => <Ligne key={t.nom} label={`${t.nom} (laitier)`} value={`${fmt(t.stock)} L`} />)}
+            {sit.laitiers.length === 0 && <Ligne label="Aucun laitier rattaché" value="0 L" />}
+            <Ligne label="Stock cumulé" value={`${fmt((sit.offInopine ? sit.offInopine.stockAmbiant : jour.stockFin) + sit.stockLaitiers)} L`} bold />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 /* ---- Inventaire officiel (inopiné / mensuel) — cuve par cuve, avec PDF signé ---- */
-function InventaireOfficielTab({ movements, inventaires, sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
+function InventaireOfficielTab({ movements, inventaires, allSites, truckAssignments, sites, siteTanks, siteDepotageMeters, siteMeters, inventairesOfficiels, addInventaireOfficiel, editInventaireOfficiel, deleteInventaireOfficiel, canWrite, canManage, signInventaireOfficiel, canSignSomip, canSignOperateur, canSignTotal, isTotalEnergiesOnly, productStocks }) {
   const fixedSites = sites.filter((s) => !s.isMobile);
   const [siteId, setSiteId] = useState(fixedSites[0]?.id || "");
   const [date, setDate] = useState(todayStr());
@@ -7814,7 +7875,7 @@ function InventaireOfficielTab({ movements, inventaires, sites, siteTanks, siteD
 
   return (
     <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-      <SituationAppPanel sites={fixedSites} movements={movements || []} inventaires={inventaires || []} inventairesOfficiels={inventairesOfficiels} />
+      <SituationAppPanel sites={fixedSites} allSites={allSites || sites} truckAssignments={truckAssignments || []} productStocks={productStocks} movements={movements || []} inventaires={inventaires || []} inventairesOfficiels={inventairesOfficiels} />
       {canWrite && (
         <div className="somip-panel" style={{ padding: 18, flex: "1 1 460px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
