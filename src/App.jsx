@@ -4,7 +4,7 @@ import {
   Truck, AlertTriangle, Plus, X, Trash2, Pencil, Fuel, RotateCcw, Check,
   Users, History, Loader2, CheckCircle2, AlertCircle, CloudOff, Thermometer,
   FileBarChart, Download, Printer, TrendingDown, TrendingUp, LogOut, Lock, Mail, Menu, ImagePlus, Palette,
-  ChevronsLeft, ChevronsRight, Eye, EyeOff, Clock, Calculator, ArrowRightLeft,
+  ChevronsLeft, ChevronsRight, Eye, EyeOff, Clock, Calculator, ArrowRightLeft, Sun, Moon,
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import jsPDF from "jspdf";
@@ -2755,6 +2755,9 @@ function AuthScreen() {
 /* ------------------------------------------------------------------ */
 export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
+  // Thème du tableau de bord (clair / sombre), mémorisé sur cet appareil.
+  const [theme, setTheme] = useState(() => { try { return localStorage.getItem("somip_theme") === "light" ? "light" : "dark"; } catch (e) { return "dark"; } });
+  const toggleTheme = () => setTheme((t) => { const n = t === "light" ? "dark" : "light"; try { localStorage.setItem("somip_theme", n); } catch (e) { /* stockage indisponible : le choix reste valable pour la session */ } return n; });
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [isOfflineStart, setIsOfflineStart] = useState(false);
@@ -4267,7 +4270,7 @@ export default function App() {
           </div>
           <div style={{ position: "relative", zIndex: 1 }}>
           {view === "accueil" && <SiteHomeView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} onOpenSite={openSiteDashboard} />}
-          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} onOpenSite={openSiteDashboard} />}
+          {view === "dashboard" && <Dashboard sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} purgeDemoMovements={purgeDemoMovements} canManage={perms.canManage} truckAssignments={truckAssignments} onOpenSite={openSiteDashboard} settings={settings} userName={currentUserName} theme={theme} onToggleTheme={toggleTheme} productStocks={productStocks} />}
           {view === "dashboard_lub" && <LubricantsDashboardView sites={sites} movements={movements} inventaires={inventaires} productStocks={productStocks} stockOf={stockOf} assignedSiteIds={profile?.assignedSiteIds || []} siteId={lubDashSiteId} onSelectSite={setLubDashSiteId} />}
           {view === "dashboard_site" && <SiteDashboardView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} truckAssignments={truckAssignments} assignedSiteIds={profile?.assignedSiteIds || []} siteId={siteDashId} onSelectSite={setSiteDashId} />}
           {view === "sites" && perms.canManage && <SitesView sites={sites} movements={movements} inventaires={inventaires} stockOf={stockOf} addSite={addSite} editSite={editSite} removeSite={removeSite} toggleSiteActive={toggleSiteActive} productStocks={productStocks} saveProductStock={saveProductStock} truckAssignments={truckAssignments} assignTruck={assignTruck} siteMeters={siteMeters} addSiteMeter={addSiteMeter} removeSiteMeter={removeSiteMeter} siteTanks={siteTanks} addSiteTank={addSiteTank} removeSiteTank={removeSiteTank} siteDepotageMeters={siteDepotageMeters} addSiteDepotageMeter={addSiteDepotageMeter} removeSiteDepotageMeter={removeSiteDepotageMeter} toggleSiteEnginsEnabled={toggleSiteEnginsEnabled} setSiteEnginsSource={setSiteEnginsSource} applyEnginsGroup={applyEnginsGroup} siteEngins={siteEngins} addSiteEngin={addSiteEngin} importSiteEngins={importSiteEngins} removeSiteEngin={removeSiteEngin} setSitePhoto={setSitePhoto} />}
@@ -5228,7 +5231,112 @@ function DiagnosticGainPerte({ rows, ancienTotal, nouveauTotal, month, viewDate 
     </div>
   );
 }
-function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments, onOpenSite }) {
+/* ------------------------------------------------------------------ */
+/* Tableau de bord « salle de contrôle » — présentation uniquement :   */
+/* aucune donnée nouvelle, aucun calcul métier modifié.                 */
+/* ------------------------------------------------------------------ */
+const FX_CSS = `
+.fx { --fx-bg:#0A1522; --fx-card:#112033; --fx-card2:#16293F; --fx-border:#223A52; --fx-ink:#E9EFF5; --fx-sub:#8EA2B6; --fx-track:#1D3249;
+  --fx-ok:#34C27A; --fx-ok-bg:rgba(52,194,122,.16); --fx-warn:#F2B01E; --fx-warn-bg:rgba(242,176,30,.16); --fx-bad:#EF5350; --fx-bad-bg:rgba(239,83,80,.18); --fx-info:#43A5FF; --fx-info-bg:rgba(67,165,255,.18);
+  background:var(--fx-bg); color:var(--fx-ink); border-radius:16px; overflow:hidden; border:1px solid var(--fx-border); }
+.fx[data-theme="light"] { --fx-bg:#EDF1F6; --fx-card:#FFFFFF; --fx-card2:#F5F7FA; --fx-border:#D8E0E8; --fx-ink:#16212D; --fx-sub:#5B6B7A; --fx-track:#E3E9EF;
+  --fx-ok:#1E8A5F; --fx-ok-bg:rgba(30,138,95,.12); --fx-warn:#B97A00; --fx-warn-bg:rgba(217,139,18,.16); --fx-bad:#C63C3C; --fx-bad-bg:rgba(198,60,60,.12); --fx-info:#0071BD; --fx-info-bg:rgba(0,113,189,.12); }
+.fx * { box-sizing:border-box; }
+.fx-hatch { height:7px; background:repeating-linear-gradient(135deg,#F2C200 0 10px,#111 10px 20px); }
+.fx-band { display:flex; align-items:center; gap:12px; padding:12px 16px; background:var(--fx-card); border-bottom:1px solid var(--fx-border); flex-wrap:wrap; }
+.fx-body { padding:14px 16px 18px; }
+.fx-card { background:var(--fx-card); border:1px solid var(--fx-border); border-radius:14px; padding:14px 16px; min-width:0; }
+.fx-title { font-size:10.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--fx-sub); font-weight:700; margin:0 0 10px; display:flex; justify-content:space-between; gap:8px; align-items:center; }
+.fx-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(172px,1fr)); gap:12px; margin-bottom:12px; }
+.fx-kpi-val { font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums; font-size:26px; font-weight:700; line-height:1.15; }
+.fx-kpi-sub { font-size:11.5px; color:var(--fx-sub); margin-top:4px; }
+.fx-row { display:grid; grid-template-columns:minmax(0,1.7fr) minmax(0,1fr); gap:12px; margin-bottom:12px; }
+.fx-lane { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:10px; background:var(--fx-card2); margin-bottom:6px; flex-wrap:wrap; }
+.fx-lane-name { width:150px; flex-shrink:0; font-size:12.5px; font-weight:700; }
+.fx-pills { display:flex; gap:5px; flex-wrap:wrap; }
+.fx-pill { display:inline-flex; flex-direction:column; align-items:center; justify-content:center; min-width:54px; padding:3px 7px; border-radius:7px; border:1px solid; font-size:10.5px; font-weight:700; line-height:1.2; }
+.fx-pill small { font-weight:500; font-size:9.5px; opacity:.85; }
+.fx-pill.ok { color:var(--fx-ok); background:var(--fx-ok-bg); border-color:var(--fx-ok); }
+.fx-pill.warn { color:var(--fx-warn); background:var(--fx-warn-bg); border-color:var(--fx-warn); }
+.fx-pill.bad { color:var(--fx-bad); background:var(--fx-bad-bg); border-color:var(--fx-bad); }
+.fx-pill.info { color:var(--fx-info); background:var(--fx-info-bg); border-color:var(--fx-info); }
+.fx-legend { display:flex; gap:14px; flex-wrap:wrap; font-size:11px; color:var(--fx-sub); margin-top:8px; }
+.fx-dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+.fx-bar-row { display:flex; align-items:center; gap:10px; margin-bottom:9px; font-size:12px; }
+.fx-bar-track { flex:1; height:12px; background:var(--fx-track); border-radius:6px; overflow:hidden; }
+.fx-bar-fill { height:100%; border-radius:6px; background:var(--fx-info); }
+.fx-alert { display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:10px; background:var(--fx-card2); margin-bottom:6px; font-size:12.5px; border-left:3px solid; }
+.fx-alert.bad { border-color:var(--fx-bad); } .fx-alert.warn { border-color:var(--fx-warn); }
+.fx-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+.fx-table th { text-align:left; font-size:10.5px; letter-spacing:.07em; text-transform:uppercase; color:var(--fx-sub); padding:8px 8px; border-bottom:1px solid var(--fx-border); }
+.fx-table td { padding:8px 8px; border-bottom:1px solid var(--fx-track); }
+.fx-table tr:last-child td { border-bottom:none; }
+.fx-btn { background:var(--fx-card2); color:var(--fx-ink); border:1px solid var(--fx-border); border-radius:9px; padding:7px 11px; font-size:12.5px; font-weight:600; cursor:pointer; display:inline-flex; align-items:center; gap:6px; font-family:inherit; }
+.fx-btn:disabled { opacity:.45; cursor:not-allowed; }
+.fx-input { background:var(--fx-card2); color:var(--fx-ink); border:1px solid var(--fx-border); border-radius:9px; padding:7px 10px; font-size:13px; font-family:inherit; color-scheme:dark; }
+.fx[data-theme="light"] .fx-input { color-scheme:light; }
+.fx-island { background:#fff; color:#16212D; border-radius:12px; padding:2px; margin-top:12px; }
+.fx-mono { font-family:'IBM Plex Mono',ui-monospace,Menlo,monospace; font-variant-numeric:tabular-nums; }
+@media (max-width: 860px) { .fx-row { grid-template-columns:1fr; } .fx-lane-name { width:100%; } }
+@media (max-width: 560px) { .fx-kpis { grid-template-columns:1fr; } .fx-body { padding:10px 10px 14px; } .fx-band { padding:10px 12px; } .fx-kpi-val { font-size:24px; } }
+`;
+const fxVar = { ok: "var(--fx-ok)", warn: "var(--fx-warn)", bad: "var(--fx-bad)", info: "var(--fx-info)" };
+const fxNiveau = (pct) => (pct < 20 ? "bad" : pct < 35 ? "warn" : "ok");
+
+function FxPill({ label, pct, level, title }) {
+  return (
+    <span className={`fx-pill ${level}`} title={title}>
+      {label}
+      <small>{Number.isFinite(pct) ? `${pct.toFixed(0)} %` : "—"}</small>
+    </span>
+  );
+}
+
+// Jauge ronde (demi-cercle) : p entre 0 et 1.
+function FxGauge({ p }) {
+  const cx = 100, cy = 100, r = 78;
+  const pp = Math.max(0, Math.min(1, p));
+  const th = Math.PI * (1 - pp);
+  const x = cx + r * Math.cos(th), y = cy - r * Math.sin(th);
+  const col = pp >= 0.8 ? fxVar.ok : pp >= 0.5 ? fxVar.warn : fxVar.bad;
+  return (
+    <svg viewBox="0 0 200 120" style={{ width: "100%", maxWidth: 260, display: "block", margin: "0 auto" }} role="img" aria-label={`Taux de sites normaux ${(pp * 100).toFixed(0)} %`}>
+      <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`} fill="none" stroke="var(--fx-track)" strokeWidth="14" strokeLinecap="round" />
+      {pp > 0 && <path d={`M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${x.toFixed(2)} ${y.toFixed(2)}`} fill="none" stroke={col} strokeWidth="14" strokeLinecap="round" />}
+      <text x={cx} y={cy - 8} textAnchor="middle" fontSize="30" fontWeight="700" fill="var(--fx-ink)" style={{ fontFamily: "'IBM Plex Mono',monospace" }}>{(pp * 100).toFixed(0)}%</text>
+    </svg>
+  );
+}
+
+// Courbe de tendance (SVG simple) : pts = [{ d: "YYYY-MM-DD", v: nombre }].
+function FxTrend({ pts }) {
+  const W = 600, H = 190, L = 44, R = 10, T = 12, B = 24;
+  const max = Math.max(1, ...pts.map((p) => p.v));
+  const xs = (i) => L + (pts.length <= 1 ? 0 : (i * (W - L - R)) / (pts.length - 1));
+  const ys = (v) => T + (H - T - B) * (1 - v / max);
+  const line = pts.map((p, i) => `${i ? "L" : "M"} ${xs(i).toFixed(1)} ${ys(p.v).toFixed(1)}`).join(" ");
+  const area = `${line} L ${xs(pts.length - 1).toFixed(1)} ${H - B} L ${xs(0).toFixed(1)} ${H - B} Z`;
+  const moy = pts.reduce((a, p) => a + p.v, 0) / (pts.length || 1);
+  const ticks = [0, Math.floor((pts.length - 1) / 3), Math.floor((2 * (pts.length - 1)) / 3), pts.length - 1].filter((v, i, a) => a.indexOf(v) === i);
+  const lab = (d) => `${d.slice(8, 10)}/${d.slice(5, 7)}`;
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Ventes des 30 derniers jours">
+      {[0, 0.5, 1].map((f) => (
+        <g key={f}>
+          <line x1={L} x2={W - R} y1={ys(max * f)} y2={ys(max * f)} stroke="var(--fx-track)" strokeWidth="1" />
+          <text x={L - 6} y={ys(max * f) + 3} textAnchor="end" fontSize="10" fill="var(--fx-sub)">{fmt(Math.round(max * f))}</text>
+        </g>
+      ))}
+      <line x1={L} x2={W - R} y1={ys(moy)} y2={ys(moy)} stroke="var(--fx-warn)" strokeWidth="1" strokeDasharray="4 4" />
+      <path d={area} fill="var(--fx-info)" opacity="0.16" />
+      <path d={line} fill="none" stroke="var(--fx-info)" strokeWidth="2" strokeLinejoin="round" />
+      {pts.length > 0 && <circle cx={xs(pts.length - 1)} cy={ys(pts[pts.length - 1].v)} r="4" fill="var(--fx-info)" />}
+      {ticks.map((i) => <text key={i} x={xs(i)} y={H - 6} textAnchor={i === 0 ? "start" : i === pts.length - 1 ? "end" : "middle"} fontSize="10" fill="var(--fx-sub)">{lab(pts[i].d)}</text>)}
+    </svg>
+  );
+}
+
+function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements, canManage, truckAssignments, onOpenSite, settings, userName, theme, onToggleTheme, productStocks }) {
   // Filtre par date : par défaut, aujourd'hui (données en direct). En choisissant une date
   // passée, tout le tableau de bord se recalcule comme s'il était "arrêté" à la fin de cette
   // journée — y compris les chiffres du mois, qui suivent automatiquement le mois de la date
@@ -5295,123 +5403,217 @@ function Dashboard({ sites, movements, inventaires, stockOf, purgeDemoMovements,
       })
     : [];
 
+  // ---- Nouveau tableau de bord : tout est calculé à partir des données déjà chargées ----
+  const actifs = rows.filter((r) => r.active !== false);
+  const fixes = actifs.filter((r) => !r.isMobile);
+  const camionsActifs = actifs.filter((r) => r.isMobile);
+  const actifIds = new Set(actifs.map((r) => r.id));
+  const dayMovs = movements.filter((m) => m.date === viewDate && (m.product || "gasoil") === "gasoil" && actifIds.has(m.siteId));
+  const ventesJour = sumQty(dayMovs, ["sortie"]);
+  const receptionsJour = sumQty(dayMovs, ["reception"]);
+  const sitesAvecReceptionJour = new Set(dayMovs.filter((m) => m.type === "reception").map((m) => m.siteId));
+  const ecartJour = actifs.reduce((a, r) => a + gainPerteMois(r, movements, inventaires, viewDate, viewDate).ecartCumule, 0);
+  const jaugesJour = actifs.filter((r) => inventaires.some((i) => i.siteId === r.id && (i.product || "gasoil") === "gasoil" && i.date === viewDate)).length;
+  const stockGasoil = actifs.reduce((a, r) => a + r.stock, 0);
+  const capaGasoil = actifs.reduce((a, r) => a + (r.capacity || 0), 0);
+  const stockLub = LUBRICANTS.map((l) => {
+    let total = 0, cap = 0;
+    LUBRICANT_SITE_IDS.forEach((sid) => {
+      const ps = (productStocks || []).find((p) => p.siteId === sid && p.product === l.id);
+      if (!ps) return;
+      const inv = pickLatestInv(inventaires.filter((i) => i.siteId === sid && (i.product || "gasoil") === l.id && i.date <= viewDate));
+      total += inv ? inv.stockPhysique : anchoredStock(sid, ps.stockInitial, movements, inventaires, l.id, viewDate, true);
+      cap += ps.capacity || 0;
+    });
+    return { id: l.id, label: l.label, total, cap };
+  }).filter((x) => x.cap > 0);
+  const pillsOf = (r) => {
+    const gas = { key: "go", label: "GO", pct: r.pct, level: sitesAvecReceptionJour.has(r.id) && r.status !== "danger" ? "info" : fxNiveau(r.pct), title: `Gasoil : ${fmt(r.stock)} / ${fmt(r.capacity)} L` };
+    const lubs = [];
+    if (!r.isMobile && LUBRICANT_SITE_IDS.includes(r.id)) {
+      LUBRICANTS.forEach((l) => {
+        const ps = (productStocks || []).find((p) => p.siteId === r.id && p.product === l.id);
+        if (!ps || !ps.capacity) return;
+        const inv = pickLatestInv(inventaires.filter((i) => i.siteId === r.id && (i.product || "gasoil") === l.id && i.date <= viewDate));
+        const st = inv ? inv.stockPhysique : anchoredStock(r.id, ps.stockInitial, movements, inventaires, l.id, viewDate, true);
+        const pct = (st / ps.capacity) * 100;
+        const recu = movements.some((m) => m.siteId === r.id && m.date === viewDate && m.type === "reception" && m.product === l.id);
+        lubs.push({ key: l.id, label: lubLabel(r.id, l.id, productStocks), pct, level: recu && pct >= 20 ? "info" : fxNiveau(pct), title: `${lubLabel(r.id, l.id, productStocks)} : ${fmt(st)} / ${fmt(ps.capacity)} L` });
+      });
+    }
+    return [gas, ...lubs];
+  };
+  const normaux = actifs.filter((r) => r.status === "ok").length;
+  const tauxNormal = actifs.length ? normaux / actifs.length : 0;
+  // Tendance : ventes (type « sortie », gasoil) des 30 derniers jours jusqu'à la date affichée.
+  const ventesParJour = {};
+  movements.forEach((m) => { if (m.type === "sortie" && (m.product || "gasoil") === "gasoil" && actifIds.has(m.siteId)) ventesParJour[m.date] = (ventesParJour[m.date] || 0) + m.quantity; });
+  const tendance = [];
+  { const fin = new Date(`${viewDate}T12:00:00`); for (let k = 29; k >= 0; k--) { const d = new Date(fin); d.setDate(d.getDate() - k); const ds = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; tendance.push({ d: ds, v: ventesParJour[ds] || 0 }); } }
+  const ventesMoisParSite = fixes.map((r) => ({ id: r.id, name: r.name, v: movements.filter((m) => m.siteId === r.id && m.type === "sortie" && (m.product || "gasoil") === "gasoil" && m.date.startsWith(month) && m.date <= viewDate).reduce((a, m) => a + m.quantity, 0) })).sort((x, y) => y.v - x.v);
+  const maxVenteSite = Math.max(1, ...ventesMoisParSite.map((x) => x.v));
+  // À surveiller
+  const objectif = Number(settings?.objectifFreinte) || 3;
+  const aSurveiller = [];
+  actifs.forEach((r) => {
+    if (r.status === "danger") aSurveiller.push({ sev: 2, t: `${r.name} — stock critique (${r.pct.toFixed(0)} % de la capacité)` });
+    else if (r.status === "warning") aSurveiller.push({ sev: 1, t: `${r.name} — stock bas (${r.pct.toFixed(0)} % de la capacité)` });
+  });
+  ecartActifs.forEach((r) => {
+    const v = movements.filter((m) => m.siteId === r.site.id && m.type === "sortie" && (m.product || "gasoil") === "gasoil" && m.date.startsWith(month) && m.date <= viewDate).reduce((a, m) => a + m.quantity, 0);
+    if (v > 0 && r.daysWithJauge > 0) {
+      const permille = (Math.abs(r.ecartCumule) / v) * 1000;
+      if (permille > objectif) aSurveiller.push({ sev: 2, t: `${r.site.name} — ${r.ecartCumule < 0 ? "perte" : "gain"} du mois ${r.ecartCumule > 0 ? "+" : "−"}${fmt(Math.abs(r.ecartCumule))} L (${permille.toFixed(1)} ‰, objectif ${objectif} ‰)` });
+    }
+  });
+  if (horsObjectif > 0) aSurveiller.push({ sev: 2, t: `${horsObjectif} site(s) hors objectif de freinte au dernier inventaire` });
+  const sansMesure = {};
+  movements.forEach((m) => { if (m.date.startsWith(month) && m.date <= viewDate && receptionSansMesureSite(m) && actifIds.has(m.siteId)) sansMesure[m.siteId] = (sansMesure[m.siteId] || 0) + 1; });
+  Object.entries(sansMesure).forEach(([sid, n]) => { const st = sites.find((x) => x.id === sid); aSurveiller.push({ sev: 1, t: `${st?.name || sid} — ${n} réception(s) sans température/densité prélevées sur site` }); });
+  if (isLive && missingSites.length > 0) aSurveiller.push({ sev: 1, t: `Saisie du ${yesterdayStr} manquante : ${missingSites.map((x) => x.name).join(", ")}` });
+  aSurveiller.sort((x, y) => y.sev - x.sev);
+  const signe = (n) => `${n > 0 ? "+" : n < 0 ? "−" : ""}${fmt(Math.abs(n))}`;
+  const couleurEcart = (n) => (n < 0 ? "var(--fx-bad)" : n > 0 ? "var(--fx-ok)" : "var(--fx-ink)");
+  const fxTypeColor = { reception: "var(--fx-ok)", sortie: "var(--fx-ink)", sortie_camion: "var(--fx-warn)", retour_camion: "var(--fx-ok)", retour_cuve_camion: "var(--fx-bad)", ajustement: "var(--fx-info)", transfert: "var(--fx-info)", transfert_camion: "var(--fx-info)" };
+  const dateLongue = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const shiftDay = (delta) => { const d = new Date(`${viewDate}T00:00:00`); d.setDate(d.getDate() + delta); setViewDate(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`); };
+
   return (
     <div className="somip-fade">
-      <SitesHero sites={sites} movements={movements} inventaires={inventaires} canManage={canManage} onOpenSite={onOpenSite} />
-      <p style={{ marginTop: -8, marginBottom: 14, fontSize: 13, color: C.sub }}>
-        Vos données sont sauvegardées automatiquement et restent disponibles après fermeture ou actualisation de la page.
-        Les capacités et stocks initiaux des sites restent des valeurs à vérifier/ajuster depuis la page Sites.
-      </p>
-
-      <div className="somip-no-print" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-        <button className="somip-btn somip-btn-ghost" style={{ padding: "7px 10px" }} title="Jour précédent" onClick={() => { const d = new Date(`${viewDate}T00:00:00`); d.setDate(d.getDate() - 1); setViewDate(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`); }}>
-          <ChevronsLeft size={14} />
-        </button>
-        <input type="date" className="somip-input" style={{ width: "auto", maxWidth: 170 }} value={viewDate} max={today} onChange={(e) => setViewDate(e.target.value)} />
-        <button className="somip-btn somip-btn-ghost" style={{ padding: "7px 10px" }} title="Jour suivant" disabled={isLive} onClick={() => { const d = new Date(`${viewDate}T00:00:00`); d.setDate(d.getDate() + 1); setViewDate(`${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`); }}>
-          <ChevronsRight size={14} />
-        </button>
-        {!isLive && (
-          <button className="somip-btn somip-btn-primary" style={{ padding: "7px 12px", fontSize: 12.5 }} onClick={() => setViewDate(today)}>
-            Revenir à aujourd'hui
-          </button>
-        )}
-        {!isLive && (
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: C.orange, background: `${C.orange}14`, padding: "6px 12px", borderRadius: 20 }}>
-            <Clock size={13} /> Données arrêtées au {viewDate} — pas en direct
-          </span>
-        )}
-      </div>
-
-      {missingSites.length > 0 && (
-        <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, borderLeft: `3px solid ${C.danger}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-            <AlertTriangle size={16} color={C.danger} />
-            <strong style={{ fontSize: 13, color: C.ink }}>Saisie du {yesterdayStr} manquante</strong>
+      <style>{FX_CSS}</style>
+      <div className="fx" data-theme={theme === "light" ? "light" : "dark"} data-testid="fx-dashboard">
+        <div className="fx-hatch" />
+        <div className="fx-band">
+          {settings?.logoUrl
+            ? <img src={settings.logoUrl} alt="SOMIP" style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover" }} />
+            : <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--fx-info)", display: "flex", alignItems: "center", justifyContent: "center" }}><Fuel size={19} color="#fff" /></div>}
+          <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, letterSpacing: ".04em" }}>SOMIP STOCK</div>
+            <div style={{ fontSize: 11, color: "var(--fx-sub)" }}>Tableau de bord · Zone Sud-Est</div>
           </div>
-          <p style={{ margin: 0, fontSize: 12.5, color: C.sub }}>
-            Stock fin non saisi pour : <strong style={{ color: C.ink }}>{missingSites.map((s) => s.name).join(", ")}</strong>.
-          </p>
+          <div style={{ fontSize: 12, color: "var(--fx-sub)", textAlign: "right" }}>
+            <div style={{ textTransform: "capitalize" }}>{dateLongue}</div>
+            <div style={{ color: "var(--fx-ink)", fontWeight: 600 }}>{userName || ""}</div>
+          </div>
+          <button type="button" className="fx-btn" onClick={onToggleTheme} title={theme === "light" ? "Passer en mode sombre" : "Passer en mode clair"} aria-label="Basculer mode clair / sombre" data-testid="theme-toggle">
+            {theme === "light" ? <Moon size={15} /> : <Sun size={15} />}{theme === "light" ? "Sombre" : "Clair"}
+          </button>
         </div>
-      )}
 
-      {demoCount > 0 && canManage && (
-        <div className="somip-panel" style={{ padding: "12px 16px", marginBottom: 18, display: "flex", alignItems: "center", justifyContent: "space-between", borderLeft: `3px solid ${C.warning}`, flexWrap: "wrap", gap: 10 }}>
-          <span style={{ fontSize: 12.5, color: C.sub }}>
-            <strong style={{ color: C.ink }}>{demoCount} écriture(s)</strong> marquée(s) <DemoBadge /> sont encore présentes (jeu d'exemple de la V1).
-          </span>
-          <ConfirmTextButton onConfirm={purgeDemoMovements} label="Supprimer les écritures d'exemple" confirmLabel="Confirmer la suppression ?" className="somip-btn somip-btn-ghost" />
-        </div>
-      )}
+        <div className="fx-body">
+          <div className="somip-no-print" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+            <button className="fx-btn" title="Jour précédent" onClick={() => shiftDay(-1)}><ChevronsLeft size={14} /></button>
+            <input type="date" className="fx-input" value={viewDate} max={today} onChange={(e) => e.target.value && setViewDate(e.target.value)} />
+            <button className="fx-btn" title="Jour suivant" disabled={isLive} onClick={() => shiftDay(1)}><ChevronsRight size={14} /></button>
+            {!isLive && <button className="fx-btn" onClick={() => setViewDate(today)}>Revenir à aujourd'hui</button>}
+            {!isLive && <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 700, color: "var(--fx-warn)" }}><Clock size={13} /> Données arrêtées au {viewDate} — pas en direct</span>}
+          </div>
 
-      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 22 }}>
-        <StatCard label={isLive ? "Stock total réseau" : `Stock réseau au ${viewDate}`} value={fmt(totalStock)} unit="L" accent={C.blue} icon={Fuel} />
-        <StatCard label="Capacité totale" value={fmt(totalCapacity)} unit="L" accent={C.sub} icon={Factory} />
-        <StatCard label={`Réceptions (${month})`} value={fmt(receptionsMonth)} unit="L" accent={C.success} icon={ArrowDownCircle} />
-        <StatCard label={`Sorties (${month})`} value={fmt(sortiesMonth)} unit="L" accent={C.orange} icon={ArrowUpCircle} />
-        <StatCard label="Sites en alerte" value={alerts.length} unit={`/ ${rows.length}`} accent={C.danger} icon={AlertTriangle} />
-        <StatCard label="Sites hors objectif freinte" value={horsObjectif} unit={`/ ${rows.length}`} accent={C.warning} icon={ClipboardList} />
-        <StatCard label={`Gain/Perte réseau (${month})`} value={`${ecartReseauTotal >= 0 ? "+" : ""}${fmt(ecartReseauTotal)}`} unit="L" accent={ecartReseauTotal < 0 ? C.danger : ecartReseauTotal > 0 ? C.success : C.sub} icon={TrendingDown} />
-      </div>
-      {aDesCamions && (
-        <div data-testid="gp-detail" style={{ fontSize: 12.5, color: C.sub, margin: "-6px 0 14px 2px" }}>
-          Gain/Perte réseau = sites fixes <strong style={{ color: C.ink }}>{ecartSitesFixes >= 0 ? "+" : ""}{fmt(ecartSitesFixes)} L</strong> + camions laitiers <strong style={{ color: C.ink }}>{ecartCamions >= 0 ? "+" : ""}{fmt(ecartCamions)} L</strong> (sites et camions actifs, comme dans le Tableau de bord par site).
-        </div>
-      )}
-      {canManage && <DiagnosticGainPerte rows={ecartRows} ancienTotal={ecartReseauAncien} nouveauTotal={ecartReseauTotal} month={month} viewDate={viewDate} />}
+          <div className="fx-kpis">
+            <div className="fx-card"><p className="fx-title">Stock gasoil{isLive ? "" : ` · ${viewDate}`}</p><div className="fx-kpi-val">{fmt(stockGasoil)} <span style={{ fontSize: 13, color: "var(--fx-sub)" }}>L</span></div><div className="fx-kpi-sub">{capaGasoil ? `${((stockGasoil / capaGasoil) * 100).toFixed(0)} % de la capacité (${fmt(capaGasoil)} L)` : "—"}</div></div>
+            {stockLub.map((l) => (
+              <div className="fx-card" key={l.id}><p className="fx-title">Stock {l.label}</p><div className="fx-kpi-val">{fmt(l.total)} <span style={{ fontSize: 13, color: "var(--fx-sub)" }}>L</span></div><div className="fx-kpi-sub">{((l.total / l.cap) * 100).toFixed(0)} % de {fmt(l.cap)} L</div></div>
+            ))}
+            <div className="fx-card"><p className="fx-title">Ventes du jour</p><div className="fx-kpi-val">{fmt(ventesJour)} <span style={{ fontSize: 13, color: "var(--fx-sub)" }}>L</span></div><div className="fx-kpi-sub">Mois : {fmt(sortiesMonth)} L (ventes + chargements laitiers)</div></div>
+            <div className="fx-card"><p className="fx-title">Réceptions du jour</p><div className="fx-kpi-val" style={{ color: receptionsJour > 0 ? "var(--fx-info)" : undefined }}>{fmt(receptionsJour)} <span style={{ fontSize: 13, color: "var(--fx-sub)" }}>L</span></div><div className="fx-kpi-sub">Mois : {fmt(receptionsMonth)} L</div></div>
+            <div className="fx-card"><p className="fx-title">Écart du jour</p><div className="fx-kpi-val" style={{ color: jaugesJour ? couleurEcart(ecartJour) : "var(--fx-sub)" }}>{jaugesJour ? signe(ecartJour) : "—"} <span style={{ fontSize: 13, color: "var(--fx-sub)" }}>L</span></div><div className="fx-kpi-sub">{jaugesJour} jauge(s) saisie(s) sur {actifs.length}</div></div>
+            <div className="fx-card"><p className="fx-title">Gain/Perte réseau · mois</p><div className="fx-kpi-val" style={{ color: couleurEcart(ecartReseauTotal) }}>{signe(ecartReseauTotal)} <span style={{ fontSize: 13, color: "var(--fx-sub)" }}>L</span></div>
+              <div className="fx-kpi-sub" data-testid="gp-detail">{aDesCamions ? `Sites fixes ${signe(ecartSitesFixes)} L + laitiers ${signe(ecartCamions)} L` : `${month}`}</div></div>
+          </div>
 
-      <div style={{ display: "flex", gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><Fuel size={15} color={C.blue} />Niveau de stock par site{!isLive ? ` — au ${viewDate}` : ""}</h3>
-          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-            {rows.map((r) => (
-              <div key={r.id}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5, fontSize: 12.5 }}>
-                  <span onClick={onOpenSite ? () => onOpenSite(r.id) : undefined} title={onOpenSite ? "Ouvrir le tableau de bord de ce site" : undefined} style={{ fontWeight: 600, cursor: onOpenSite ? "pointer" : "default", color: onOpenSite ? C.blue : undefined }}>{r.name} <span style={{ color: C.sub, fontWeight: 500 }}>({r.code})</span>{onOpenSite ? " ›" : ""}</span>
-                  <span className="somip-mono" style={{ color: C.sub }}>{fmt(r.stock)} / {fmt(r.capacity)} L</span>
+          <div className="fx-row">
+            <div className="fx-card">
+              <p className="fx-title"><span>Sites</span><span>niveau par produit</span></p>
+              {fixes.map((r) => (
+                <div className="fx-lane" key={r.id}>
+                  <span className="fx-lane-name" onClick={onOpenSite ? () => onOpenSite(r.id) : undefined} style={{ cursor: onOpenSite ? "pointer" : "default" }} title={onOpenSite ? "Ouvrir le tableau de bord de ce site" : undefined}>{r.name}</span>
+                  <div className="fx-pills">{pillsOf(r).map((pl) => <FxPill key={pl.key} {...pl} />)}</div>
                 </div>
-                <GaugeBar pct={r.pct} color={statusColor[r.status]} />
+              ))}
+              {camionsActifs.length > 0 && (
+                <div className="fx-lane">
+                  <span className="fx-lane-name">Camions laitiers</span>
+                  <div className="fx-pills">{camionsActifs.map((r) => <FxPill key={r.id} label={r.code || r.name} pct={r.pct} level={sitesAvecReceptionJour.has(r.id) && r.status !== "danger" ? "info" : fxNiveau(r.pct)} title={`${r.name} : ${fmt(r.stock)} / ${fmt(r.capacity)} L`} />)}</div>
+                </div>
+              )}
+              <div className="fx-legend">
+                <span><i className="fx-dot" style={{ background: "var(--fx-ok)" }} />Normal</span>
+                <span><i className="fx-dot" style={{ background: "var(--fx-warn)" }} />Niveau bas (&lt; 35 %)</span>
+                <span><i className="fx-dot" style={{ background: "var(--fx-bad)" }} />Critique (&lt; 20 %)</span>
+                <span><i className="fx-dot" style={{ background: "var(--fx-info)" }} />Réception du jour</span>
+              </div>
+            </div>
+            <div className="fx-card">
+              <p className="fx-title">Taux global</p>
+              <FxGauge p={tauxNormal} />
+              <div className="fx-kpi-sub" style={{ textAlign: "center", marginTop: 6 }}>{normaux} de {actifs.length} sites et camions en situation normale</div>
+            </div>
+          </div>
+
+          <div className="fx-row">
+            <div className="fx-card">
+              <p className="fx-title"><span>Ventes — 30 derniers jours</span><span>L / jour</span></p>
+              <FxTrend pts={tendance} />
+              <div className="fx-legend"><span><i className="fx-dot" style={{ background: "var(--fx-info)" }} />Ventes du jour</span><span><i className="fx-dot" style={{ background: "var(--fx-warn)" }} />Moyenne</span></div>
+            </div>
+            <div className="fx-card">
+              <p className="fx-title"><span>Ventes du mois par site</span><span>{month}</span></p>
+              {ventesMoisParSite.map((x) => (
+                <div className="fx-bar-row" key={x.id}>
+                  <span style={{ width: 96, flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.name}</span>
+                  <div className="fx-bar-track"><div className="fx-bar-fill" style={{ width: `${(x.v / maxVenteSite) * 100}%` }} /></div>
+                  <span className="fx-mono" style={{ width: 70, textAlign: "right" }}>{fmt(x.v)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="fx-card" style={{ marginBottom: 12 }} data-testid="fx-watch">
+            <p className="fx-title"><span>À surveiller</span><span>{aSurveiller.length ? `${aSurveiller.length} alerte(s)` : ""}</span></p>
+            {aSurveiller.length === 0 && <div style={{ fontSize: 13, color: "var(--fx-ok)" }}>Rien à signaler : tout est en situation normale.</div>}
+            {aSurveiller.slice(0, 8).map((a, i) => (
+              <div key={i} className={`fx-alert ${a.sev === 2 ? "bad" : "warn"}`}>
+                <AlertTriangle size={15} color={a.sev === 2 ? "var(--fx-bad)" : "var(--fx-warn)"} style={{ flexShrink: 0, marginTop: 1 }} />
+                <span>{a.t}</span>
               </div>
             ))}
+            {aSurveiller.length > 8 && <div style={{ fontSize: 12, color: "var(--fx-sub)" }}>+ {aSurveiller.length - 8} autre(s)</div>}
           </div>
-        </div>
 
-        <div className="somip-panel" style={{ flex: "1 1 380px", padding: 18, minHeight: 320 }}>
-          <h3 style={{ margin: "0 0 14px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><TrendingUp size={15} color={C.blue} />{isLive ? "Stock actuel par site (L)" : `Stock au ${viewDate} par site (L)`}</h3>
-          <ResponsiveContainer width="100%" height={260}>
-            <BarChart data={rows} margin={{ top: 4, right: 8, left: -18, bottom: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" vertical={false} />
-              <XAxis dataKey="code" tick={{ fontSize: 11, fill: C.sub }} axisLine={{ stroke: C.border }} tickLine={false} />
-              <YAxis tick={{ fontSize: 11, fill: C.sub }} axisLine={false} tickLine={false} />
-              <Tooltip formatter={(v) => [`${fmt(v)} L`, "Stock actuel"]} labelFormatter={(l, p) => (p && p[0] ? p[0].payload.name : l)} contentStyle={{ fontSize: 12.5, borderRadius: 8, border: `1px solid ${C.border}` }} />
-              <Bar dataKey="stock" radius={[5, 5, 0, 0]}>
-                {rows.map((r) => <Cell key={r.id} fill={statusColor[r.status]} />)}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+          <div className="fx-card">
+            <p className="fx-title"><span>{isLive ? "Derniers mouvements" : `Mouvements du ${viewDate}`}</span></p>
+            <div style={{ overflowX: "auto" }}>
+              <table className="fx-table">
+                <thead><tr><th>Date</th><th>Site</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
+                <tbody>
+                  {recent.length === 0 && <tr><td colSpan={4} style={{ color: "var(--fx-sub)", textAlign: "center", padding: 16 }}>{isLive ? "Aucun mouvement enregistré." : `Aucun mouvement enregistré le ${viewDate}.`}</td></tr>}
+                  {recent.map((m) => {
+                    const site = sites.find((s) => s.id === m.siteId);
+                    const meta = TYPE_META[m.type];
+                    return (
+                      <tr key={m.id}>
+                        <td className="fx-mono">{m.date}</td>
+                        <td>{site?.name || "—"}</td>
+                        <td style={{ color: fxTypeColor[m.type] || "var(--fx-ink)", fontWeight: 600 }}>{meta?.label || m.type}{m.isDemo && <DemoBadge />}</td>
+                        <td className="fx-mono" style={{ textAlign: "right", color: fxTypeColor[m.type] || "var(--fx-ink)", fontWeight: 600 }}>{meta?.sign} {fmt(m.quantity)} L</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
 
-      <div className="somip-panel" style={{ marginTop: 18, padding: 18 }}>
-        <h3 style={{ margin: "0 0 12px", fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}><ClipboardList size={15} color={C.blue} />{isLive ? "Derniers mouvements" : `Mouvements du ${viewDate}`}</h3>
-        <table className="somip-table">
-          <thead><tr><th>Date</th><th>Site</th><th>Type</th><th style={{ textAlign: "right" }}>Quantité</th></tr></thead>
-          <tbody>
-            {recent.length === 0 && <EmptyRow colSpan={4} text={isLive ? "Aucun mouvement enregistré." : `Aucun mouvement enregistré le ${viewDate}.`} />}
-            {recent.map((m) => {
-              const site = sites.find((s) => s.id === m.siteId);
-              const meta = TYPE_META[m.type];
-              return (
-                <tr key={m.id}>
-                  <td className="somip-mono">{m.date}</td>
-                  <td>{site?.name || "—"}</td>
-                  <td><Badge color={meta.color}>{meta.label}</Badge>{m.isDemo && <DemoBadge />}</td>
-                  <td className="somip-mono" style={{ textAlign: "right", color: meta.color, fontWeight: 600 }}>{meta.sign} {fmt(m.quantity)} L</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+          {demoCount > 0 && canManage && (
+            <div className="fx-island" style={{ padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+              <span style={{ fontSize: 12.5, color: C.sub }}>
+                <strong style={{ color: C.ink }}>{demoCount} écriture(s)</strong> marquée(s) <DemoBadge /> sont encore présentes (jeu d'exemple de la V1).
+              </span>
+              <ConfirmTextButton onConfirm={purgeDemoMovements} label="Supprimer les écritures d'exemple" confirmLabel="Confirmer la suppression ?" className="somip-btn somip-btn-ghost" />
+            </div>
+          )}
+          {canManage && <div className="fx-island" style={{ padding: 10 }}><DiagnosticGainPerte rows={ecartRows} ancienTotal={ecartReseauAncien} nouveauTotal={ecartReseauTotal} month={month} viewDate={viewDate} /></div>}
+        </div>
       </div>
     </div>
   );
